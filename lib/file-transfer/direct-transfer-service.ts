@@ -3,6 +3,7 @@ import * as Crypto from "expo-crypto";
 import { File, type Directory } from "expo-file-system";
 import * as Network from "expo-network";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
+import { Platform } from "react-native";
 import type { ZeroconfService } from "react-native-zeroconf";
 import {
   acceptRelayTransferSession,
@@ -29,6 +30,7 @@ import {
 import { getReceivedFilesDirectory } from "./files";
 import { createFrameParser, decodeJsonFrame, encodeChunkFrame, encodeJsonFrame } from "./protocol";
 import type {
+  DirectConnectionMode,
   DiscoveryRecord,
   IncomingTransferOffer,
   ReceiveSession,
@@ -56,6 +58,7 @@ interface SendRuntime {
   server?: {
     close(): void;
   };
+  directConnectionMode: DirectConnectionMode;
   relayUploadStarted: boolean;
   didConnectDirectly: boolean;
 }
@@ -286,13 +289,18 @@ function toRelayAccess(relay: RelayCredentials | null): RelayAccess | null {
   };
 }
 
-function createSenderTransferAccess(manifest: TransferManifest, relay: RelayCredentials | null): SenderTransferAccess {
+function createSenderTransferAccess(
+  manifest: TransferManifest,
+  relay: RelayCredentials | null,
+  directConnectionMode: DirectConnectionMode,
+): SenderTransferAccess {
   return {
     sessionId: manifest.sessionId,
     host: manifest.advertisedHost,
     port: manifest.advertisedPort,
     token: manifest.transferToken,
     certificateFingerprint: manifest.certificateFingerprint,
+    directConnectionMode,
     relay: toRelayAccess(relay),
   };
 }
@@ -300,13 +308,14 @@ function createSenderTransferAccess(manifest: TransferManifest, relay: RelayCred
 function createIncomingTransferOffer(
   manifest: TransferManifest,
   relay: RelayCredentials | null,
+  directConnectionMode: DirectConnectionMode,
 ): IncomingTransferOffer {
   return {
     id: manifest.sessionId,
     senderDeviceName: manifest.deviceName,
     fileCount: manifest.fileCount,
     totalBytes: manifest.totalBytes,
-    sender: createSenderTransferAccess(manifest, relay),
+    sender: createSenderTransferAccess(manifest, relay, directConnectionMode),
     createdAt: manifest.createdAt,
   };
 }
@@ -711,13 +720,22 @@ async function uploadFilesToRelay(runtime: SendRuntime) {
   }
 }
 
-function handleSenderOfferAccepted(runtime: SendRuntime, receiverName: string) {
+function handleSenderOfferAccepted(
+  runtime: SendRuntime,
+  receiverName: string,
+  options: {
+    destroyControlSocket?: boolean;
+  } = {},
+) {
   if (runtime.session.status === "completed" || runtime.session.status === "failed") {
     return;
   }
 
+  const shouldDestroyControlSocket = options.destroyControlSocket ?? true;
   const controlSocket = runtime.controlSocket;
-  runtime.controlSocket = undefined;
+  if (shouldDestroyControlSocket) {
+    runtime.controlSocket = undefined;
+  }
 
   withSendSessionUpdate(runtime, {
     status: "connecting",
@@ -729,18 +747,27 @@ function handleSenderOfferAccepted(runtime: SendRuntime, receiverName: string) {
       detail:
         runtime.session.previewMode && runtime.target.method === "preview"
           ? `${receiverName} accepted. Preparing transfer.`
-          : hasDirectSendPath(runtime)
-            ? `${receiverName} accepted. Waiting for them to connect.`
-            : runtime.session.relay
-              ? `${receiverName} accepted. Preparing relay transfer.`
-              : "Receiver accepted the transfer.",
+          : !shouldDestroyControlSocket
+            ? `${receiverName} accepted. Starting transfer.`
+            : hasDirectSendPath(runtime)
+              ? `${receiverName} accepted. Waiting for them to connect.`
+              : runtime.session.relay
+                ? `${receiverName} accepted. Preparing relay transfer.`
+                : "Receiver accepted the transfer.",
       updatedAt: nowIso(),
     },
   });
 
-  controlSocket?.destroy();
+  if (shouldDestroyControlSocket) {
+    controlSocket?.destroy();
+  }
 
   if (runtime.session.previewMode && runtime.target.method === "preview") {
+    return;
+  }
+
+  if (!shouldDestroyControlSocket) {
+    clearSenderConnectTimer(runtime);
     return;
   }
 
@@ -814,7 +841,11 @@ function startRelayPolling(runtime: SendRuntime) {
 async function notifySenderAccepted(runtime: ReceiveRuntime, offer: IncomingTransferOffer) {
   if (runtime.pendingOfferSocket) {
     const socket = runtime.pendingOfferSocket;
-    runtime.pendingOfferSocket = undefined;
+    const shouldKeepSocket = offer.sender.directConnectionMode === "same-socket";
+
+    if (!shouldKeepSocket) {
+      runtime.pendingOfferSocket = undefined;
+    }
 
     await writeSocket(
       socket,
@@ -823,7 +854,9 @@ async function notifySenderAccepted(runtime: ReceiveRuntime, offer: IncomingTran
         receiverDeviceName: runtime.session.discoveryRecord.deviceName,
       }),
     ).finally(() => {
-      socket.destroy();
+      if (!shouldKeepSocket) {
+        socket.destroy();
+      }
     });
 
     return true;
@@ -1008,6 +1041,10 @@ function canAttemptDirectTransfer(offer: IncomingTransferOffer, tcpSocket: TcpSo
   return Boolean(tcpSocket && offer.sender.port > 0 && offer.sender.host !== "0.0.0.0" && offer.sender.token.trim());
 }
 
+function canUsePendingOfferSocketForDirectTransfer(runtime: ReceiveRuntime, offer: IncomingTransferOffer) {
+  return offer.sender.directConnectionMode === "same-socket" && Boolean(runtime.pendingOfferSocket);
+}
+
 async function receiveRelayTransfer({
   offer,
   receiverDeviceName,
@@ -1117,26 +1154,19 @@ async function receiveRelayTransfer({
   }
 }
 
-async function receiveDirectTransfer({
+async function receiveTransferFromSocket({
   offer,
-  deviceName,
-  tcpSocket,
+  socket,
   onProgress,
+  directTarget,
+  start,
 }: {
   offer: IncomingTransferOffer;
-  deviceName: string;
-  tcpSocket: TcpSocketLike;
+  socket: TransferSocket;
   onProgress?: (progress: TransferProgress) => void;
+  directTarget: string;
+  start?: () => Promise<void>;
 }) {
-  const directTarget = `${offer.sender.host}:${offer.sender.port}`;
-  const socket = tcpSocket.connectTLS({
-    host: offer.sender.host,
-    port: offer.sender.port,
-    ca: LOCAL_TRANSFER_CERTIFICATE_ASSET,
-    tlsCheckValidity: false,
-    interface: "wifi",
-  });
-
   await activateKeepAwakeAsync(LOCAL_TRANSFER_KEEP_AWAKE_TAG).catch(() => {});
 
   return await new Promise<TransferResult>((resolve, reject) => {
@@ -1299,23 +1329,15 @@ async function receiveDirectTransfer({
       }
     });
 
-    socket.on("secureConnect", () => {
-      void writeSocket(
-        socket,
-        encodeJsonFrame({
-          kind: "hello",
-          sessionId: offer.sender.sessionId,
-          transferToken: offer.sender.token,
-          deviceName,
-        }),
-      ).catch((error) => {
+    if (start) {
+      void start().catch((error) => {
         fail(
           error instanceof Error
             ? new DirectTransferFallbackError(error.message)
             : new DirectTransferFallbackError("Unable to start transfer session."),
         );
       });
-    });
+    }
     socket.on("data", (chunk) => {
       parser(chunk as Uint8Array | Buffer | string);
     });
@@ -1326,9 +1348,7 @@ async function receiveDirectTransfer({
       });
       const baseError = error instanceof Error ? error : new Error("Transfer connection failed.");
       fail(
-        didReceiveDirectFrame
-          ? baseError
-          : new DirectTransferFallbackError(`${baseError.message} (${directTarget})`),
+        didReceiveDirectFrame ? baseError : new DirectTransferFallbackError(`${baseError.message} (${directTarget})`),
       );
     });
     socket.on("close", () => {
@@ -1343,6 +1363,71 @@ async function receiveDirectTransfer({
   });
 }
 
+async function receiveDirectTransfer({
+  offer,
+  deviceName,
+  tcpSocket,
+  onProgress,
+}: {
+  offer: IncomingTransferOffer;
+  deviceName: string;
+  tcpSocket: TcpSocketLike;
+  onProgress?: (progress: TransferProgress) => void;
+}) {
+  const directTarget = `${offer.sender.host}:${offer.sender.port}`;
+  const socket = tcpSocket.connectTLS({
+    host: offer.sender.host,
+    port: offer.sender.port,
+    ca: LOCAL_TRANSFER_CERTIFICATE_ASSET,
+    tlsCheckValidity: false,
+    interface: "wifi",
+  });
+
+  return receiveTransferFromSocket({
+    offer,
+    socket,
+    onProgress,
+    directTarget,
+    start: () =>
+      new Promise<void>((resolve, reject) => {
+        socket.on("secureConnect", () => {
+          void writeSocket(
+            socket,
+            encodeJsonFrame({
+              kind: "hello",
+              sessionId: offer.sender.sessionId,
+              transferToken: offer.sender.token,
+              deviceName,
+            }),
+          )
+            .then(() => {
+              resolve();
+            })
+            .catch((error) => {
+              reject(error);
+            });
+        });
+      }),
+  });
+}
+
+async function receivePendingOfferSocketTransfer({
+  offer,
+  socket,
+  onProgress,
+}: {
+  offer: IncomingTransferOffer;
+  socket: TransferSocket;
+  onProgress?: (progress: TransferProgress) => void;
+}) {
+  return receiveTransferFromSocket({
+    offer,
+    socket,
+    onProgress,
+    directTarget: `${offer.sender.host}:${offer.sender.port} (accepted control socket)`,
+  });
+}
+
 async function runReceiveTransfer(runtime: ReceiveRuntime) {
   const offer = runtime.session.incomingOffer;
   if (!offer) {
@@ -1351,10 +1436,17 @@ async function runReceiveTransfer(runtime: ReceiveRuntime) {
 
   const tcpSocket = await loadTcpSocket();
   const canUsePreview = runtime.session.previewMode && activeSendRuntimes.has(offer.id);
+  const canUsePendingOfferSocketDirect = canUsePendingOfferSocketForDirectTransfer(runtime, offer);
   const canUseDirect = canAttemptDirectTransfer(offer, tcpSocket);
+  const updateProgress = (progress: TransferProgress) => {
+    withReceiveSessionUpdate(runtime, {
+      status: progress.phase === "transferring" ? "transferring" : "connecting",
+      progress,
+    });
+  };
 
   if (offer.sender.relay) {
-    if (canUsePreview || canUseDirect) {
+    if (canUsePreview || canUsePendingOfferSocketDirect || canUseDirect) {
       void ensureRelayReceiverAccepted({
         offer,
         receiverDeviceName: runtime.session.discoveryRecord.deviceName,
@@ -1399,18 +1491,12 @@ async function runReceiveTransfer(runtime: ReceiveRuntime) {
     return runPreviewTransfer(senderRuntime, runtime);
   }
 
-  if (canUseDirect) {
+  if (canUsePendingOfferSocketDirect && runtime.pendingOfferSocket) {
     try {
-      return await receiveDirectTransfer({
+      return await receivePendingOfferSocketTransfer({
         offer,
-        deviceName: runtime.session.discoveryRecord.deviceName,
-        tcpSocket: tcpSocket as TcpSocketLike,
-        onProgress: (progress) => {
-          withReceiveSessionUpdate(runtime, {
-            status: progress.phase === "transferring" ? "transferring" : "connecting",
-            progress,
-          });
-        },
+        socket: runtime.pendingOfferSocket,
+        onProgress: updateProgress,
       });
     } catch (error) {
       if (offer.sender.relay && error instanceof DirectTransferFallbackError) {
@@ -1430,12 +1516,41 @@ async function runReceiveTransfer(runtime: ReceiveRuntime) {
         return receiveRelayTransfer({
           offer,
           receiverDeviceName: runtime.session.discoveryRecord.deviceName,
-          onProgress: (progress) => {
-            withReceiveSessionUpdate(runtime, {
-              status: progress.phase === "transferring" ? "transferring" : "connecting",
-              progress,
-            });
+          onProgress: updateProgress,
+        });
+      }
+
+      throw error;
+    }
+  }
+
+  if (canUseDirect) {
+    try {
+      return await receiveDirectTransfer({
+        offer,
+        deviceName: runtime.session.discoveryRecord.deviceName,
+        tcpSocket: tcpSocket as TcpSocketLike,
+        onProgress: updateProgress,
+      });
+    } catch (error) {
+      if (offer.sender.relay && error instanceof DirectTransferFallbackError) {
+        withReceiveSessionUpdate(runtime, {
+          status: "connecting",
+          progress: {
+            phase: "connecting",
+            totalBytes: offer.totalBytes,
+            bytesTransferred: 0,
+            currentFileName: null,
+            speedBytesPerSecond: 0,
+            detail: "Direct transfer unavailable. Switching to relay.",
+            updatedAt: nowIso(),
           },
+        });
+
+        return receiveRelayTransfer({
+          offer,
+          receiverDeviceName: runtime.session.discoveryRecord.deviceName,
+          onProgress: updateProgress,
         });
       }
 
@@ -1447,12 +1562,7 @@ async function runReceiveTransfer(runtime: ReceiveRuntime) {
     return receiveRelayTransfer({
       offer,
       receiverDeviceName: runtime.session.discoveryRecord.deviceName,
-      onProgress: (progress) => {
-        withReceiveSessionUpdate(runtime, {
-          status: progress.phase === "transferring" ? "transferring" : "connecting",
-          progress,
-        });
-      },
+      onProgress: updateProgress,
     });
   }
 
@@ -1515,7 +1625,18 @@ async function sendOfferOverControlSocket(
     }
 
     if (message.kind === "accepted") {
-      handleSenderOfferAccepted(runtime, getPeerName(message.receiverDeviceName ?? target.deviceName));
+      const receiverName = getPeerName(message.receiverDeviceName ?? target.deviceName);
+
+      if (runtime.directConnectionMode === "same-socket") {
+        runtime.didConnectDirectly = true;
+        handleSenderOfferAccepted(runtime, receiverName, {
+          destroyControlSocket: false,
+        });
+        void streamFilesToSocket(runtime, socket);
+        return;
+      }
+
+      handleSenderOfferAccepted(runtime, receiverName);
       return;
     }
 
@@ -1575,6 +1696,8 @@ export async function startSendingTransfer({
   const deviceIp = safeDeviceIp(await Network.getIpAddressAsync().catch(() => null));
   const tcpSocket = await loadTcpSocket();
   const previewTarget = target.method === "preview" && activeReceiveRuntimes.has(target.sessionId);
+  const directConnectionMode: DirectConnectionMode =
+    !previewTarget && Platform.OS === "ios" ? "same-socket" : "reverse-connect";
   let relay: RelayCredentials | null = null;
 
   if (!tcpSocket && !previewTarget) {
@@ -1715,6 +1838,7 @@ export async function startSendingTransfer({
     files,
     target,
     updateSession,
+    directConnectionMode,
     relayUploadStarted: false,
     didConnectDirectly: false,
     ...(resolvedPort && server
@@ -1732,9 +1856,9 @@ export async function startSendingTransfer({
   startRelayPolling(runtime);
   updateSession?.(runtime.session);
 
-  const offer = createIncomingTransferOffer(manifest, relay);
+  const offer = createIncomingTransferOffer(manifest, relay, directConnectionMode);
 
-  if (!resolvedPort && !relay && !previewTarget) {
+  if (!resolvedPort && !relay && !previewTarget && directConnectionMode !== "same-socket") {
     failSendSession(runtime, "Unable to prepare this transfer.");
     return runtime.session;
   }
@@ -1816,6 +1940,10 @@ export async function startReceivingAvailability({
         let registeredOfferId: string | null = null;
         const parser = createFrameParser((frame) => {
           if (frame.type !== "json") {
+            return;
+          }
+
+          if (registeredOfferId) {
             return;
           }
 

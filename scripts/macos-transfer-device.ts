@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { spawn } from "node:child_process";
 import { randomBytes, randomUUID, X509Certificate } from "node:crypto";
 import { once } from "node:events";
@@ -322,6 +323,7 @@ function createSenderTransferAccess(manifest: TransferManifest, relay: RelayCred
     port: manifest.advertisedPort,
     token: manifest.transferToken,
     certificateFingerprint: manifest.certificateFingerprint,
+    directConnectionMode: "reverse-connect",
     relay: toRelayAccess(relay),
   };
 }
@@ -1020,29 +1022,22 @@ async function streamFilesToSocket(
   }
 }
 
-async function receiveDirectTransfer({
+async function receiveTransferFromSocket({
   offer,
-  deviceName,
   outputDir,
-  tlsMaterial,
+  socket,
   onProgress,
+  directTarget,
+  start,
 }: {
   offer: IncomingTransferOffer;
-  deviceName: string;
   outputDir: string;
-  tlsMaterial: ExtractedTlsMaterial;
+  socket: TLSSocket;
   onProgress?: (progress: TransferProgress) => void;
+  directTarget: string;
+  start?: () => Promise<void>;
 }) {
   await ensureDirectory(outputDir);
-  const directTarget = `${offer.sender.host}:${offer.sender.port}`;
-
-  const socket = tls.connect({
-    host: offer.sender.host,
-    port: offer.sender.port,
-    ca: tlsMaterial.cert,
-    rejectUnauthorized: false,
-    checkServerIdentity: () => undefined,
-  });
 
   return await new Promise<{ receivedFiles: ReceivedFileOutput[]; bytesTransferred: number; detail: string }>(
     (resolve, reject) => {
@@ -1194,23 +1189,15 @@ async function receiveDirectTransfer({
         }
       });
 
-      socket.on("secureConnect", () => {
-        void writeSocket(
-          socket,
-          encodeJsonFrame({
-            kind: "hello",
-            sessionId: offer.sender.sessionId,
-            transferToken: offer.sender.token,
-            deviceName,
-          }),
-        ).catch((error) => {
+      if (start) {
+        void start().catch((error) => {
           fail(
             error instanceof Error
               ? new DirectTransferFallbackError(error.message)
               : new DirectTransferFallbackError("Unable to start transfer session."),
           );
         });
-      });
+      }
       socket.on("data", (chunk) => {
         parser(chunk as Uint8Array);
       });
@@ -1235,6 +1222,76 @@ async function receiveDirectTransfer({
       });
     },
   );
+}
+
+async function receiveDirectTransfer({
+  offer,
+  deviceName,
+  outputDir,
+  tlsMaterial,
+  onProgress,
+}: {
+  offer: IncomingTransferOffer;
+  deviceName: string;
+  outputDir: string;
+  tlsMaterial: ExtractedTlsMaterial;
+  onProgress?: (progress: TransferProgress) => void;
+}) {
+  const socket = tls.connect({
+    host: offer.sender.host,
+    port: offer.sender.port,
+    ca: tlsMaterial.cert,
+    rejectUnauthorized: false,
+    checkServerIdentity: () => undefined,
+  });
+
+  return receiveTransferFromSocket({
+    offer,
+    outputDir,
+    socket,
+    onProgress,
+    directTarget: `${offer.sender.host}:${offer.sender.port}`,
+    start: () =>
+      new Promise<void>((resolve, reject) => {
+        socket.once("secureConnect", () => {
+          void writeSocket(
+            socket,
+            encodeJsonFrame({
+              kind: "hello",
+              sessionId: offer.sender.sessionId,
+              transferToken: offer.sender.token,
+              deviceName,
+            }),
+          )
+            .then(() => {
+              resolve();
+            })
+            .catch((error) => {
+              reject(error);
+            });
+        });
+      }),
+  });
+}
+
+async function receiveAcceptedControlSocketTransfer({
+  offer,
+  outputDir,
+  socket,
+  onProgress,
+}: {
+  offer: IncomingTransferOffer;
+  outputDir: string;
+  socket: TLSSocket;
+  onProgress?: (progress: TransferProgress) => void;
+}) {
+  return receiveTransferFromSocket({
+    offer,
+    outputDir,
+    socket,
+    onProgress,
+    directTarget: `${offer.sender.host}:${offer.sender.port} (accepted control socket)`,
+  });
 }
 
 async function receiveRelayTransfer({
@@ -1675,10 +1732,13 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
 
   async function processIncomingOffer(socket: TLSSocket, offer: IncomingTransferOffer) {
     const resolvedOffer = withResolvedSenderHost(offer, socket.remoteAddress);
+    const useAcceptedControlSocket =
+      resolvedOffer.sender.directConnectionMode === "same-socket" && options.transport !== "relay";
     const canAttemptDirect =
-      resolvedOffer.sender.port > 0 &&
-      resolvedOffer.sender.host !== "0.0.0.0" &&
-      resolvedOffer.sender.token.trim() &&
+      (useAcceptedControlSocket ||
+        (resolvedOffer.sender.port > 0 &&
+          resolvedOffer.sender.host !== "0.0.0.0" &&
+          resolvedOffer.sender.token.trim())) &&
       options.transport !== "relay";
 
     isBusy = true;
@@ -1735,7 +1795,9 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
         receiverDeviceName: options.deviceName,
       }),
     ).finally(() => {
-      socket.destroy();
+      if (!useAcceptedControlSocket) {
+        socket.destroy();
+      }
     });
 
     emitProgress({
@@ -1760,7 +1822,44 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
               outputDir: options.outputDir,
               onProgress: emitProgress,
             })
-          : await receiveWithPreferredTransport(resolvedOffer);
+          : useAcceptedControlSocket
+            ? await (async () => {
+                try {
+                  return await receiveAcceptedControlSocketTransfer({
+                    offer: resolvedOffer,
+                    outputDir: options.outputDir,
+                    socket,
+                    onProgress: emitProgress,
+                  });
+                } catch (error) {
+                  if (
+                    resolvedOffer.sender.relay &&
+                    options.transport === "auto" &&
+                    error instanceof DirectTransferFallbackError
+                  ) {
+                    emitProgress({
+                      phase: "connecting",
+                      totalBytes: resolvedOffer.totalBytes,
+                      bytesTransferred: 0,
+                      currentFileName: null,
+                      speedBytesPerSecond: 0,
+                      detail: "Direct transfer unavailable. Switching to relay.",
+                      updatedAt: nowIso(),
+                    });
+
+                    return receiveRelayTransfer({
+                      apiUrl: options.apiUrl,
+                      offer: resolvedOffer,
+                      deviceName: options.deviceName,
+                      outputDir: options.outputDir,
+                      onProgress: emitProgress,
+                    });
+                  }
+
+                  throw error;
+                }
+              })()
+            : await receiveWithPreferredTransport(resolvedOffer);
 
       state.lastTransfer = {
         startedAt: transferStartedAt,

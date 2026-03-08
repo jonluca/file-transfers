@@ -45,6 +45,8 @@ pnpm lint
 pnpm format:check
 ```
 
+`pnpm mobile:prepare` now reapplies the iOS In-App Purchase capability through the local Expo config plugin, so rerun it after deleting or regenerating `ios/`.
+
 ## Environment
 
 See [`.env.example`](/Users/jonlucadecaro/Documents/Other/file-transfers/.env.example) for the current backend, auth, RevenueCat, and storage configuration surface.

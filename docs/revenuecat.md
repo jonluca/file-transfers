@@ -18,6 +18,8 @@ This repo uses Expo development builds, so rebuild native projects after changin
 pnpm mobile:prepare
 ```
 
+The repo includes a local Expo config plugin that stamps the iOS target with the In-App Purchase capability during prebuild. If you regenerate `ios/`, rerun `pnpm mobile:prepare` before the next Xcode or EAS build.
+
 Then run a fresh development build:
 
 ```bash

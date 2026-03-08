@@ -66,12 +66,15 @@ export interface TransferSession {
   progress: TransferProgress;
 }
 
+export type DirectConnectionMode = "reverse-connect" | "same-socket";
+
 export interface SenderTransferAccess {
   sessionId: string;
   host: string;
   port: number;
   token: string;
   certificateFingerprint: string;
+  directConnectionMode: DirectConnectionMode;
   relay: RelayAccess | null;
 }
 
