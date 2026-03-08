@@ -23,6 +23,10 @@ export default function getConfig({ config }: ConfigContext): ExpoConfig {
         NSLocalNetworkUsageDescription: "Discover nearby devices on your local WiFi so files can transfer directly.",
         NSBonjourServices: ["_filetransfer._tcp."],
       },
+      config: {
+        ...config.ios?.config,
+        usesNonExemptEncryption: false,
+      },
     },
     android: {
       ...config.android,

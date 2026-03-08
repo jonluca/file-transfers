@@ -1128,6 +1128,7 @@ async function receiveDirectTransfer({
   tcpSocket: TcpSocketLike;
   onProgress?: (progress: TransferProgress) => void;
 }) {
+  const directTarget = `${offer.sender.host}:${offer.sender.port}`;
   const socket = tcpSocket.connectTLS({
     host: offer.sender.host,
     port: offer.sender.port,
@@ -1150,7 +1151,7 @@ async function receiveDirectTransfer({
     let didResolve = false;
     let didReceiveDirectFrame = false;
     let handshakeTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
-      fail(new DirectTransferFallbackError("Unable to connect over local WiFi."));
+      fail(new DirectTransferFallbackError(`Unable to connect over local WiFi at ${directTarget}.`));
     }, DIRECT_CONNECT_TIMEOUT_MS);
 
     function clearHandshakeTimer() {
@@ -1319,15 +1320,23 @@ async function receiveDirectTransfer({
       parser(chunk as Uint8Array | Buffer | string);
     });
     socket.on("error", (error) => {
+      console.warn("Direct receive socket error", {
+        directTarget,
+        message: error instanceof Error ? error.message : String(error),
+      });
       const baseError = error instanceof Error ? error : new Error("Transfer connection failed.");
-      fail(didReceiveDirectFrame ? baseError : new DirectTransferFallbackError(baseError.message));
+      fail(
+        didReceiveDirectFrame
+          ? baseError
+          : new DirectTransferFallbackError(`${baseError.message} (${directTarget})`),
+      );
     });
     socket.on("close", () => {
       if (!didResolve) {
         fail(
           didReceiveDirectFrame
             ? new Error("The transfer ended before all files finished downloading.")
-            : new DirectTransferFallbackError("Unable to reach the sender over local WiFi."),
+            : new DirectTransferFallbackError(`Unable to reach the sender over local WiFi at ${directTarget}.`),
         );
       }
     });
@@ -1654,7 +1663,13 @@ export async function startSendingTransfer({
         });
         socket.on("error", (error) => {
           if (!didReceiveHello) {
-            console.warn("Sender data socket error before handshake", error);
+            console.warn("Sender data socket error before handshake", {
+              sessionId,
+              advertisedHost: deviceIp,
+              advertisedPort: resolvedPort,
+              remoteAddress: socket.remoteAddress,
+              message: error instanceof Error ? error.message : String(error),
+            });
           }
         });
       },
@@ -1676,6 +1691,13 @@ export async function startSendingTransfer({
     });
 
     resolvedPort = dataServer.address()?.port ?? 0;
+    if (resolvedPort > 0) {
+      console.info("Direct sender server listening", {
+        sessionId,
+        advertisedHost: deviceIp,
+        advertisedPort: resolvedPort,
+      });
+    }
   }
 
   const manifest = createTransferManifest({

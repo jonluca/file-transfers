@@ -5,6 +5,8 @@ import { fetchRequestHandler } from "@trpc/server/adapters/fetch";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
+import privacyPolicyText from "./legal/privacy.txt?raw";
+import termsOfServiceText from "./legal/terms.txt?raw";
 import { auth } from "./auth";
 import { db } from "./db/client";
 import { hostedFile, subscriptionMembership } from "./db/schema";
@@ -125,6 +127,10 @@ app.get("/health", (c) =>
     serverTime: new Date().toISOString(),
   }),
 );
+
+app.get("/privacy.txt", (c) => c.text(privacyPolicyText));
+
+app.get("/terms.txt", (c) => c.text(termsOfServiceText));
 
 app.on(["GET", "POST"], "/api/auth/*", (c) => auth.handler(c.req.raw));
 

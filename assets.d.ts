@@ -12,3 +12,8 @@ declare module "*.p12" {
   const value: number;
   export default value;
 }
+
+declare module "*.txt?raw" {
+  const value: string;
+  export default value;
+}

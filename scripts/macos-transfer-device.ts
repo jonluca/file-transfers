@@ -1034,6 +1034,7 @@ async function receiveDirectTransfer({
   onProgress?: (progress: TransferProgress) => void;
 }) {
   await ensureDirectory(outputDir);
+  const directTarget = `${offer.sender.host}:${offer.sender.port}`;
 
   const socket = tls.connect({
     host: offer.sender.host,
@@ -1056,7 +1057,7 @@ async function receiveDirectTransfer({
       let didResolve = false;
 
       const handshakeTimer = setTimeout(() => {
-        fail(new DirectTransferFallbackError("Unable to connect over local WiFi."));
+        fail(new DirectTransferFallbackError(`Unable to connect over local WiFi at ${directTarget}.`));
       }, DIRECT_CONNECT_TIMEOUT_MS);
 
       function clearHandshakeTimer() {
@@ -1214,8 +1215,12 @@ async function receiveDirectTransfer({
         parser(chunk as Uint8Array);
       });
       socket.on("error", (error) => {
+        console.warn("[direct-receive] socket error", {
+          directTarget,
+          message: error instanceof Error ? error.message : String(error),
+        });
         const baseError = error instanceof Error ? error : new Error("Transfer connection failed.");
-        fail(didReceiveFrame ? baseError : new DirectTransferFallbackError(baseError.message));
+        fail(didReceiveFrame ? baseError : new DirectTransferFallbackError(`${baseError.message} (${directTarget})`));
       });
       socket.on("close", () => {
         if (didResolve) {
@@ -1225,7 +1230,7 @@ async function receiveDirectTransfer({
         fail(
           didReceiveFrame
             ? new Error("The transfer ended before all files finished downloading.")
-            : new DirectTransferFallbackError("Unable to reach the sender over local WiFi."),
+            : new DirectTransferFallbackError(`Unable to reach the sender over local WiFi at ${directTarget}.`),
         );
       });
     },
@@ -1695,6 +1700,10 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
         resolvedOffer.totalBytes,
       )}.`,
     );
+    if (resolvedOffer.sender.host !== offer.sender.host) {
+      logLine(`Resolved sender host ${offer.sender.host} -> ${resolvedOffer.sender.host} from control socket.`);
+    }
+    logLine(`Direct sender endpoint: ${resolvedOffer.sender.host}:${resolvedOffer.sender.port}`);
 
     await writeSocket(socket, encodeJsonFrame({ kind: "offer-received" }));
 
@@ -2048,6 +2057,8 @@ async function runSendCommand(options: SendCommandOptions) {
     if (!directPort) {
       throw new Error("Unable to allocate a sender data port.");
     }
+
+    logLine(`Direct sender server listening on ${deviceIp}:${directPort}.`);
   }
 
   function manifestWithPort() {
