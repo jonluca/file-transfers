@@ -55,7 +55,10 @@ export function configurePurchases(appUserId: string | null) {
     return false;
   }
 
-  Purchases.setLogLevel(__DEV__ ? LOG_LEVEL.DEBUG : LOG_LEVEL.WARN);
+  // This SDK version does not expose a silent log level, so install a no-op handler
+  // before configure() to keep RevenueCat from attaching its default console logger.
+  Purchases.setLogHandler(() => {});
+  Purchases.setLogLevel(LOG_LEVEL.ERROR);
   Purchases.configure({
     apiKey,
     appUserID: appUserId ?? undefined,
