@@ -201,6 +201,28 @@ function getUsableLanHost(value: string | null | undefined) {
   return isPrivateIpv4Address(normalized) ? normalized : null;
 }
 
+function normalizeMdnsHostname(value: string | null | undefined) {
+  if (!value) {
+    return null;
+  }
+
+  const normalized =
+    value
+      .trim()
+      .replace(/^\[|\]$/g, "")
+      .split("%")[0]
+      ?.replace(/\.+$/, "") ?? "";
+  if (!normalized || normalized.includes("://") || /\s/.test(normalized)) {
+    return null;
+  }
+
+  return normalized.toLowerCase().endsWith(".local") ? normalized : null;
+}
+
+function getUsableNearbyHost(value: string | null | undefined) {
+  return getUsableLanHost(value) ?? normalizeMdnsHostname(value);
+}
+
 function toTransferManifestFile(file: SelectedTransferFile): TransferManifestFile {
   return {
     id: file.id,
@@ -1485,7 +1507,7 @@ function mapResolvedService(service: ZeroconfService) {
   const receiverToken = service.txt?.receiverToken;
   const host =
     service.addresses?.map((address) => getUsableLanHost(address)).find((address) => Boolean(address)) ??
-    getUsableLanHost(service.host);
+    getUsableNearbyHost(service.host);
 
   if (!sessionId || !receiverToken || !host) {
     return null;
@@ -1522,13 +1544,23 @@ export async function startSendingTransfer({
     throw new Error("That receiver is no longer available.");
   }
 
-  if (!getUsableLanHost(target.host)) {
+  const validatedTargetHost =
+    target.method === "nearby" ? getUsableNearbyHost(target.host) : getUsableLanHost(target.host);
+  if (!validatedTargetHost) {
     throw new Error(
       target.method === "qr"
         ? "That QR code does not contain a usable local WiFi address."
         : "That receiver is not advertising a usable local WiFi address.",
     );
   }
+
+  const resolvedTarget =
+    validatedTargetHost === target.host
+      ? target
+      : {
+          ...target,
+          host: validatedTargetHost,
+        };
 
   const manifest = createTransferManifest({
     files,
@@ -1562,9 +1594,9 @@ export async function startSendingTransfer({
   });
 
   const runtime: SendRuntime = {
-    session: createInitialSendSession(manifest, target, null),
+    session: createInitialSendSession(manifest, resolvedTarget, null),
     files,
-    target,
+    target: resolvedTarget,
     direct,
     updateSession,
     relayUploadStarted: false,
