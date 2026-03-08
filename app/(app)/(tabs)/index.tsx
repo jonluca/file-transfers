@@ -3,7 +3,19 @@ import { useIsFocused } from "@react-navigation/native";
 import React, { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, AppState, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import QRCode from "react-native-qrcode-svg";
-import { Download, File, FileText, Film, Globe, ImageIcon, Music, QrCode, Smartphone, Upload, X } from "lucide-react-native";
+import {
+  Download,
+  File,
+  FileText,
+  Film,
+  Globe,
+  ImageIcon,
+  Music,
+  QrCode,
+  Smartphone,
+  Upload,
+  X,
+} from "lucide-react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { usePremiumAccess } from "@/hooks/use-premium-access";
 import { designFonts, designTheme } from "@/lib/design/theme";
@@ -995,7 +1007,9 @@ export default function TransferScreen() {
         >
           <View style={styles.discoverySection}>
             <Text style={styles.discoveryTitle}>{deviceName}</Text>
-            <Text style={styles.discoveryHint}>Open this QR code or URL from another device on the same WiFi network.</Text>
+            <Text style={styles.discoveryHint}>
+              Open this QR code or URL from another device on the same WiFi network.
+            </Text>
           </View>
 
           <View style={styles.qrCard}>
@@ -1021,7 +1035,9 @@ export default function TransferScreen() {
 
           <View style={styles.discoverySection}>
             <Text style={styles.discoveryTitle}>Files</Text>
-            <Text style={styles.discoveryHint}>These files stay available only while the app is active on this screen.</Text>
+            <Text style={styles.discoveryHint}>
+              These files stay available only while the app is active on this screen.
+            </Text>
           </View>
 
           <View style={styles.stack}>
@@ -1030,7 +1046,9 @@ export default function TransferScreen() {
             ))}
           </View>
 
-          {activeHttpShareSession.detail ? <Text style={styles.receivingNotice}>{activeHttpShareSession.detail}</Text> : null}
+          {activeHttpShareSession.detail ? (
+            <Text style={styles.receivingNotice}>{activeHttpShareSession.detail}</Text>
+          ) : null}
           {notice ? <Text style={styles.receivingNotice}>{notice}</Text> : null}
         </ScrollView>
 

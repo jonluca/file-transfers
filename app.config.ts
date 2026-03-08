@@ -47,11 +47,7 @@ function withAndroidGradleDaemonJvmPin(config: ExpoConfig) {
       const gradleDaemonJvmFilePath = join(gradleDir, "gradle-daemon-jvm.properties");
 
       await fs.mkdir(gradleDir, { recursive: true });
-      await fs.writeFile(
-        gradleDaemonJvmFilePath,
-        GRADLE_DAEMON_JVM_FILE_CONTENT,
-        "utf8",
-      );
+      await fs.writeFile(gradleDaemonJvmFilePath, GRADLE_DAEMON_JVM_FILE_CONTENT, "utf8");
 
       return mod;
     },
@@ -77,8 +73,7 @@ export default function getConfig({ config }: ConfigContext): ExpoConfig {
         infoPlist: {
           ITSAppUsesNonExemptEncryption: false,
           NSCameraUsageDescription: "Scan a nearby device QR code to connect to a transfer.",
-          NSLocalNetworkUsageDescription:
-            "Discover nearby devices on your local WiFi so files can transfer directly.",
+          NSLocalNetworkUsageDescription: "Discover nearby devices on your local WiFi so files can transfer directly.",
           NSBonjourServices: ["_filetransfer._tcp."],
         },
       },
