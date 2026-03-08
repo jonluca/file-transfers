@@ -1,10 +1,10 @@
 import { CameraView, useCameraPermissions } from "expo-camera";
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Animated, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import QRCode from "react-native-qrcode-svg";
-import { ArrowDown, ArrowUp, File, FileText, Film, ImageIcon, Music, X } from "lucide-react-native";
+import { Download, File, FileText, Film, ImageIcon, Music, QrCode, Smartphone, Upload, X } from "lucide-react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { useEntitlements } from "@/hooks/queries";
+import { usePremiumAccess } from "@/hooks/use-premium-access";
 import { designFonts, designTheme } from "@/lib/design/theme";
 import {
   acceptIncomingTransferOffer,
@@ -30,22 +30,22 @@ type TransferMode = "idle" | "sending" | "waiting" | "receiving" | "transferring
 
 function MimeIcon({ type }: { type: string }) {
   if (type.startsWith("image/")) {
-    return <ImageIcon color={designTheme.secondaryForeground} size={24} strokeWidth={1.8} />;
+    return <ImageIcon color={designTheme.secondaryForeground} size={22} strokeWidth={1.8} />;
   }
 
   if (type.startsWith("video/")) {
-    return <Film color={designTheme.secondaryForeground} size={24} strokeWidth={1.8} />;
+    return <Film color={designTheme.secondaryForeground} size={22} strokeWidth={1.8} />;
   }
 
   if (type.startsWith("audio/")) {
-    return <Music color={designTheme.secondaryForeground} size={24} strokeWidth={1.8} />;
+    return <Music color={designTheme.secondaryForeground} size={22} strokeWidth={1.8} />;
   }
 
   if (type.includes("pdf") || type.includes("document") || type.includes("text")) {
-    return <FileText color={designTheme.secondaryForeground} size={24} strokeWidth={1.8} />;
+    return <FileText color={designTheme.secondaryForeground} size={22} strokeWidth={1.8} />;
   }
 
-  return <File color={designTheme.secondaryForeground} size={24} strokeWidth={1.8} />;
+  return <File color={designTheme.secondaryForeground} size={22} strokeWidth={1.8} />;
 }
 
 function getTransferDetail(value: string | null | undefined, fallback: string) {
@@ -189,63 +189,26 @@ function NearbyDeviceRow({ record, onPress }: { record: DiscoveryRecord; onPress
   return (
     <Pressable onPress={onPress} style={({ pressed }) => [styles.deviceRow, pressed ? styles.pressed : null]}>
       <View style={styles.deviceAvatar}>
-        <Text style={styles.deviceAvatarLabel}>{record.deviceName.charAt(0).toUpperCase()}</Text>
+        <Smartphone color={designTheme.secondaryForeground} size={18} strokeWidth={2} />
       </View>
       <View style={styles.deviceCopy}>
         <Text style={styles.deviceName}>{record.deviceName}</Text>
         <Text style={styles.deviceMeta}>Ready to receive files</Text>
       </View>
-      <ArrowUp color={designTheme.primary} size={20} strokeWidth={2} />
+      <Upload color={designTheme.primary} size={18} strokeWidth={2} />
     </Pressable>
   );
 }
 
-function WaitingPulse() {
-  const [scale] = useState(() => new Animated.Value(1));
-  const [opacity] = useState(() => new Animated.Value(0.38));
-
-  useEffect(() => {
-    const animation = Animated.loop(
-      Animated.parallel([
-        Animated.timing(scale, {
-          toValue: 1.45,
-          duration: 1500,
-          useNativeDriver: true,
-        }),
-        Animated.timing(opacity, {
-          toValue: 0,
-          duration: 1500,
-          useNativeDriver: true,
-        }),
-      ]),
-    );
-
-    animation.start();
-
-    return () => {
-      animation.stop();
-      scale.setValue(1);
-      opacity.setValue(0.38);
-    };
-  }, [opacity, scale]);
-
+function WaitingPulse({ tone = "primary" }: { tone?: "primary" | "neutral" }) {
   return (
     <View style={styles.waitingPulseWrap}>
-      <View style={styles.waitingPulseOuter}>
-        <View style={styles.waitingPulseInner}>
-          <ArrowUp color={designTheme.primary} size={48} strokeWidth={1.7} />
-        </View>
+      <View style={[styles.waitingPulseOuter, tone === "neutral" ? styles.waitingPulseOuterNeutral : null]}>
+        <ActivityIndicator
+          color={tone === "primary" ? designTheme.primary : designTheme.mutedForeground}
+          size={"large"}
+        />
       </View>
-      <Animated.View
-        pointerEvents={"none"}
-        style={[
-          styles.waitingPulseRing,
-          {
-            opacity,
-            transform: [{ scale }],
-          },
-        ]}
-      />
     </View>
   );
 }
@@ -259,7 +222,7 @@ export default function TransferScreen() {
   const bottomLinkPadding = insets.bottom + 16;
   const deviceName = useDeviceName();
   const upsertRecentTransfer = useAppStore((state) => state.upsertRecentTransfer);
-  const entitlementsQuery = useEntitlements();
+  const premiumAccess = usePremiumAccess();
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [mode, setMode] = useState<TransferMode>("idle");
   const [stagedFiles, setStagedFiles] = useState<SelectedTransferFile[]>([]);
@@ -311,7 +274,7 @@ export default function TransferScreen() {
   }, []);
 
   const totalStagedBytes = useMemo(() => stagedFiles.reduce((sum, file) => sum + file.sizeBytes, 0), [stagedFiles]);
-  const isPremiumUser = Boolean(entitlementsQuery.data?.isPremium);
+  const isPremiumUser = premiumAccess.isPremium;
 
   function handleSendSessionUpdate(nextSession: TransferSession) {
     setActiveSendSession({ ...nextSession });
@@ -601,7 +564,7 @@ export default function TransferScreen() {
       <View style={[styles.root, { paddingTop: insets.top, paddingBottom: compactBottomPadding }]}>
         <View style={styles.idleWrap}>
           <LargeActionCard
-            icon={<ArrowUp color={designTheme.primaryForeground} size={56} strokeWidth={1.5} />}
+            icon={<Upload color={designTheme.primaryForeground} size={48} strokeWidth={1.7} />}
             label={"Send files"}
             primary
             onPress={() => {
@@ -609,7 +572,7 @@ export default function TransferScreen() {
             }}
           />
           <LargeActionCard
-            icon={<ArrowDown color={designTheme.foreground} size={56} strokeWidth={1.5} />}
+            icon={<Download color={designTheme.foreground} size={48} strokeWidth={1.7} />}
             label={"Receive files"}
             onPress={() => {
               void handleStartReceiving();
@@ -670,7 +633,7 @@ export default function TransferScreen() {
           ) : (
             <View style={styles.emptySearchState}>
               <View style={styles.emptySearchIcon}>
-                <ArrowUp color={designTheme.mutedForeground} size={32} strokeWidth={1.8} />
+                <ActivityIndicator color={designTheme.mutedForeground} size={"small"} />
               </View>
               <Text style={styles.emptySearchLabel}>Looking for receivers...</Text>
             </View>
@@ -697,6 +660,7 @@ export default function TransferScreen() {
           </Text>
           <OutlineButton
             label={showQrScanner ? "Hide QR scanner" : "Scan receiver QR code"}
+            icon={<QrCode color={designTheme.primary} size={16} strokeWidth={2} />}
             onPress={() => void handleScanQrPress()}
           />
           {notice ? <Text style={styles.footerNotice}>{notice}</Text> : null}
@@ -739,7 +703,7 @@ export default function TransferScreen() {
         <View style={[styles.root, { paddingTop: insets.top, paddingBottom: regularBottomPadding }]}>
           <View style={styles.centerWrap}>
             <View style={styles.transferAvatar}>
-              <Text style={styles.transferAvatarLabel}>{incomingOffer.senderDeviceName.charAt(0).toUpperCase()}</Text>
+              <Smartphone color={designTheme.secondaryForeground} size={30} strokeWidth={1.8} />
             </View>
 
             <Text style={styles.centerTitle}>{incomingOffer.senderDeviceName}</Text>
@@ -762,7 +726,7 @@ export default function TransferScreen() {
               <View style={styles.approvalAction}>
                 <PrimaryButton
                   label={"Accept"}
-                  icon={<ArrowDown color={designTheme.primaryForeground} size={18} strokeWidth={2} />}
+                  icon={<Download color={designTheme.primaryForeground} size={18} strokeWidth={2} />}
                   onPress={() => {
                     void handleAcceptIncomingOffer();
                   }}
@@ -798,7 +762,7 @@ export default function TransferScreen() {
 
           <View style={styles.emptySearchState}>
             <View style={styles.emptySearchIcon}>
-              <ArrowDown color={designTheme.primary} size={32} strokeWidth={1.8} />
+              <ActivityIndicator color={designTheme.primary} size={"small"} />
             </View>
             <Text style={styles.emptySearchLabel}>Listening for incoming transfers...</Text>
           </View>
@@ -809,7 +773,10 @@ export default function TransferScreen() {
                 onPress={() => setShowQrCode((current) => !current)}
                 style={({ pressed }) => [styles.textButton, pressed ? styles.pressed : null]}
               >
-                <Text style={styles.textButtonLabel}>{showQrCode ? "Hide QR code" : "Show QR code"}</Text>
+                <View style={styles.textButtonContent}>
+                  <QrCode color={designTheme.primary} size={16} strokeWidth={2} />
+                  <Text style={styles.textButtonLabel}>{showQrCode ? "Hide QR code" : "Show QR code"}</Text>
+                </View>
               </Pressable>
               {showQrCode ? (
                 <View style={styles.qrCard}>
@@ -841,7 +808,7 @@ export default function TransferScreen() {
                 styles.progressFill,
                 {
                   width: `${Math.max(0, Math.min(progressPercent, 100))}%`,
-                  backgroundColor: progressPercent >= 100 ? designTheme.accent : designTheme.primary,
+                  backgroundColor: progressPercent >= 100 ? designTheme.success : designTheme.primary,
                 },
               ]}
             />
@@ -876,81 +843,76 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   stack: {
-    gap: 12,
+    gap: 10,
   },
   idleWrap: {
     alignItems: "center",
     flex: 1,
-    gap: 18,
+    gap: 14,
     justifyContent: "center",
   },
   actionCard: {
     alignItems: "center",
-    borderRadius: 24,
-    gap: 12,
+    borderRadius: 20,
+    gap: 14,
     justifyContent: "center",
-    maxWidth: 280,
-    minHeight: 220,
+    maxWidth: 320,
+    minHeight: 196,
     paddingHorizontal: 24,
     paddingVertical: 28,
     width: "100%",
   },
   primaryActionCard: {
     backgroundColor: designTheme.primary,
-    shadowColor: designTheme.shadow,
-    shadowOffset: { width: 0, height: 14 },
-    shadowOpacity: 0.22,
-    shadowRadius: 28,
-    elevation: 8,
   },
   secondaryActionCard: {
-    backgroundColor: designTheme.card,
-    borderColor: designTheme.border,
-    borderWidth: 2,
+    backgroundColor: designTheme.secondary,
   },
   actionCardLabel: {
     color: designTheme.foreground,
     fontFamily: designFonts.medium,
-    fontSize: 26,
+    fontSize: 24,
   },
   primaryActionLabel: {
     color: designTheme.primaryForeground,
   },
   topBar: {
     alignItems: "center",
+    borderBottomColor: designTheme.border,
+    borderBottomWidth: StyleSheet.hairlineWidth,
     flexDirection: "row",
     justifyContent: "space-between",
-    marginBottom: 24,
+    marginBottom: 18,
+    paddingBottom: 14,
   },
   sectionTitle: {
     color: designTheme.foreground,
     fontFamily: designFonts.semibold,
-    fontSize: 24,
+    fontSize: 20,
   },
   iconButton: {
     alignItems: "center",
+    backgroundColor: designTheme.secondary,
     borderRadius: 999,
     justifyContent: "center",
-    minHeight: 40,
-    minWidth: 40,
+    minHeight: 36,
+    minWidth: 36,
   },
   fileRow: {
     alignItems: "center",
-    backgroundColor: designTheme.card,
-    borderColor: designTheme.border,
-    borderRadius: 18,
-    borderWidth: 1,
+    backgroundColor: designTheme.muted,
+    borderRadius: 14,
     flexDirection: "row",
-    gap: 16,
-    padding: 16,
+    gap: 14,
+    padding: 14,
   },
   fileIconWrap: {
     alignItems: "center",
-    backgroundColor: designTheme.secondary,
-    borderRadius: 14,
-    height: 48,
+    backgroundColor: designTheme.card,
+    borderRadius: 12,
+    height: 40,
     justifyContent: "center",
-    width: 48,
+    width: 40,
   },
   fileCopy: {
     flex: 1,
@@ -959,39 +921,37 @@ const styles = StyleSheet.create({
   fileName: {
     color: designTheme.foreground,
     fontFamily: designFonts.medium,
-    fontSize: 16,
+    fontSize: 15,
   },
   fileMeta: {
     color: designTheme.mutedForeground,
     fontFamily: designFonts.regular,
-    fontSize: 14,
+    fontSize: 13,
   },
   addFilesButton: {
     alignItems: "center",
-    borderColor: designTheme.border,
-    borderRadius: 18,
-    borderStyle: "dashed",
-    borderWidth: 2,
+    backgroundColor: designTheme.secondary,
+    borderRadius: 14,
     marginTop: 16,
     paddingHorizontal: 16,
-    paddingVertical: 18,
+    paddingVertical: 14,
   },
   addFilesLabel: {
-    color: designTheme.mutedForeground,
+    color: designTheme.foreground,
     fontFamily: designFonts.medium,
-    fontSize: 16,
+    fontSize: 15,
   },
   footerArea: {
     borderTopColor: designTheme.border,
     borderTopWidth: StyleSheet.hairlineWidth,
-    gap: 14,
+    gap: 12,
     paddingBottom: 12,
-    paddingTop: 16,
+    paddingTop: 14,
   },
   footerMeta: {
     color: designTheme.mutedForeground,
     fontFamily: designFonts.regular,
-    fontSize: 14,
+    fontSize: 13,
     textAlign: "center",
   },
   footerNotice: {
@@ -1003,13 +963,13 @@ const styles = StyleSheet.create({
   },
   discoverySection: {
     gap: 6,
-    marginBottom: 20,
-    marginTop: 28,
+    marginBottom: 18,
+    marginTop: 24,
   },
   discoveryTitle: {
     color: designTheme.foreground,
     fontFamily: designFonts.semibold,
-    fontSize: 20,
+    fontSize: 18,
   },
   discoveryHint: {
     color: designTheme.mutedForeground,
@@ -1020,25 +980,25 @@ const styles = StyleSheet.create({
   primaryButton: {
     alignItems: "center",
     backgroundColor: designTheme.primary,
-    borderRadius: 18,
+    borderRadius: 14,
     flexDirection: "row",
     gap: 8,
     justifyContent: "center",
-    minHeight: 56,
+    minHeight: 50,
     paddingHorizontal: 18,
   },
   primaryButtonLabel: {
     color: designTheme.primaryForeground,
     fontFamily: designFonts.medium,
-    fontSize: 20,
+    fontSize: 16,
   },
   outlineButton: {
     alignItems: "center",
     alignSelf: "center",
-    backgroundColor: designTheme.card,
+    backgroundColor: designTheme.secondary,
     borderColor: designTheme.border,
     borderRadius: 14,
-    borderWidth: 1,
+    borderWidth: 0,
     flexDirection: "row",
     gap: 8,
     justifyContent: "center",
@@ -1048,7 +1008,7 @@ const styles = StyleSheet.create({
   outlineButtonLabel: {
     color: designTheme.foreground,
     fontFamily: designFonts.medium,
-    fontSize: 16,
+    fontSize: 15,
   },
   disabled: {
     opacity: 0.5,
@@ -1056,31 +1016,18 @@ const styles = StyleSheet.create({
   waitingPulseWrap: {
     alignItems: "center",
     justifyContent: "center",
-    marginBottom: 32,
+    marginBottom: 24,
   },
   waitingPulseOuter: {
     alignItems: "center",
-    backgroundColor: "rgba(79, 70, 229, 0.08)",
-    borderRadius: 64,
-    height: 128,
-    justifyContent: "center",
-    width: 128,
-  },
-  waitingPulseInner: {
-    alignItems: "center",
-    backgroundColor: "rgba(79, 70, 229, 0.14)",
+    backgroundColor: "rgba(37, 99, 235, 0.08)",
     borderRadius: 48,
     height: 96,
     justifyContent: "center",
     width: 96,
   },
-  waitingPulseRing: {
-    borderColor: "rgba(79, 70, 229, 0.24)",
-    borderRadius: 64,
-    borderWidth: 4,
-    height: 128,
-    position: "absolute",
-    width: 128,
+  waitingPulseOuterNeutral: {
+    backgroundColor: designTheme.secondary,
   },
   centerWrap: {
     alignItems: "center",
@@ -1090,25 +1037,27 @@ const styles = StyleSheet.create({
   centerTitle: {
     color: designTheme.foreground,
     fontFamily: designFonts.semibold,
-    fontSize: 32,
+    fontSize: 28,
     marginBottom: 8,
+    textAlign: "center",
   },
   centerSubtitle: {
     color: designTheme.mutedForeground,
     fontFamily: designFonts.regular,
-    fontSize: 16,
-    marginBottom: 28,
+    fontSize: 15,
+    lineHeight: 22,
+    marginBottom: 16,
     textAlign: "center",
   },
   centerMeta: {
     color: designTheme.mutedForeground,
     fontFamily: designFonts.regular,
-    fontSize: 14,
-    marginBottom: 28,
+    fontSize: 13,
+    marginBottom: 24,
   },
   approvalActions: {
     flexDirection: "row",
-    gap: 16,
+    gap: 12,
     marginTop: 8,
     width: "100%",
     maxWidth: 320,
@@ -1119,51 +1068,49 @@ const styles = StyleSheet.create({
   centerNotice: {
     color: designTheme.mutedForeground,
     fontFamily: designFonts.regular,
-    fontSize: 14,
+    fontSize: 13,
     lineHeight: 20,
     marginTop: 12,
     textAlign: "center",
   },
   textButton: {
-    marginTop: 24,
+    marginTop: 16,
     paddingHorizontal: 12,
     paddingVertical: 8,
+  },
+  textButtonContent: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: 8,
   },
   textButtonLabel: {
     color: designTheme.primary,
     fontFamily: designFonts.medium,
-    fontSize: 16,
+    fontSize: 15,
   },
   qrCard: {
-    backgroundColor: designTheme.card,
-    borderColor: designTheme.border,
-    borderRadius: 22,
-    borderWidth: 1,
-    marginTop: 12,
-    padding: 18,
-  },
-  deviceRow: {
-    alignItems: "center",
-    backgroundColor: designTheme.card,
+    backgroundColor: designTheme.muted,
     borderColor: designTheme.border,
     borderRadius: 18,
     borderWidth: 1,
-    flexDirection: "row",
-    gap: 16,
+    marginTop: 12,
     padding: 16,
+  },
+  deviceRow: {
+    alignItems: "center",
+    backgroundColor: designTheme.muted,
+    borderRadius: 14,
+    flexDirection: "row",
+    gap: 12,
+    padding: 14,
   },
   deviceAvatar: {
     alignItems: "center",
-    backgroundColor: designTheme.secondary,
+    backgroundColor: designTheme.card,
     borderRadius: 999,
-    height: 48,
+    height: 40,
     justifyContent: "center",
-    width: 48,
-  },
-  deviceAvatarLabel: {
-    color: designTheme.secondaryForeground,
-    fontFamily: designFonts.semibold,
-    fontSize: 20,
+    width: 40,
   },
   deviceCopy: {
     flex: 1,
@@ -1172,21 +1119,21 @@ const styles = StyleSheet.create({
   deviceName: {
     color: designTheme.foreground,
     fontFamily: designFonts.medium,
-    fontSize: 16,
+    fontSize: 15,
   },
   deviceMeta: {
     color: designTheme.mutedForeground,
     fontFamily: designFonts.regular,
-    fontSize: 14,
+    fontSize: 13,
   },
   emptySearchState: {
     alignItems: "center",
     justifyContent: "center",
-    paddingVertical: 72,
+    paddingVertical: 56,
   },
   emptySearchIcon: {
     alignItems: "center",
-    backgroundColor: designTheme.muted,
+    backgroundColor: designTheme.secondary,
     borderRadius: 999,
     height: 64,
     justifyContent: "center",
@@ -1196,12 +1143,12 @@ const styles = StyleSheet.create({
   emptySearchLabel: {
     color: designTheme.mutedForeground,
     fontFamily: designFonts.regular,
-    fontSize: 16,
+    fontSize: 15,
   },
   scannerCard: {
-    backgroundColor: designTheme.card,
+    backgroundColor: designTheme.muted,
     borderColor: designTheme.border,
-    borderRadius: 22,
+    borderRadius: 18,
     borderWidth: 1,
     gap: 12,
     marginTop: 24,
@@ -1210,10 +1157,10 @@ const styles = StyleSheet.create({
   scannerTitle: {
     color: designTheme.foreground,
     fontFamily: designFonts.semibold,
-    fontSize: 18,
+    fontSize: 16,
   },
   cameraWrap: {
-    borderRadius: 18,
+    borderRadius: 14,
     overflow: "hidden",
   },
   camera: {
@@ -1224,15 +1171,15 @@ const styles = StyleSheet.create({
   scannerHint: {
     color: designTheme.mutedForeground,
     fontFamily: designFonts.regular,
-    fontSize: 14,
+    fontSize: 13,
     lineHeight: 20,
   },
   receivingNotice: {
     color: designTheme.mutedForeground,
     fontFamily: designFonts.regular,
-    fontSize: 14,
+    fontSize: 13,
     lineHeight: 20,
-    marginTop: 20,
+    marginTop: 16,
     textAlign: "center",
   },
   bottomLink: {
@@ -1242,7 +1189,7 @@ const styles = StyleSheet.create({
   bottomLinkLabel: {
     color: designTheme.primary,
     fontFamily: designFonts.medium,
-    fontSize: 16,
+    fontSize: 15,
     textAlign: "center",
   },
   transferWrap: {
@@ -1254,36 +1201,38 @@ const styles = StyleSheet.create({
     alignItems: "center",
     backgroundColor: designTheme.secondary,
     borderRadius: 999,
-    height: 80,
+    height: 72,
     justifyContent: "center",
-    marginBottom: 24,
-    width: 80,
+    marginBottom: 20,
+    width: 72,
   },
   transferAvatarLabel: {
     color: designTheme.secondaryForeground,
     fontFamily: designFonts.semibold,
-    fontSize: 32,
+    fontSize: 28,
   },
   transferTitle: {
     color: designTheme.foreground,
     fontFamily: designFonts.semibold,
-    fontSize: 32,
+    fontSize: 28,
     marginBottom: 8,
+    textAlign: "center",
   },
   transferSubtitle: {
     color: designTheme.mutedForeground,
     fontFamily: designFonts.regular,
-    fontSize: 16,
-    marginBottom: 32,
+    fontSize: 15,
+    marginBottom: 24,
+    textAlign: "center",
   },
   progressWrap: {
     maxWidth: 320,
     width: "100%",
   },
   progressTrack: {
-    backgroundColor: designTheme.muted,
+    backgroundColor: designTheme.secondary,
     borderRadius: 999,
-    height: 8,
+    height: 6,
     marginBottom: 8,
     overflow: "hidden",
   },
@@ -1294,21 +1243,21 @@ const styles = StyleSheet.create({
   progressLabel: {
     color: designTheme.mutedForeground,
     fontFamily: designFonts.regular,
-    fontSize: 14,
+    fontSize: 13,
     textAlign: "center",
   },
   transferFileName: {
-    color: designTheme.mutedForeground,
+    color: designTheme.foreground,
     fontFamily: designFonts.regular,
     fontSize: 14,
     lineHeight: 20,
-    marginTop: 18,
+    marginTop: 16,
     textAlign: "center",
   },
   transferDetail: {
     color: designTheme.mutedForeground,
     fontFamily: designFonts.regular,
-    fontSize: 14,
+    fontSize: 13,
     lineHeight: 20,
     marginTop: 10,
     textAlign: "center",

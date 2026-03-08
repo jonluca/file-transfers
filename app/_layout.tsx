@@ -16,9 +16,8 @@ import type { AppStateStatus } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { FullScreenLoader } from "@/components/ui";
-import { useSession } from "@/lib/auth-client";
-import { configurePurchases, loginPurchases, logoutPurchases } from "@/lib/purchases";
 import { createBoilerplateQueryClient, getTrpcClient, TRPCProvider } from "@/lib/trpc";
+import { RevenueCatProvider } from "@/providers/revenuecat-provider";
 import { useHasHydrated } from "@/store";
 
 function onAppStateChange(status: AppStateStatus) {
@@ -32,28 +31,12 @@ const trpcClient = getTrpcClient();
 
 function RootLayoutContent() {
   const hasHydrated = useHasHydrated();
-  const { data: session } = useSession();
   const [fontsLoaded] = useFonts({
     Geist_400Regular,
     Geist_500Medium,
     Geist_600SemiBold,
     Geist_700Bold,
   });
-
-  useEffect(() => {
-    configurePurchases(session?.user?.id ?? null);
-
-    if (session?.user?.id) {
-      void loginPurchases(session.user.id).catch((error) => {
-        console.error("Unable to attach RevenueCat to the signed-in user", error);
-      });
-      return;
-    }
-
-    void logoutPurchases().catch((error) => {
-      console.error("Unable to clear RevenueCat session", error);
-    });
-  }, [session?.user?.id]);
 
   if (!hasHydrated || !fontsLoaded) {
     return <FullScreenLoader label={"Loading File Transfers..."} />;
@@ -110,9 +93,11 @@ export default function RootLayout() {
     <SafeAreaProvider>
       <QueryClientProvider client={queryClient}>
         <TRPCProvider trpcClient={trpcClient} queryClient={queryClient}>
-          <GestureHandlerRootView style={{ flex: 1 }}>
-            <RootLayoutContent />
-          </GestureHandlerRootView>
+          <RevenueCatProvider>
+            <GestureHandlerRootView style={{ flex: 1 }}>
+              <RootLayoutContent />
+            </GestureHandlerRootView>
+          </RevenueCatProvider>
         </TRPCProvider>
         <StatusBar style={"dark"} />
       </QueryClientProvider>

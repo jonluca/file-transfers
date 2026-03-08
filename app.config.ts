@@ -8,6 +8,7 @@ export default function getConfig({ config }: ConfigContext): ExpoConfig {
     name: "File Transfers",
     slug: "file-transfers",
     version: VERSION,
+    icon: "./assets/icon.png",
     orientation: "portrait",
     scheme: "filetransfers",
     userInterfaceStyle: "automatic",

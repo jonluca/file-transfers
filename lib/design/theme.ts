@@ -1,21 +1,23 @@
 export const designTheme = {
-  background: "#fafafa",
-  foreground: "#171717",
+  background: "#ffffff",
+  foreground: "#030213",
   card: "#ffffff",
-  cardForeground: "#171717",
-  primary: "#4f46e5",
+  cardForeground: "#030213",
+  primary: "#2563eb",
   primaryForeground: "#ffffff",
-  secondary: "#f2f1ff",
-  secondaryForeground: "#4338ca",
-  muted: "#f5f5f5",
-  mutedForeground: "#737373",
-  accent: "#22c55e",
+  secondary: "#f3f4f6",
+  secondaryForeground: "#4b5563",
+  muted: "#f9fafb",
+  mutedForeground: "#6b7280",
+  accent: "#16a34a",
   accentForeground: "#ffffff",
   destructive: "#dc2626",
+  success: "#16a34a",
+  warning: "#d97706",
   border: "#e5e7eb",
-  input: "#f5f5f5",
-  shadow: "rgba(15, 23, 42, 0.12)",
-  ring: "rgba(79, 70, 229, 0.16)",
+  input: "#f3f4f6",
+  shadow: "rgba(3, 2, 19, 0.06)",
+  ring: "rgba(37, 99, 235, 0.18)",
 } as const;
 
 export const designFonts = {
@@ -27,7 +29,7 @@ export const designFonts = {
 
 export const designMetrics = {
   appMaxWidth: 430,
-  radius: 16,
-  radiusLarge: 24,
-  radiusXLarge: 28,
+  radius: 14,
+  radiusLarge: 18,
+  radiusXLarge: 24,
 } as const;

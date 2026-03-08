@@ -9,6 +9,7 @@ import { auth } from "./auth";
 import { db } from "./db/client";
 import { hostedFile, subscriptionMembership } from "./db/schema";
 import { serverEnv } from "./env";
+import { PREMIUM_ENTITLEMENT_ALIASES } from "@/lib/subscriptions";
 import { createDownloadLink, readLocalStoredFile, storeUploadedFile } from "./storage/hosted-storage";
 import {
   acceptRelaySession,
@@ -423,7 +424,11 @@ app.post("/webhooks/revenuecat", async (c) => {
     return c.json({ ok: true, skipped: true });
   }
 
-  const isPremium = Boolean(event.entitlement_ids?.includes("premium"));
+  const isPremium = Boolean(
+    event.entitlement_ids?.some((entitlementId) =>
+      PREMIUM_ENTITLEMENT_ALIASES.some((candidateEntitlementId) => candidateEntitlementId === entitlementId),
+    ),
+  );
   await db
     .update(subscriptionMembership)
     .set({

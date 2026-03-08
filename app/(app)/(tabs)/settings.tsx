@@ -1,4 +1,3 @@
-import { useQuery } from "@tanstack/react-query";
 import Constants from "expo-constants";
 import { File } from "expo-file-system";
 import * as Linking from "expo-linking";
@@ -6,6 +5,7 @@ import React, { useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -15,42 +15,42 @@ import {
   TextInput,
   View,
 } from "react-native";
-import type { PurchasesOfferings, PurchasesPackage } from "react-native-purchases";
-import { ChevronRight, HelpCircle, Info, Link2, Shield, Smartphone, Zap } from "lucide-react-native";
+import type { PurchasesPackage } from "react-native-purchases";
+import {
+  Check,
+  ChevronRight,
+  Crown,
+  HelpCircle,
+  Info,
+  Link,
+  RefreshCw,
+  Shield,
+  Smartphone,
+  X,
+} from "lucide-react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useGoogleSignIn } from "@/hooks/use-google-sign-in";
-import {
-  useCompleteHostedUpload,
-  useCreateHostedUpload,
-  useDeleteHostedFile,
-  useEntitlements,
-  useHostedFiles,
-  useSyncPurchase,
-} from "@/hooks/queries";
+import { useCompleteHostedUpload, useCreateHostedUpload, useDeleteHostedFile, useHostedFiles } from "@/hooks/queries";
+import { usePremiumAccess } from "@/hooks/use-premium-access";
 import { useAppleSignIn } from "@/hooks/use-apple-sign-in";
 import { signOut, useSession } from "@/lib/auth-client";
 import { designFonts, designTheme } from "@/lib/design/theme";
 import { pickTransferFiles } from "@/lib/file-transfer";
-import {
-  getCustomerInfo,
-  getOfferings,
-  isRevenueCatConfigured,
-  loginPurchases,
-  logoutPurchases,
-  mapCustomerInfoToEntitlement,
-  purchasePackage,
-  restorePurchases,
-} from "@/lib/purchases";
+import { getPaywallResultMessage, mapCustomerInfoToEntitlement, REVENUECAT_PAYWALL_RESULT } from "@/lib/purchases";
+import { FILE_TRANSFERS_PRO_NAME, PREMIUM_PRODUCT_IDS } from "@/lib/subscriptions";
+import { useRevenueCat } from "@/providers/revenuecat-provider";
 import { useAppStore, useAutoAcceptKnownDevices, useDeviceName } from "@/store";
 
 function PrimaryButton({
   label,
   onPress,
   disabled = false,
+  tone = "primary",
 }: {
   label: string;
   onPress: () => void;
   disabled?: boolean;
+  tone?: "primary" | "inverted";
 }) {
   return (
     <Pressable
@@ -58,11 +58,14 @@ function PrimaryButton({
       onPress={onPress}
       style={({ pressed }) => [
         styles.primaryButton,
+        tone === "inverted" ? styles.primaryButtonInverted : null,
         disabled ? styles.disabled : null,
         pressed && !disabled ? styles.pressed : null,
       ]}
     >
-      <Text style={styles.primaryButtonLabel}>{label}</Text>
+      <Text style={[styles.primaryButtonLabel, tone === "inverted" ? styles.primaryButtonLabelInverted : null]}>
+        {label}
+      </Text>
     </Pressable>
   );
 }
@@ -137,7 +140,7 @@ function SettingItem({
         <Text style={styles.settingLabel}>{label}</Text>
         {description ? <Text style={styles.settingDescription}>{description}</Text> : null}
       </View>
-      {action ?? (onPress ? <ChevronRight color={designTheme.mutedForeground} size={20} strokeWidth={2} /> : null)}
+      {action ?? (onPress ? <ChevronRight color={designTheme.mutedForeground} size={18} strokeWidth={2} /> : null)}
     </View>
   );
 
@@ -152,6 +155,59 @@ function SettingItem({
   );
 }
 
+function PremiumBenefit({ label }: { label: string }) {
+  return (
+    <View style={styles.benefitRow}>
+      <View style={styles.benefitIconWrap}>
+        <Check color={designTheme.success} size={12} strokeWidth={2.6} />
+      </View>
+      <Text style={styles.benefitLabel}>{label}</Text>
+    </View>
+  );
+}
+
+function PremiumPackageCard({
+  selectedPackage,
+  onPress,
+  highlighted,
+}: {
+  selectedPackage: PurchasesPackage;
+  onPress: () => void;
+  highlighted: boolean;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.packageCard,
+        highlighted ? styles.packageCardHighlighted : null,
+        pressed ? styles.pressed : null,
+      ]}
+    >
+      <View style={styles.packageHeader}>
+        <Text style={styles.packageTitle}>{selectedPackage.product.title}</Text>
+        {highlighted ? (
+          <View style={styles.packageBadge}>
+            <Text style={styles.packageBadgeLabel}>Recommended</Text>
+          </View>
+        ) : null}
+      </View>
+      <Text style={styles.packagePrice}>{selectedPackage.product.priceString}</Text>
+      {selectedPackage.product.description ? (
+        <Text style={styles.packageDescription}>{selectedPackage.product.description}</Text>
+      ) : null}
+    </Pressable>
+  );
+}
+
+function formatExpirationCopy(expiresAt: string | null) {
+  if (!expiresAt) {
+    return null;
+  }
+
+  return `Renews or expires ${new Date(expiresAt).toLocaleDateString()}`;
+}
+
 export default function SettingsScreen() {
   const insets = useSafeAreaInsets();
   const deviceName = useDeviceName();
@@ -159,9 +215,21 @@ export default function SettingsScreen() {
   const setDeviceName = useAppStore((state) => state.setDeviceName);
   const setAutoAcceptKnownDevices = useAppStore((state) => state.setAutoAcceptKnownDevices);
   const { data: session } = useSession();
-  const entitlementsQuery = useEntitlements();
-  const hostedFilesQuery = useHostedFiles(Boolean(session?.user && entitlementsQuery.data?.isPremium));
-  const syncPurchaseMutation = useSyncPurchase();
+  const premiumAccess = usePremiumAccess();
+  const {
+    customerInfo,
+    isConfigured: hasConfiguredRevenueCat,
+    plans,
+    isLoadingCustomerInfo,
+    isLoadingOfferings,
+    lastError: revenueCatError,
+    presentCustomerCenter,
+    presentPaywall,
+    purchasePackage,
+    refreshCustomerInfo,
+    restorePurchases,
+  } = useRevenueCat();
+  const hostedFilesQuery = useHostedFiles(Boolean(session?.user && premiumAccess.isPremium));
   const createHostedUploadMutation = useCreateHostedUpload();
   const completeHostedUploadMutation = useCompleteHostedUpload();
   const deleteHostedFileMutation = useDeleteHostedFile();
@@ -174,78 +242,112 @@ export default function SettingsScreen() {
   const [purchaseNotice, setPurchaseNotice] = useState<string | null>(null);
   const [hostedNotice, setHostedNotice] = useState<string | null>(null);
   const [hostedPasscode, setHostedPasscode] = useState("");
-  const hasConfiguredRevenueCat = isRevenueCatConfigured();
-  const isPremium = Boolean(entitlementsQuery.data?.isPremium);
+  const isPremium = premiumAccess.isPremium;
   const showHostedLinksPanel = wantsHostedLinksPanel && isPremium;
-  const sessionUserId = session?.user?.id ?? null;
-  const offeringsQuery = useQuery<PurchasesOfferings | null>({
-    queryKey: ["purchases", "offerings", sessionUserId],
-    enabled: Boolean(sessionUserId && hasConfiguredRevenueCat && showPremiumDetails),
-    queryFn: async () => {
-      if (!sessionUserId) {
-        return null;
-      }
-
-      await loginPurchases(sessionUserId);
-      return getOfferings();
-    },
-  });
-
-  async function refreshPremiumState() {
-    if (!session?.user || !hasConfiguredRevenueCat) {
-      return;
-    }
-
-    const customerInfo = await getCustomerInfo();
-    if (!customerInfo) {
-      return;
-    }
-
-    const mappedEntitlement = mapCustomerInfoToEntitlement(customerInfo);
-    await syncPurchaseMutation.mutateAsync({
-      ...mappedEntitlement,
-      appUserId: session.user.id,
-    });
-  }
 
   async function handlePurchase(selectedPackage: PurchasesPackage) {
-    if (!session?.user) {
-      setPurchaseNotice("Sign in first so premium can be restored on another device later.");
+    if (!hasConfiguredRevenueCat) {
+      setPurchaseNotice("Add the RevenueCat public API keys to this build to enable live purchases.");
       setShowPremiumDetails(true);
       return;
     }
 
-    try {
-      setPurchaseNotice(null);
-      await purchasePackage(selectedPackage);
-      await refreshPremiumState();
-      setPurchaseNotice("Premium is active on this account.");
-    } catch (error) {
-      setPurchaseNotice(error instanceof Error ? error.message : "The purchase did not complete.");
+    setPurchaseNotice(null);
+
+    const nextCustomerInfo = await purchasePackage(selectedPackage);
+    if (!nextCustomerInfo) {
+      setPurchaseNotice(revenueCatError ?? "Purchase cancelled.");
+      return;
     }
+
+    const nextEntitlement = mapCustomerInfoToEntitlement(nextCustomerInfo, Boolean(session?.user));
+    setPurchaseNotice(
+      nextEntitlement.isPremium
+        ? session?.user
+          ? `${FILE_TRANSFERS_PRO_NAME} is active on this account.`
+          : `${FILE_TRANSFERS_PRO_NAME} is active on this device. Sign in when you want hosted links or cross-device restore.`
+        : "The purchase completed, but the entitlement is not active yet.",
+    );
   }
 
   async function handleRestorePurchases() {
-    if (!session?.user) {
+    if (!hasConfiguredRevenueCat) {
+      setPurchaseNotice("Add the RevenueCat public API keys to this build to enable live purchases.");
       setShowPremiumDetails(true);
-      setPurchaseNotice("Sign in first, then restore purchases.");
       return;
     }
 
-    try {
-      setPurchaseNotice(null);
-      await restorePurchases();
-      await refreshPremiumState();
-      setPurchaseNotice("Purchases restored.");
-    } catch (error) {
-      setPurchaseNotice(error instanceof Error ? error.message : "Unable to restore purchases.");
+    setPurchaseNotice(null);
+
+    const nextCustomerInfo = await restorePurchases();
+    if (!nextCustomerInfo) {
+      setPurchaseNotice(revenueCatError ?? "Unable to restore purchases.");
+      return;
+    }
+
+    const nextEntitlement = mapCustomerInfoToEntitlement(nextCustomerInfo, Boolean(session?.user));
+    if (!nextEntitlement.isPremium) {
+      setPurchaseNotice(`No active ${FILE_TRANSFERS_PRO_NAME} subscription was found to restore.`);
+      return;
+    }
+
+    setPurchaseNotice(
+      session?.user
+        ? "Purchases restored."
+        : `${FILE_TRANSFERS_PRO_NAME} is active on this device. Sign in when you want hosted links or cross-device restore.`,
+    );
+  }
+
+  async function handlePresentPaywall() {
+    if (!hasConfiguredRevenueCat) {
+      setPurchaseNotice("Add the RevenueCat public API keys to this build to enable live purchases.");
+      setShowPremiumDetails(true);
+      return;
+    }
+
+    setPurchaseNotice(null);
+
+    const paywallResult = await presentPaywall();
+    if (!paywallResult) {
+      setPurchaseNotice(revenueCatError ?? "Unable to open the RevenueCat paywall.");
+      return;
+    }
+
+    if (
+      (paywallResult === REVENUECAT_PAYWALL_RESULT.PURCHASED || paywallResult === REVENUECAT_PAYWALL_RESULT.RESTORED) &&
+      !session?.user
+    ) {
+      setPurchaseNotice(
+        `${FILE_TRANSFERS_PRO_NAME} is active on this device. Sign in when you want hosted links or cross-device restore.`,
+      );
+      return;
+    }
+
+    if (paywallResult !== REVENUECAT_PAYWALL_RESULT.ERROR) {
+      void refreshCustomerInfo({ silent: true });
+    }
+
+    setPurchaseNotice(getPaywallResultMessage(paywallResult));
+  }
+
+  async function handleOpenCustomerCenter() {
+    await presentCustomerCenter();
+
+    if (revenueCatError) {
+      setPurchaseNotice(revenueCatError);
     }
   }
 
   async function handleCreateHostedUpload() {
-    if (!session?.user || !isPremium) {
+    if (!session?.user) {
       setShowPremiumDetails(true);
-      setHostedNotice("Premium is required to create hosted links.");
+      setHostedNotice("Sign in first to use hosted links.");
+      return;
+    }
+
+    if (!isPremium) {
+      setShowPremiumDetails(true);
+      setHostedNotice(`${FILE_TRANSFERS_PRO_NAME} is required to create hosted links.`);
       return;
     }
 
@@ -293,357 +395,430 @@ export default function SettingsScreen() {
   }
 
   return (
-    <ScrollView
-      contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 24) + 12 }}
-      showsVerticalScrollIndicator={false}
-      style={[styles.root, { paddingTop: insets.top + 16 }]}
-    >
-      <Text style={styles.title}>Settings</Text>
+    <>
+      <ScrollView
+        contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 24) + 16 }}
+        showsVerticalScrollIndicator={false}
+        style={[styles.root, { paddingTop: insets.top + 16 }]}
+      >
+        <Text style={styles.title}>Settings</Text>
 
-      <View style={styles.section}>
-        <Text style={styles.sectionLabel}>Device</Text>
-        <View style={styles.stack}>
-          {isEditingDeviceName ? (
-            <View style={styles.editRow}>
-              <View style={styles.settingIconWrap}>
-                <Smartphone color={designTheme.secondaryForeground} size={20} strokeWidth={1.9} />
-              </View>
-              <TextInput
-                autoCapitalize={"words"}
-                onBlur={() => setIsEditingDeviceName(false)}
-                onChangeText={setDraftDeviceName}
-                onSubmitEditing={() => {
-                  setDeviceName(draftDeviceName);
-                  setIsEditingDeviceName(false);
-                }}
-                placeholder={"My Phone"}
-                placeholderTextColor={designTheme.mutedForeground}
-                style={styles.deviceInput}
-                value={draftDeviceName}
-              />
-              <SecondaryButton
-                label={"Done"}
-                onPress={() => {
-                  setDeviceName(draftDeviceName);
-                  setIsEditingDeviceName(false);
-                }}
-              />
-            </View>
-          ) : (
-            <SettingItem
-              description={"Your device name shown to others"}
-              icon={<Smartphone color={designTheme.secondaryForeground} size={20} strokeWidth={1.9} />}
-              label={deviceName}
-              onPress={() => {
-                setDraftDeviceName(deviceName);
-                setIsEditingDeviceName(true);
-              }}
-            />
-          )}
-        </View>
-      </View>
-
-      {!isPremium ? (
         <View style={styles.section}>
-          <View style={styles.premiumCard}>
-            <View style={styles.premiumHead}>
-              <View style={styles.premiumIconWrap}>
-                <Zap color={designTheme.primaryForeground} size={20} strokeWidth={2} />
+          <View style={[styles.heroCard, isPremium ? styles.heroCardActive : null]}>
+            <View style={styles.heroHeader}>
+              <View style={styles.heroIconWrap}>
+                <Crown color={designTheme.primaryForeground} size={28} strokeWidth={1.9} />
               </View>
-              <View style={styles.premiumCopy}>
-                <Text style={styles.premiumTitle}>Upgrade to Premium</Text>
-                <Text style={styles.premiumDescription}>Faster transfers & hosted links</Text>
-              </View>
-            </View>
-
-            <View style={styles.bulletList}>
-              <View style={styles.bulletRow}>
-                <View style={styles.bulletDot} />
-                <Text style={styles.bulletText}>Unlimited transfer speed</Text>
-              </View>
-              <View style={styles.bulletRow}>
-                <View style={styles.bulletDot} />
-                <Text style={styles.bulletText}>Share files via browser link</Text>
-              </View>
-              <View style={styles.bulletRow}>
-                <View style={styles.bulletDot} />
-                <Text style={styles.bulletText}>Up to 10 GB per file</Text>
-              </View>
-            </View>
-
-            <PrimaryButton
-              label={"Upgrade"}
-              onPress={() => {
-                setShowPremiumDetails((current) => !current);
-                setPurchaseNotice(null);
-              }}
-            />
-          </View>
-        </View>
-      ) : (
-        <View style={styles.section}>
-          <View style={styles.premiumCard}>
-            <View style={styles.premiumHead}>
-              <View style={[styles.premiumIconWrap, styles.premiumIconWrapActive]}>
-                <Zap color={designTheme.primaryForeground} size={20} strokeWidth={2} />
-              </View>
-              <View style={styles.premiumCopy}>
-                <Text style={styles.premiumTitle}>Premium active</Text>
-                <Text style={styles.premiumDescription}>Fast transfers and hosted links are unlocked</Text>
+              <View style={styles.heroCopy}>
+                <Text style={styles.heroTitle}>
+                  {isPremium ? `${FILE_TRANSFERS_PRO_NAME} active` : `Go ${FILE_TRANSFERS_PRO_NAME}`}
+                </Text>
+                <Text style={styles.heroDescription}>
+                  {isPremium
+                    ? "Fast transfers are unlocked on this device, and hosted links are ready when you sign in."
+                    : "Unlimited transfer speeds, hosted browser links, and RevenueCat billing."}
+                </Text>
               </View>
             </View>
             <PrimaryButton
-              label={"Manage Premium"}
+              label={isPremium ? `Manage ${FILE_TRANSFERS_PRO_NAME}` : `Upgrade to ${FILE_TRANSFERS_PRO_NAME}`}
               onPress={() => {
-                setShowPremiumDetails((current) => !current);
-                setPurchaseNotice(null);
-              }}
-            />
-          </View>
-        </View>
-      )}
-
-      {showPremiumDetails ? (
-        <View style={styles.inlinePanel}>
-          {!session?.user ? (
-            <View style={styles.stack}>
-              <SecondaryButton
-                disabled={isSigningInWithApple}
-                label={Platform.OS === "ios" ? "Continue with Apple" : "Sign in with Apple"}
-                onPress={() => {
-                  void triggerAppleSignIn();
-                }}
-              />
-              <SecondaryButton
-                disabled={isSigningInWithGoogle}
-                label={"Continue with Google"}
-                onPress={() => {
-                  void triggerGoogleSignIn();
-                }}
-              />
-              <InlineNotice
-                description={
-                  "Free local transfers stay anonymous. Sign in only when you want premium or need to restore it later."
-                }
-                title={"No account before premium"}
-              />
-            </View>
-          ) : (
-            <View style={styles.stack}>
-              <InlineNotice
-                description={session.user.email ?? "Signed in"}
-                title={isPremium ? "Premium account" : "Signed in"}
-              />
-
-              {hasConfiguredRevenueCat ? (
-                offeringsQuery.isLoading ? (
-                  <View style={styles.loadingRow}>
-                    <ActivityIndicator color={designTheme.foreground} />
-                    <Text style={styles.loadingLabel}>Loading premium plans...</Text>
-                  </View>
-                ) : offeringsQuery.data?.current?.availablePackages?.length ? (
-                  offeringsQuery.data.current.availablePackages.map((selectedPackage) => (
-                    <PrimaryButton
-                      key={selectedPackage.identifier}
-                      label={`Buy ${selectedPackage.product.title}`}
-                      onPress={() => {
-                        void handlePurchase(selectedPackage);
-                      }}
-                    />
-                  ))
-                ) : (
-                  <InlineNotice
-                    description={"RevenueCat is connected, but no current offering is available yet."}
-                    title={"Premium plans not ready"}
-                    tone={"warning"}
-                  />
-                )
-              ) : (
-                <InlineNotice
-                  description={"Add the RevenueCat public API keys to this build to enable live purchases."}
-                  title={"RevenueCat keys missing"}
-                  tone={"warning"}
-                />
-              )}
-
-              <SecondaryButton
-                label={"Restore purchases"}
-                onPress={() => {
-                  void handleRestorePurchases();
-                }}
-              />
-              <SecondaryButton
-                label={"Sign out"}
-                onPress={() => {
-                  void signOut();
-                  void logoutPurchases();
-                  setWantsHostedLinksPanel(false);
-                }}
-                tone={"danger"}
-              />
-            </View>
-          )}
-
-          {purchaseNotice ? <InlineNotice description={purchaseNotice} title={"Premium status"} /> : null}
-          {offeringsQuery.error ? (
-            <InlineNotice
-              description={
-                offeringsQuery.error instanceof Error ? offeringsQuery.error.message : "Unable to load premium plans."
-              }
-              title={"Premium plans"}
-              tone={"danger"}
-            />
-          ) : null}
-          {appleError ? <InlineNotice description={appleError} title={"Apple sign-in"} tone={"danger"} /> : null}
-          {googleError ? <InlineNotice description={googleError} title={"Google sign-in"} tone={"danger"} /> : null}
-        </View>
-      ) : null}
-
-      <View style={styles.section}>
-        <Text style={styles.sectionLabel}>Transfers</Text>
-        <View style={styles.stack}>
-          <SettingItem
-            action={
-              <Switch
-                ios_backgroundColor={designTheme.border}
-                onValueChange={setAutoAcceptKnownDevices}
-                thumbColor={
-                  Platform.OS === "android" && autoAcceptKnownDevices ? designTheme.primaryForeground : undefined
-                }
-                trackColor={{ false: designTheme.border, true: designTheme.primary }}
-                value={autoAcceptKnownDevices}
-              />
-            }
-            description={"Skip approval for devices you've used before"}
-            icon={<Shield color={designTheme.secondaryForeground} size={20} strokeWidth={1.9} />}
-            label={"Auto-accept from known devices"}
-          />
-          <SettingItem
-            description={isPremium ? "Manage your shared links" : "Premium feature"}
-            icon={<Link2 color={designTheme.secondaryForeground} size={20} strokeWidth={1.9} />}
-            label={"Hosted links"}
-            onPress={() => {
-              if (!isPremium) {
                 setShowPremiumDetails(true);
-                setHostedNotice("Premium is required to create hosted links.");
-                return;
-              }
-
-              setWantsHostedLinksPanel((current) => !current);
-            }}
-          />
-        </View>
-      </View>
-
-      {showHostedLinksPanel ? (
-        <View style={styles.inlinePanel}>
-          <Text style={styles.panelTitle}>Hosted links</Text>
-          <Text style={styles.panelCopy}>Create a browser download link with an optional 6-digit passcode.</Text>
-          <TextInput
-            keyboardType={"number-pad"}
-            maxLength={6}
-            onChangeText={setHostedPasscode}
-            placeholder={"Optional 6-digit passcode"}
-            placeholderTextColor={designTheme.mutedForeground}
-            style={styles.hostedInput}
-            value={hostedPasscode}
-          />
-          <PrimaryButton
-            disabled={createHostedUploadMutation.isPending || completeHostedUploadMutation.isPending}
-            label={
-              createHostedUploadMutation.isPending || completeHostedUploadMutation.isPending
-                ? "Uploading..."
-                : "Create hosted link"
-            }
-            onPress={() => {
-              void handleCreateHostedUpload();
-            }}
-          />
-
-          {hostedNotice ? <InlineNotice description={hostedNotice} title={"Hosted link"} /> : null}
-          {hostedFilesQuery.error ? (
-            <InlineNotice
-              description={
-                hostedFilesQuery.error instanceof Error
-                  ? hostedFilesQuery.error.message
-                  : "Unable to load hosted links."
-              }
-              title={"Hosted links"}
-              tone={"danger"}
+                setPurchaseNotice(null);
+              }}
+              tone={"inverted"}
             />
-          ) : null}
+          </View>
+        </View>
 
-          <View style={styles.stack}>
-            {hostedFilesQuery.data?.length ? (
-              hostedFilesQuery.data.map((hostedFile) => (
-                <View key={hostedFile.id} style={styles.hostedFileRow}>
-                  <View style={styles.hostedFileCopy}>
-                    <Text numberOfLines={1} style={styles.hostedFileName}>
-                      {hostedFile.fileName}
-                    </Text>
-                    <Text style={styles.hostedFileMeta}>
-                      Expires {new Date(hostedFile.expiresAt).toLocaleDateString()}
-                      {hostedFile.requiresPasscode ? " · Passcode" : ""}
-                    </Text>
-                  </View>
-                  <View style={styles.hostedActions}>
-                    <SecondaryButton
-                      label={"Open"}
-                      onPress={() => {
-                        void Linking.openURL(hostedFile.downloadPageUrl);
-                      }}
-                    />
-                    <SecondaryButton
-                      label={deleteHostedFileMutation.isPending ? "Deleting..." : "Delete"}
-                      onPress={() => {
-                        void deleteHostedFileMutation.mutateAsync({ hostedFileId: hostedFile.id });
-                      }}
-                      tone={"danger"}
-                      disabled={deleteHostedFileMutation.isPending}
-                    />
-                  </View>
+        <View style={styles.section}>
+          <Text style={styles.sectionLabel}>Device</Text>
+          <View style={styles.group}>
+            {isEditingDeviceName ? (
+              <View style={styles.editRow}>
+                <View style={styles.settingIconWrap}>
+                  <Smartphone color={designTheme.secondaryForeground} size={18} strokeWidth={1.9} />
                 </View>
-              ))
+                <TextInput
+                  autoCapitalize={"words"}
+                  onBlur={() => setIsEditingDeviceName(false)}
+                  onChangeText={setDraftDeviceName}
+                  onSubmitEditing={() => {
+                    setDeviceName(draftDeviceName);
+                    setIsEditingDeviceName(false);
+                  }}
+                  placeholder={"My Phone"}
+                  placeholderTextColor={designTheme.mutedForeground}
+                  style={styles.deviceInput}
+                  value={draftDeviceName}
+                />
+                <SecondaryButton
+                  label={"Done"}
+                  onPress={() => {
+                    setDeviceName(draftDeviceName);
+                    setIsEditingDeviceName(false);
+                  }}
+                />
+              </View>
             ) : (
-              <InlineNotice description={"You have not created any hosted links yet."} title={"No hosted links"} />
+              <SettingItem
+                description={"Your device name shown to nearby people"}
+                icon={<Smartphone color={designTheme.secondaryForeground} size={18} strokeWidth={1.9} />}
+                label={deviceName}
+                onPress={() => {
+                  setDraftDeviceName(deviceName);
+                  setIsEditingDeviceName(true);
+                }}
+              />
             )}
           </View>
         </View>
-      ) : null}
 
-      <View style={styles.section}>
-        <Text style={styles.sectionLabel}>Support</Text>
-        <View style={styles.stack}>
-          <SettingItem
-            icon={<HelpCircle color={designTheme.secondaryForeground} size={20} strokeWidth={1.9} />}
-            label={"Help & FAQ"}
-            onPress={() => {
-              Alert.alert(
-                "Help & FAQ",
-                "Free transfers work directly over nearby WiFi. Upgrade only when you want faster transfers or hosted browser links.",
-              );
-            }}
-          />
-          <SettingItem
-            description={`Version ${Constants.expoConfig?.version ?? "1.0.0"}`}
-            icon={<Info color={designTheme.secondaryForeground} size={20} strokeWidth={1.9} />}
-            label={"About"}
-            onPress={() => {
-              Alert.alert("About", `File Transfers\nVersion ${Constants.expoConfig?.version ?? "1.0.0"}`);
-            }}
-          />
+        <View style={styles.section}>
+          <Text style={styles.sectionLabel}>Premium Features</Text>
+          <View style={styles.group}>
+            <SettingItem
+              description={
+                isPremium ? "Create and manage browser download links" : `${FILE_TRANSFERS_PRO_NAME} feature`
+              }
+              icon={<Link color={designTheme.secondaryForeground} size={18} strokeWidth={1.9} />}
+              label={"Hosted Links"}
+              onPress={() => {
+                if (!isPremium) {
+                  setShowPremiumDetails(true);
+                  setHostedNotice(
+                    session?.user
+                      ? `${FILE_TRANSFERS_PRO_NAME} is required to create hosted links.`
+                      : "Sign in first, then upgrade to FileTransfers Pro to create hosted links.",
+                  );
+                  return;
+                }
+
+                setWantsHostedLinksPanel((current) => !current);
+              }}
+            />
+            <SettingItem
+              description={`Restore ${FILE_TRANSFERS_PRO_NAME} from the current store account`}
+              icon={<RefreshCw color={designTheme.secondaryForeground} size={18} strokeWidth={1.9} />}
+              label={"Restore Purchase"}
+              onPress={() => {
+                void handleRestorePurchases();
+              }}
+            />
+          </View>
         </View>
-      </View>
 
-      <Pressable
-        onPress={() => {
-          void handleRestorePurchases();
-        }}
-        style={({ pressed }) => [styles.restoreButton, pressed ? styles.pressed : null]}
+        {showHostedLinksPanel ? (
+          <View style={styles.section}>
+            <View style={styles.panel}>
+              <Text style={styles.panelTitle}>Hosted links</Text>
+              <Text style={styles.panelCopy}>Create a browser download link with an optional 6-digit passcode.</Text>
+              <TextInput
+                keyboardType={"number-pad"}
+                maxLength={6}
+                onChangeText={setHostedPasscode}
+                placeholder={"Optional 6-digit passcode"}
+                placeholderTextColor={designTheme.mutedForeground}
+                style={styles.hostedInput}
+                value={hostedPasscode}
+              />
+              <PrimaryButton
+                disabled={createHostedUploadMutation.isPending || completeHostedUploadMutation.isPending}
+                label={
+                  createHostedUploadMutation.isPending || completeHostedUploadMutation.isPending
+                    ? "Uploading..."
+                    : "Create hosted link"
+                }
+                onPress={() => {
+                  void handleCreateHostedUpload();
+                }}
+              />
+
+              {hostedNotice ? <InlineNotice description={hostedNotice} title={"Hosted link"} /> : null}
+              {hostedFilesQuery.error ? (
+                <InlineNotice
+                  description={
+                    hostedFilesQuery.error instanceof Error
+                      ? hostedFilesQuery.error.message
+                      : "Unable to load hosted links."
+                  }
+                  title={"Hosted links"}
+                  tone={"danger"}
+                />
+              ) : null}
+
+              <View style={styles.hostedList}>
+                {hostedFilesQuery.data?.length ? (
+                  hostedFilesQuery.data.map((hostedFile) => (
+                    <View key={hostedFile.id} style={styles.hostedFileRow}>
+                      <View style={styles.hostedFileCopy}>
+                        <Text numberOfLines={1} style={styles.hostedFileName}>
+                          {hostedFile.fileName}
+                        </Text>
+                        <Text style={styles.hostedFileMeta}>
+                          Expires {new Date(hostedFile.expiresAt).toLocaleDateString()}
+                          {hostedFile.requiresPasscode ? " • Passcode" : ""}
+                        </Text>
+                      </View>
+                      <View style={styles.hostedActions}>
+                        <SecondaryButton
+                          label={"Open"}
+                          onPress={() => {
+                            void Linking.openURL(hostedFile.downloadPageUrl);
+                          }}
+                        />
+                        <SecondaryButton
+                          label={deleteHostedFileMutation.isPending ? "Deleting..." : "Delete"}
+                          onPress={() => {
+                            void deleteHostedFileMutation.mutateAsync({ hostedFileId: hostedFile.id });
+                          }}
+                          tone={"danger"}
+                          disabled={deleteHostedFileMutation.isPending}
+                        />
+                      </View>
+                    </View>
+                  ))
+                ) : (
+                  <InlineNotice description={"You have not created any hosted links yet."} title={"No hosted links"} />
+                )}
+              </View>
+            </View>
+          </View>
+        ) : null}
+
+        <View style={styles.section}>
+          <Text style={styles.sectionLabel}>Transfers</Text>
+          <View style={styles.group}>
+            <SettingItem
+              action={
+                <Switch
+                  ios_backgroundColor={designTheme.border}
+                  onValueChange={setAutoAcceptKnownDevices}
+                  thumbColor={
+                    Platform.OS === "android" && autoAcceptKnownDevices ? designTheme.primaryForeground : undefined
+                  }
+                  trackColor={{ false: designTheme.border, true: designTheme.primary }}
+                  value={autoAcceptKnownDevices}
+                />
+              }
+              description={"Skip approval for devices you've used before"}
+              icon={<Shield color={designTheme.secondaryForeground} size={18} strokeWidth={1.9} />}
+              label={"Auto-accept from known devices"}
+            />
+          </View>
+        </View>
+
+        <View style={styles.section}>
+          <Text style={styles.sectionLabel}>General</Text>
+          <View style={styles.group}>
+            <SettingItem
+              icon={<HelpCircle color={designTheme.secondaryForeground} size={18} strokeWidth={1.9} />}
+              label={"Help & FAQ"}
+              onPress={() => {
+                Alert.alert(
+                  "Help & FAQ",
+                  "Free transfers work directly over nearby WiFi. Upgrade only when you want faster transfers or hosted browser links.",
+                );
+              }}
+            />
+            <SettingItem
+              description={`Version ${Constants.expoConfig?.version ?? "1.0.0"}`}
+              icon={<Info color={designTheme.secondaryForeground} size={18} strokeWidth={1.9} />}
+              label={"About"}
+              onPress={() => {
+                Alert.alert("About", `File Transfers\nVersion ${Constants.expoConfig?.version ?? "1.0.0"}`);
+              }}
+            />
+          </View>
+        </View>
+
+        <View style={styles.footerNote}>
+          <Text style={styles.footerNoteText}>
+            Free transfers stay anonymous and work over nearby WiFi. Premium only adds faster speeds and hosted links.
+          </Text>
+        </View>
+      </ScrollView>
+
+      <Modal
+        animationType={"fade"}
+        onRequestClose={() => setShowPremiumDetails(false)}
+        transparent
+        visible={showPremiumDetails}
       >
-        <Text style={styles.restoreButtonLabel}>Restore purchases</Text>
-      </Pressable>
-    </ScrollView>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <Pressable
+              hitSlop={12}
+              onPress={() => setShowPremiumDetails(false)}
+              style={({ pressed }) => [styles.modalCloseButton, pressed ? styles.pressed : null]}
+            >
+              <X color={designTheme.mutedForeground} size={18} strokeWidth={2.2} />
+            </Pressable>
+
+            <ScrollView contentContainerStyle={styles.modalContent} showsVerticalScrollIndicator={false}>
+              <View style={styles.modalHeroIcon}>
+                <Crown color={designTheme.primary} size={28} strokeWidth={1.9} />
+              </View>
+              <Text style={styles.modalTitle}>{FILE_TRANSFERS_PRO_NAME}</Text>
+              <Text style={styles.modalDescription}>
+                RevenueCat manages the subscription lifecycle while the app keeps transfer speed and hosted-link access
+                in sync with customer info.
+              </Text>
+
+              <View style={styles.modalBenefits}>
+                <PremiumBenefit label={"Unlimited local transfer speed"} />
+                <PremiumBenefit label={"Hosted file links in the browser"} />
+                <PremiumBenefit label={"Up to 10 GB per file"} />
+              </View>
+
+              {session?.user ? (
+                <InlineNotice description={session.user.email ?? "Signed in"} title={"App account linked"} />
+              ) : (
+                <InlineNotice
+                  description={
+                    "Buy or restore on this device now. Sign in only when you want hosted links or cross-device restore."
+                  }
+                  title={"No app account required"}
+                />
+              )}
+
+              {formatExpirationCopy(premiumAccess.entitlement.expiresAt) ? (
+                <InlineNotice
+                  description={formatExpirationCopy(premiumAccess.entitlement.expiresAt) ?? ""}
+                  title={`${FILE_TRANSFERS_PRO_NAME} renewal`}
+                />
+              ) : null}
+
+              <View style={styles.modalSection}>
+                {hasConfiguredRevenueCat ? (
+                  isLoadingOfferings && !plans.availablePackages.length ? (
+                    <View style={styles.loadingRow}>
+                      <ActivityIndicator color={designTheme.primary} />
+                      <Text style={styles.loadingLabel}>Loading {FILE_TRANSFERS_PRO_NAME} plans...</Text>
+                    </View>
+                  ) : plans.availablePackages.length ? (
+                    plans.availablePackages.map((selectedPackage, index) => (
+                      <PremiumPackageCard
+                        key={selectedPackage.identifier}
+                        highlighted={selectedPackage.product.identifier === PREMIUM_PRODUCT_IDS.yearly || index === 0}
+                        onPress={() => {
+                          void handlePurchase(selectedPackage);
+                        }}
+                        selectedPackage={selectedPackage}
+                      />
+                    ))
+                  ) : (
+                    <InlineNotice
+                      description={`Create a current offering in RevenueCat and attach products ${PREMIUM_PRODUCT_IDS.monthly} and ${PREMIUM_PRODUCT_IDS.yearly}.`}
+                      title={"Offering setup required"}
+                      tone={"warning"}
+                    />
+                  )
+                ) : (
+                  <InlineNotice
+                    description={"Add the RevenueCat public API keys to this build to enable live purchases."}
+                    title={"RevenueCat keys missing"}
+                    tone={"warning"}
+                  />
+                )}
+
+                {customerInfo?.activeSubscriptions.length ? (
+                  <InlineNotice
+                    description={customerInfo.activeSubscriptions.join(", ")}
+                    title={"Active store products"}
+                  />
+                ) : null}
+
+                <PrimaryButton
+                  disabled={!hasConfiguredRevenueCat || isLoadingCustomerInfo}
+                  label={isPremium ? "Open Customer Center" : "Open paywall"}
+                  onPress={() => {
+                    if (isPremium) {
+                      void handleOpenCustomerCenter();
+                      return;
+                    }
+
+                    void handlePresentPaywall();
+                  }}
+                />
+
+                {hasConfiguredRevenueCat ? (
+                  <SecondaryButton
+                    disabled={isLoadingCustomerInfo}
+                    label={"Restore purchases"}
+                    onPress={() => {
+                      void handleRestorePurchases();
+                    }}
+                  />
+                ) : null}
+
+                {hasConfiguredRevenueCat && isPremium ? (
+                  <SecondaryButton
+                    disabled={isLoadingCustomerInfo}
+                    label={"Refresh customer info"}
+                    onPress={() => {
+                      void refreshCustomerInfo();
+                    }}
+                  />
+                ) : null}
+
+                {premiumAccess.entitlement.managementUrl ? (
+                  <SecondaryButton
+                    label={"Open store management"}
+                    onPress={() => {
+                      void Linking.openURL(premiumAccess.entitlement.managementUrl ?? "");
+                    }}
+                  />
+                ) : null}
+
+                {!session?.user ? (
+                  <>
+                    <PrimaryButton
+                      disabled={isSigningInWithApple}
+                      label={Platform.OS === "ios" ? "Continue with Apple" : "Sign in with Apple"}
+                      onPress={() => {
+                        void triggerAppleSignIn();
+                      }}
+                      tone={"inverted"}
+                    />
+                    <SecondaryButton
+                      disabled={isSigningInWithGoogle}
+                      label={"Continue with Google"}
+                      onPress={() => {
+                        void triggerGoogleSignIn();
+                      }}
+                    />
+                  </>
+                ) : (
+                  <SecondaryButton
+                    label={"Sign out"}
+                    onPress={() => {
+                      void signOut();
+                      setWantsHostedLinksPanel(false);
+                    }}
+                    tone={"danger"}
+                  />
+                )}
+              </View>
+
+              {purchaseNotice ? (
+                <InlineNotice description={purchaseNotice} title={`${FILE_TRANSFERS_PRO_NAME} status`} />
+              ) : null}
+              {!purchaseNotice && revenueCatError ? (
+                <InlineNotice description={revenueCatError} title={"RevenueCat"} tone={"danger"} />
+              ) : null}
+              {appleError ? <InlineNotice description={appleError} title={"Apple sign-in"} tone={"danger"} /> : null}
+              {googleError ? <InlineNotice description={googleError} title={"Google sign-in"} tone={"danger"} /> : null}
+
+              <SecondaryButton
+                label={session?.user ? "Done" : "Maybe later"}
+                onPress={() => setShowPremiumDetails(false)}
+              />
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+    </>
   );
 }
 
@@ -657,38 +832,80 @@ const styles = StyleSheet.create({
     color: designTheme.foreground,
     fontFamily: designFonts.semibold,
     fontSize: 24,
-    marginBottom: 24,
+    marginBottom: 20,
   },
   section: {
     marginBottom: 24,
   },
   sectionLabel: {
     color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 14,
-    marginBottom: 12,
-    paddingHorizontal: 4,
+    fontFamily: designFonts.medium,
+    fontSize: 12,
+    letterSpacing: 0.8,
+    marginBottom: 10,
+    textTransform: "uppercase",
   },
-  stack: {
-    gap: 12,
-  },
-  settingItem: {
-    alignItems: "center",
+  group: {
     backgroundColor: designTheme.card,
     borderColor: designTheme.border,
     borderRadius: 18,
     borderWidth: 1,
+    overflow: "hidden",
+  },
+  heroCard: {
+    backgroundColor: designTheme.primary,
+    borderRadius: 22,
+    padding: 20,
+  },
+  heroCardActive: {
+    backgroundColor: "#1d4ed8",
+  },
+  heroHeader: {
     flexDirection: "row",
-    gap: 16,
-    padding: 16,
+    gap: 14,
+    marginBottom: 18,
+  },
+  heroIconWrap: {
+    alignItems: "center",
+    backgroundColor: "rgba(255, 255, 255, 0.18)",
+    borderRadius: 18,
+    height: 56,
+    justifyContent: "center",
+    width: 56,
+  },
+  heroCopy: {
+    flex: 1,
+    gap: 4,
+  },
+  heroTitle: {
+    color: designTheme.primaryForeground,
+    fontFamily: designFonts.semibold,
+    fontSize: 24,
+  },
+  heroDescription: {
+    color: "rgba(255, 255, 255, 0.82)",
+    fontFamily: designFonts.regular,
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  settingItem: {
+    alignItems: "center",
+    backgroundColor: designTheme.card,
+    borderBottomColor: designTheme.border,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    flexDirection: "row",
+    gap: 14,
+    minHeight: 72,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
   },
   settingIconWrap: {
     alignItems: "center",
     backgroundColor: designTheme.secondary,
-    borderRadius: 14,
-    height: 40,
+    borderRadius: 999,
+    height: 36,
     justifyContent: "center",
-    width: 40,
+    width: 36,
   },
   settingCopy: {
     flex: 1,
@@ -697,165 +914,40 @@ const styles = StyleSheet.create({
   settingLabel: {
     color: designTheme.foreground,
     fontFamily: designFonts.medium,
-    fontSize: 16,
-  },
-  settingDescription: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  editRow: {
-    alignItems: "center",
-    backgroundColor: designTheme.card,
-    borderColor: designTheme.border,
-    borderRadius: 18,
-    borderWidth: 1,
-    flexDirection: "row",
-    gap: 16,
-    padding: 16,
-  },
-  deviceInput: {
-    color: designTheme.foreground,
-    flex: 1,
-    fontFamily: designFonts.medium,
-    fontSize: 16,
-    minHeight: 24,
-    paddingVertical: 0,
-  },
-  premiumCard: {
-    backgroundColor: "rgba(79, 70, 229, 0.05)",
-    borderColor: "rgba(79, 70, 229, 0.18)",
-    borderRadius: 18,
-    borderWidth: 1,
-    padding: 20,
-  },
-  premiumHead: {
-    flexDirection: "row",
-    gap: 12,
-    marginBottom: 16,
-  },
-  premiumIconWrap: {
-    alignItems: "center",
-    backgroundColor: designTheme.primary,
-    borderRadius: 14,
-    height: 40,
-    justifyContent: "center",
-    width: 40,
-  },
-  premiumIconWrapActive: {
-    backgroundColor: designTheme.primary,
-  },
-  premiumCopy: {
-    flex: 1,
-    gap: 2,
-  },
-  premiumTitle: {
-    color: designTheme.foreground,
-    fontFamily: designFonts.semibold,
-    fontSize: 18,
-  },
-  premiumDescription: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 14,
-  },
-  bulletList: {
-    gap: 8,
-    marginBottom: 16,
-    marginLeft: 4,
-  },
-  bulletRow: {
-    alignItems: "center",
-    flexDirection: "row",
-    gap: 8,
-  },
-  bulletDot: {
-    backgroundColor: designTheme.primary,
-    borderRadius: 999,
-    height: 4,
-    width: 4,
-  },
-  bulletText: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 14,
-  },
-  primaryButton: {
-    alignItems: "center",
-    backgroundColor: designTheme.primary,
-    borderRadius: 14,
-    justifyContent: "center",
-    minHeight: 44,
-    paddingHorizontal: 16,
-  },
-  primaryButtonLabel: {
-    color: designTheme.primaryForeground,
-    fontFamily: designFonts.medium,
-    fontSize: 16,
-  },
-  secondaryButton: {
-    alignItems: "center",
-    backgroundColor: designTheme.card,
-    borderColor: designTheme.border,
-    borderRadius: 14,
-    borderWidth: 1,
-    justifyContent: "center",
-    minHeight: 40,
-    paddingHorizontal: 14,
-  },
-  secondaryButtonLabel: {
-    color: designTheme.foreground,
-    fontFamily: designFonts.medium,
     fontSize: 15,
   },
-  dangerButton: {
-    borderColor: "rgba(220, 38, 38, 0.18)",
-  },
-  dangerButtonLabel: {
-    color: designTheme.destructive,
-  },
-  inlinePanel: {
-    backgroundColor: designTheme.card,
-    borderColor: designTheme.border,
-    borderRadius: 18,
-    borderWidth: 1,
-    gap: 12,
-    marginBottom: 24,
-    padding: 16,
-  },
-  inlineNotice: {
-    backgroundColor: designTheme.muted,
-    borderRadius: 14,
-    gap: 4,
-    padding: 12,
-  },
-  warningNotice: {
-    backgroundColor: "rgba(245, 158, 11, 0.1)",
-  },
-  dangerNotice: {
-    backgroundColor: "rgba(220, 38, 38, 0.08)",
-  },
-  inlineNoticeTitle: {
-    color: designTheme.foreground,
-    fontFamily: designFonts.medium,
-    fontSize: 14,
-  },
-  inlineNoticeDescription: {
+  settingDescription: {
     color: designTheme.mutedForeground,
     fontFamily: designFonts.regular,
     fontSize: 13,
     lineHeight: 18,
   },
-  loadingRow: {
+  editRow: {
     alignItems: "center",
+    backgroundColor: designTheme.card,
+    borderBottomColor: designTheme.border,
+    borderBottomWidth: StyleSheet.hairlineWidth,
     flexDirection: "row",
     gap: 12,
+    minHeight: 72,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
   },
-  loadingLabel: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 14,
+  deviceInput: {
+    color: designTheme.foreground,
+    flex: 1,
+    fontFamily: designFonts.medium,
+    fontSize: 15,
+    minHeight: 24,
+    paddingVertical: 0,
+  },
+  panel: {
+    backgroundColor: designTheme.card,
+    borderColor: designTheme.border,
+    borderRadius: 18,
+    borderWidth: 1,
+    gap: 12,
+    padding: 16,
   },
   panelTitle: {
     color: designTheme.foreground,
@@ -869,7 +961,7 @@ const styles = StyleSheet.create({
     lineHeight: 20,
   },
   hostedInput: {
-    backgroundColor: "transparent",
+    backgroundColor: designTheme.input,
     borderColor: designTheme.border,
     borderRadius: 14,
     borderWidth: 1,
@@ -879,6 +971,9 @@ const styles = StyleSheet.create({
     minHeight: 48,
     paddingHorizontal: 14,
     paddingVertical: 12,
+  },
+  hostedList: {
+    gap: 10,
   },
   hostedFileRow: {
     backgroundColor: designTheme.muted,
@@ -903,15 +998,209 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     gap: 10,
   },
-  restoreButton: {
-    alignItems: "center",
+  footerNote: {
+    backgroundColor: designTheme.muted,
+    borderRadius: 16,
     marginTop: 8,
-    paddingVertical: 12,
+    padding: 16,
   },
-  restoreButtonLabel: {
+  footerNoteText: {
+    color: designTheme.mutedForeground,
+    fontFamily: designFonts.regular,
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  primaryButton: {
+    alignItems: "center",
+    backgroundColor: designTheme.primary,
+    borderRadius: 14,
+    justifyContent: "center",
+    minHeight: 48,
+    paddingHorizontal: 16,
+  },
+  primaryButtonInverted: {
+    backgroundColor: designTheme.card,
+  },
+  primaryButtonLabel: {
+    color: designTheme.primaryForeground,
+    fontFamily: designFonts.medium,
+    fontSize: 16,
+  },
+  primaryButtonLabelInverted: {
+    color: designTheme.primary,
+  },
+  secondaryButton: {
+    alignItems: "center",
+    backgroundColor: designTheme.card,
+    borderColor: designTheme.border,
+    borderRadius: 14,
+    borderWidth: 1,
+    justifyContent: "center",
+    minHeight: 44,
+    paddingHorizontal: 14,
+  },
+  secondaryButtonLabel: {
+    color: designTheme.foreground,
+    fontFamily: designFonts.medium,
+    fontSize: 15,
+  },
+  dangerButton: {
+    borderColor: "rgba(220, 38, 38, 0.16)",
+  },
+  dangerButtonLabel: {
+    color: designTheme.destructive,
+  },
+  inlineNotice: {
+    backgroundColor: designTheme.muted,
+    borderRadius: 14,
+    gap: 4,
+    padding: 12,
+  },
+  warningNotice: {
+    backgroundColor: "rgba(217, 119, 6, 0.1)",
+  },
+  dangerNotice: {
+    backgroundColor: "rgba(220, 38, 38, 0.08)",
+  },
+  inlineNoticeTitle: {
+    color: designTheme.foreground,
+    fontFamily: designFonts.medium,
+    fontSize: 14,
+  },
+  inlineNoticeDescription: {
+    color: designTheme.mutedForeground,
+    fontFamily: designFonts.regular,
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  modalOverlay: {
+    alignItems: "center",
+    backgroundColor: "rgba(3, 2, 19, 0.42)",
+    flex: 1,
+    justifyContent: "center",
+    padding: 24,
+  },
+  modalCard: {
+    backgroundColor: designTheme.card,
+    borderRadius: 24,
+    maxHeight: "88%",
+    paddingTop: 20,
+    width: "100%",
+  },
+  modalCloseButton: {
+    alignItems: "center",
+    alignSelf: "flex-end",
+    height: 36,
+    justifyContent: "center",
+    marginRight: 16,
+    width: 36,
+  },
+  modalContent: {
+    gap: 14,
+    paddingHorizontal: 20,
+    paddingBottom: 20,
+  },
+  modalHeroIcon: {
+    alignItems: "center",
+    alignSelf: "center",
+    backgroundColor: "rgba(37, 99, 235, 0.1)",
+    borderRadius: 999,
+    height: 64,
+    justifyContent: "center",
+    width: 64,
+  },
+  modalTitle: {
+    color: designTheme.foreground,
+    fontFamily: designFonts.semibold,
+    fontSize: 28,
+    textAlign: "center",
+  },
+  modalDescription: {
     color: designTheme.mutedForeground,
     fontFamily: designFonts.regular,
     fontSize: 14,
+    lineHeight: 20,
+    textAlign: "center",
+  },
+  modalBenefits: {
+    gap: 10,
+    marginTop: 4,
+  },
+  benefitRow: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: 10,
+  },
+  benefitIconWrap: {
+    alignItems: "center",
+    backgroundColor: "rgba(22, 163, 74, 0.12)",
+    borderRadius: 999,
+    height: 20,
+    justifyContent: "center",
+    width: 20,
+  },
+  benefitLabel: {
+    color: designTheme.foreground,
+    flex: 1,
+    fontFamily: designFonts.regular,
+    fontSize: 14,
+  },
+  modalSection: {
+    gap: 12,
+  },
+  loadingRow: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: 12,
+  },
+  loadingLabel: {
+    color: designTheme.mutedForeground,
+    fontFamily: designFonts.regular,
+    fontSize: 14,
+  },
+  packageCard: {
+    backgroundColor: designTheme.card,
+    borderColor: designTheme.border,
+    borderRadius: 16,
+    borderWidth: 1,
+    gap: 6,
+    padding: 16,
+  },
+  packageCardHighlighted: {
+    backgroundColor: "rgba(37, 99, 235, 0.05)",
+    borderColor: "rgba(37, 99, 235, 0.28)",
+  },
+  packageHeader: {
+    alignItems: "center",
+    flexDirection: "row",
+    justifyContent: "space-between",
+  },
+  packageTitle: {
+    color: designTheme.foreground,
+    fontFamily: designFonts.semibold,
+    fontSize: 16,
+  },
+  packageBadge: {
+    backgroundColor: designTheme.primary,
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  packageBadgeLabel: {
+    color: designTheme.primaryForeground,
+    fontFamily: designFonts.medium,
+    fontSize: 11,
+  },
+  packagePrice: {
+    color: designTheme.foreground,
+    fontFamily: designFonts.semibold,
+    fontSize: 22,
+  },
+  packageDescription: {
+    color: designTheme.mutedForeground,
+    fontFamily: designFonts.regular,
+    fontSize: 13,
+    lineHeight: 18,
   },
   disabled: {
     opacity: 0.5,
