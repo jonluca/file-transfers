@@ -10,6 +10,8 @@ export type TransferStatus =
   | "failed"
   | "canceled";
 
+export type HttpShareStatus = "sharing" | "stopped" | "failed";
+
 export interface SelectedTransferFile {
   id: string;
   name: string;
@@ -24,10 +26,6 @@ export interface TransferManifest {
   files: SelectedTransferFile[];
   fileCount: number;
   totalBytes: number;
-  transferToken: string;
-  advertisedHost: string;
-  advertisedPort: number;
-  certificateFingerprint: string;
   isPremiumSender: boolean;
   createdAt: string;
 }
@@ -66,15 +64,8 @@ export interface TransferSession {
   progress: TransferProgress;
 }
 
-export type DirectConnectionMode = "reverse-connect" | "same-socket";
-
 export interface SenderTransferAccess {
   sessionId: string;
-  host: string;
-  port: number;
-  token: string;
-  certificateFingerprint: string;
-  directConnectionMode: DirectConnectionMode;
   relay: RelayAccess | null;
 }
 
@@ -120,6 +111,21 @@ export interface TransferHistoryEntry {
   files: ReceivedFileRecord[];
   createdAt: string;
   updatedAt: string;
+  detail: string | null;
+}
+
+export interface HttpShareSession {
+  id: string;
+  status: HttpShareStatus;
+  deviceName: string;
+  shareUrl: string;
+  manifestUrl: string;
+  qrValue: string;
+  files: SelectedTransferFile[];
+  totalBytes: number;
+  startedAt: string;
+  requestCount: number;
+  lastRequestAt: string | null;
   detail: string | null;
 }
 

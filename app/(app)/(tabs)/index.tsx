@@ -1,8 +1,9 @@
 import { CameraView, useCameraPermissions } from "expo-camera";
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { useIsFocused } from "@react-navigation/native";
+import React, { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
+import { ActivityIndicator, AppState, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import QRCode from "react-native-qrcode-svg";
-import { Download, File, FileText, Film, ImageIcon, Music, QrCode, Smartphone, Upload, X } from "lucide-react-native";
+import { Download, File, FileText, Film, Globe, ImageIcon, Music, QrCode, Smartphone, Upload, X } from "lucide-react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { usePremiumAccess } from "@/hooks/use-premium-access";
 import { designFonts, designTheme } from "@/lib/design/theme";
@@ -10,14 +11,17 @@ import {
   acceptIncomingTransferOffer,
   declineIncomingTransferOffer,
   formatBytes,
+  startHttpShareSession,
   parseDiscoveryQrPayload,
   pickTransferFiles,
   startReceivingAvailability,
   startSendingTransfer,
   startNearbyScan,
+  stopHttpShareSession,
   stopReceivingAvailability,
   stopSendingTransfer,
   type DiscoveryRecord,
+  type HttpShareSession,
   type ReceiveSession,
   type SelectedTransferFile,
   type TransferHistoryEntry,
@@ -26,7 +30,7 @@ import {
 } from "@/lib/file-transfer";
 import { useAppStore, useDeviceName } from "@/store";
 
-type TransferMode = "idle" | "sending" | "waiting" | "receiving" | "transferring";
+type TransferMode = "idle" | "sending" | "waiting" | "receiving" | "transferring" | "sharing";
 
 function MimeIcon({ type }: { type: string }) {
   if (type.startsWith("image/")) {
@@ -50,6 +54,17 @@ function MimeIcon({ type }: { type: string }) {
 
 function getTransferDetail(value: string | null | undefined, fallback: string) {
   return value ?? fallback;
+}
+
+function formatLastRequestTime(value: string | null) {
+  if (!value) {
+    return "No visits yet";
+  }
+
+  return new Date(value).toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit",
+  });
 }
 
 function createHistoryEntryFromSendSession(session: TransferSession): TransferHistoryEntry {
@@ -214,6 +229,7 @@ function WaitingPulse({ tone = "primary" }: { tone?: "primary" | "neutral" }) {
 }
 
 export default function TransferScreen() {
+  const isFocused = useIsFocused();
   const insets = useSafeAreaInsets();
   const compactBottomPadding = insets.bottom + 16;
   const regularBottomPadding = insets.bottom + 24;
@@ -228,6 +244,7 @@ export default function TransferScreen() {
   const [stagedFiles, setStagedFiles] = useState<SelectedTransferFile[]>([]);
   const [activeSendSession, setActiveSendSession] = useState<TransferSession | null>(null);
   const [activeReceiveSession, setActiveReceiveSession] = useState<ReceiveSession | null>(null);
+  const [activeHttpShareSession, setActiveHttpShareSession] = useState<HttpShareSession | null>(null);
   const [nearbyRecords, setNearbyRecords] = useState<DiscoveryRecord[]>([]);
   const [transferProgress, setTransferProgress] = useState<TransferProgress | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -236,6 +253,7 @@ export default function TransferScreen() {
   const completionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handledFinalizedSendSessionIds = useRef(new Set<string>());
   const handledFinalizedReceiveSessionIds = useRef(new Set<string>());
+  const stoppingHttpShareSessionIdRef = useRef<string | null>(null);
   const scannedQrRef = useRef(false);
 
   useEffect(() => {
@@ -272,6 +290,112 @@ export default function TransferScreen() {
       }
     };
   }, []);
+
+  const stopBrowserShareSession = useEffectEvent(
+    async (
+      options: {
+        sessionId?: string | null;
+        nextMode?: TransferMode;
+        noticeMessage?: string | null;
+      } = {},
+    ) => {
+      const sessionId = options.sessionId ?? activeHttpShareSession?.id ?? null;
+      const nextMode = options.nextMode ?? "idle";
+      const noticeMessage = options.noticeMessage;
+
+      if (!sessionId) {
+        return;
+      }
+
+      if (stoppingHttpShareSessionIdRef.current === sessionId) {
+        return;
+      }
+
+      stoppingHttpShareSessionIdRef.current = sessionId;
+
+      let stopError: unknown = null;
+      await stopHttpShareSession(sessionId).catch((error) => {
+        stopError = error;
+      });
+
+      const stoppingSessionId = stoppingHttpShareSessionIdRef.current;
+      if (stoppingSessionId === sessionId) {
+        stoppingHttpShareSessionIdRef.current = null;
+      }
+
+      setActiveHttpShareSession((current) => (current?.id === sessionId ? null : current));
+      setMode((current) => (current === "sharing" ? nextMode : current));
+      setShowQrCode(false);
+      setShowQrScanner(false);
+
+      if (noticeMessage !== undefined) {
+        setNotice(noticeMessage);
+      }
+
+      if (stopError instanceof Error) {
+        setNotice(stopError.message);
+      }
+    },
+  );
+
+  const handleHttpShareSessionUpdate = useEffectEvent((nextSession: HttpShareSession) => {
+    setActiveHttpShareSession({ ...nextSession });
+
+    if (nextSession.status === "sharing") {
+      setMode("sharing");
+      return;
+    }
+
+    setActiveHttpShareSession(null);
+
+    if (nextSession.status === "failed") {
+      setNotice(getTransferDetail(nextSession.detail, "Browser sharing stopped unexpectedly."));
+    }
+
+    setMode((current) => (current === "sharing" ? "idle" : current));
+  });
+
+  useEffect(() => {
+    const sessionId = activeHttpShareSession?.id;
+    if (!sessionId) {
+      return;
+    }
+
+    const subscription = AppState.addEventListener("change", (nextState) => {
+      if (nextState === "active") {
+        return;
+      }
+
+      void stopBrowserShareSession({
+        sessionId,
+        noticeMessage: "Browser sharing stopped because the app left the foreground.",
+      });
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, [activeHttpShareSession?.id]);
+
+  useEffect(() => {
+    if (isFocused || !activeHttpShareSession) {
+      return;
+    }
+
+    void stopBrowserShareSession({
+      sessionId: activeHttpShareSession.id,
+      noticeMessage: "Browser sharing stopped because you left the share screen.",
+    });
+  }, [activeHttpShareSession, isFocused]);
+
+  useEffect(() => {
+    const sessionId = activeHttpShareSession?.id;
+    return () => {
+      if (sessionId) {
+        void stopHttpShareSession(sessionId);
+      }
+    };
+  }, [activeHttpShareSession?.id]);
 
   const totalStagedBytes = useMemo(() => stagedFiles.reduce((sum, file) => sum + file.sizeBytes, 0), [stagedFiles]);
   const isPremiumUser = premiumAccess.isPremium;
@@ -382,6 +506,13 @@ export default function TransferScreen() {
   }
 
   async function handlePickFiles(append = false) {
+    if (activeHttpShareSession) {
+      await stopBrowserShareSession({
+        sessionId: activeHttpShareSession.id,
+        noticeMessage: null,
+      });
+    }
+
     const files = await pickTransferFiles();
 
     if (files.length === 0) {
@@ -411,6 +542,14 @@ export default function TransferScreen() {
       completionTimeoutRef.current = null;
     }
 
+    if (activeHttpShareSession) {
+      await stopBrowserShareSession({
+        sessionId: activeHttpShareSession.id,
+        noticeMessage: null,
+      });
+      return;
+    }
+
     if (activeSendSession) {
       await stopSendingTransfer(activeSendSession.id);
     }
@@ -429,6 +568,13 @@ export default function TransferScreen() {
   }
 
   async function beginReceivingAvailability({ preserveNotice = false }: { preserveNotice?: boolean } = {}) {
+    if (activeHttpShareSession) {
+      await stopBrowserShareSession({
+        sessionId: activeHttpShareSession.id,
+        noticeMessage: preserveNotice ? undefined : null,
+      });
+    }
+
     if (!preserveNotice) {
       setNotice(null);
     }
@@ -489,6 +635,40 @@ export default function TransferScreen() {
       setTransferProgress(null);
       setMode("sending");
       setNotice(error instanceof Error ? error.message : "Unable to start this transfer.");
+    }
+  }
+
+  async function handleStartBrowserShare() {
+    try {
+      if (activeHttpShareSession) {
+        await stopBrowserShareSession({
+          sessionId: activeHttpShareSession.id,
+          noticeMessage: null,
+        });
+      }
+
+      const files = await pickTransferFiles();
+      if (files.length === 0) {
+        return;
+      }
+
+      setNotice(null);
+      setTransferProgress(null);
+      setShowQrCode(false);
+      setShowQrScanner(false);
+
+      const session = await startHttpShareSession({
+        files,
+        deviceName,
+        updateSession: handleHttpShareSessionUpdate,
+      });
+
+      setActiveHttpShareSession(session);
+      setMode("sharing");
+    } catch (error) {
+      setActiveHttpShareSession(null);
+      setMode("idle");
+      setNotice(error instanceof Error ? error.message : "Unable to start browser sharing.");
     }
   }
 
@@ -576,6 +756,13 @@ export default function TransferScreen() {
             label={"Receive files"}
             onPress={() => {
               void handleStartReceiving();
+            }}
+          />
+          <LargeActionCard
+            icon={<Globe color={designTheme.foreground} size={46} strokeWidth={1.7} />}
+            label={"Share in browser"}
+            onPress={() => {
+              void handleStartBrowserShare();
             }}
           />
           {notice ? <Text style={styles.centerNotice}>{notice}</Text> : null}
@@ -789,6 +976,94 @@ export default function TransferScreen() {
           {notice ? <Text style={styles.receivingNotice}>{notice}</Text> : null}
         </ScrollView>
         <View style={{ paddingBottom: bottomLinkPadding }} />
+      </View>
+    );
+  }
+
+  if (mode === "sharing" && activeHttpShareSession) {
+    const requestCountLabel =
+      activeHttpShareSession.requestCount === 0
+        ? "No browser requests yet."
+        : `${activeHttpShareSession.requestCount} request${activeHttpShareSession.requestCount === 1 ? "" : "s"} received.`;
+
+    return (
+      <View style={[styles.root, { paddingTop: insets.top + 16 }]}>
+        <View style={styles.topBar}>
+          <Text style={styles.sectionTitle}>Sharing in browser</Text>
+          <HeaderButton
+            onPress={() => {
+              void handleCancel();
+            }}
+          />
+        </View>
+
+        <ScrollView
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={{ paddingBottom: 24 }}
+          style={styles.flex}
+        >
+          <View style={styles.discoverySection}>
+            <Text style={styles.discoveryTitle}>{deviceName}</Text>
+            <Text style={styles.discoveryHint}>Open this QR code or URL from another device on the same WiFi network.</Text>
+          </View>
+
+          <View style={styles.qrCard}>
+            <QRCode value={activeHttpShareSession.qrValue} size={172} color={designTheme.foreground} />
+          </View>
+
+          <View style={styles.shareCard}>
+            <Text style={styles.shareCardTitle}>Share URL</Text>
+            <Text selectable style={styles.shareUrlValue}>
+              {activeHttpShareSession.shareUrl}
+            </Text>
+            <View style={styles.shareMetaRow}>
+              <Text style={styles.shareMetaLabel}>Files</Text>
+              <Text style={styles.shareMetaValue}>
+                {activeHttpShareSession.files.length} file{activeHttpShareSession.files.length === 1 ? "" : "s"}
+              </Text>
+            </View>
+            <View style={styles.shareMetaRow}>
+              <Text style={styles.shareMetaLabel}>Total size</Text>
+              <Text style={styles.shareMetaValue}>{formatBytes(activeHttpShareSession.totalBytes)}</Text>
+            </View>
+            <View style={styles.shareMetaRow}>
+              <Text style={styles.shareMetaLabel}>Requests</Text>
+              <Text style={styles.shareMetaValue}>{requestCountLabel}</Text>
+            </View>
+            <View style={styles.shareMetaRow}>
+              <Text style={styles.shareMetaLabel}>Last visit</Text>
+              <Text style={styles.shareMetaValue}>{formatLastRequestTime(activeHttpShareSession.lastRequestAt)}</Text>
+            </View>
+          </View>
+
+          <View style={styles.discoverySection}>
+            <Text style={styles.discoveryTitle}>Files</Text>
+            <Text style={styles.discoveryHint}>These files stay available only while the app is active on this screen.</Text>
+          </View>
+
+          <View style={styles.stack}>
+            {activeHttpShareSession.files.map((file) => (
+              <FileRow key={file.id} file={file} />
+            ))}
+          </View>
+
+          {activeHttpShareSession.detail ? <Text style={styles.receivingNotice}>{activeHttpShareSession.detail}</Text> : null}
+          {notice ? <Text style={styles.receivingNotice}>{notice}</Text> : null}
+        </ScrollView>
+
+        <View style={[styles.footerArea, { paddingBottom: footerBottomPadding }]}>
+          <Text style={styles.footerMeta}>
+            {activeHttpShareSession.files.length} file{activeHttpShareSession.files.length === 1 ? "" : "s"} ·{" "}
+            {formatBytes(activeHttpShareSession.totalBytes)}
+          </Text>
+          <OutlineButton
+            label={"Stop sharing"}
+            icon={<X color={designTheme.foreground} size={16} strokeWidth={2} />}
+            onPress={() => {
+              void handleCancel();
+            }}
+          />
+        </View>
       </View>
     );
   }
@@ -1095,6 +1370,43 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     marginTop: 12,
     padding: 16,
+  },
+  shareCard: {
+    backgroundColor: designTheme.muted,
+    borderColor: designTheme.border,
+    borderRadius: 18,
+    borderWidth: 1,
+    gap: 12,
+    marginTop: 20,
+    padding: 16,
+  },
+  shareCardTitle: {
+    color: designTheme.foreground,
+    fontFamily: designFonts.semibold,
+    fontSize: 16,
+  },
+  shareUrlValue: {
+    color: designTheme.foreground,
+    fontFamily: designFonts.medium,
+    fontSize: 14,
+    lineHeight: 21,
+  },
+  shareMetaRow: {
+    flexDirection: "row",
+    gap: 12,
+    justifyContent: "space-between",
+  },
+  shareMetaLabel: {
+    color: designTheme.mutedForeground,
+    fontFamily: designFonts.regular,
+    fontSize: 13,
+  },
+  shareMetaValue: {
+    color: designTheme.foreground,
+    flex: 1,
+    fontFamily: designFonts.medium,
+    fontSize: 13,
+    textAlign: "right",
   },
   deviceRow: {
     alignItems: "center",

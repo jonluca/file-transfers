@@ -1,9 +1,39 @@
 import type { ConfigContext, ExpoConfig } from "expo/config";
+import { withXcodeProject } from "expo/config-plugins";
 
 const VERSION = "1.0.0";
+const IOS_IN_APP_PURCHASE_CAPABILITY = "com.apple.InAppPurchase";
+
+function withIosInAppPurchaseCapability(config: ExpoConfig) {
+  return withXcodeProject(config, (mod) => {
+    const project = mod.modResults;
+    const target = project.getFirstTarget();
+
+    if (!target) {
+      return mod;
+    }
+
+    const attributes = project.getFirstProject().firstProject.attributes as {
+      TargetAttributes?: Record<
+        string,
+        {
+          SystemCapabilities?: Record<string, { enabled: number }>;
+        }
+      >;
+    };
+    const targetAttributes = (attributes.TargetAttributes ??= {});
+    const capabilityAttributes = (targetAttributes[target.uuid] ??= {});
+    const systemCapabilities = (capabilityAttributes.SystemCapabilities ??= {});
+
+    // Standard StoreKit in-app purchases are a target capability, not an entitlements plist key.
+    systemCapabilities[IOS_IN_APP_PURCHASE_CAPABILITY] = { enabled: 1 };
+
+    return mod;
+  });
+}
 
 export default function getConfig({ config }: ConfigContext): ExpoConfig {
-  return {
+  return withIosInAppPurchaseCapability({
     ...config,
     name: "File Transfers",
     slug: "file-transfers",
@@ -30,6 +60,7 @@ export default function getConfig({ config }: ConfigContext): ExpoConfig {
       predictiveBackGestureEnabled: false,
       permissions: [
         "android.permission.INTERNET",
+        "android.permission.ACCESS_FINE_LOCATION",
         "android.permission.ACCESS_NETWORK_STATE",
         "android.permission.ACCESS_WIFI_STATE",
         "android.permission.CHANGE_WIFI_MULTICAST_STATE",
@@ -42,11 +73,24 @@ export default function getConfig({ config }: ConfigContext): ExpoConfig {
       "expo-router",
       "expo-web-browser",
       "expo-sqlite",
-      "expo-document-picker",
       [
         "expo-camera",
         {
           cameraPermission: "Scan a nearby device QR code to join a transfer session.",
+        },
+      ],
+      [
+        "expo-build-properties",
+        {
+          android: {
+            minSdkVersion: 28,
+          },
+        },
+      ],
+      [
+        "expo-document-picker",
+        {
+          iCloudContainerEnvironment: "Production",
         },
       ],
     ],
@@ -60,5 +104,5 @@ export default function getConfig({ config }: ConfigContext): ExpoConfig {
         projectId: "1070ca5a-5d8a-48ee-a705-b039eccc579b",
       },
     },
-  } satisfies ExpoConfig;
+  } satisfies ExpoConfig);
 }

@@ -134,6 +134,7 @@ const LOCAL_TRANSFER_SERVICE_TYPE = "_filetransfer._tcp";
 const LOCAL_TRANSFER_SERVICE_DOMAIN = "local.";
 const LOCAL_TRANSFER_CHUNK_SIZE_BYTES = 64 * 1024;
 const DIRECT_CONNECT_TIMEOUT_MS = 8000;
+const RELAY_FALLBACK_WAIT_TIMEOUT_MS = DIRECT_CONNECT_TIMEOUT_MS + 3000;
 const RELAY_POLL_INTERVAL_MS = 1500;
 const DEFAULT_API_URL = "http://127.0.0.1:3001";
 const DEFAULT_DISCOVER_TIMEOUT_MS = 5000;
@@ -190,36 +191,6 @@ function safeDeviceIp(value: string | null | undefined) {
   return value;
 }
 
-function getPeerIpv4Address(value: string | null | undefined) {
-  if (!value) {
-    return null;
-  }
-
-  const normalized =
-    value
-      .trim()
-      .replace(/^\[|\]$/g, "")
-      .replace(/^::ffff:/i, "")
-      .split("%")[0] ?? "";
-
-  return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(normalized) ? normalized : null;
-}
-
-function withResolvedSenderHost(offer: IncomingTransferOffer, peerAddress: string | null | undefined) {
-  const peerHost = getPeerIpv4Address(peerAddress);
-  if (!peerHost || peerHost === offer.sender.host) {
-    return offer;
-  }
-
-  return {
-    ...offer,
-    sender: {
-      ...offer.sender,
-      host: peerHost,
-    },
-  } satisfies IncomingTransferOffer;
-}
-
 function getPreferredLanAddress() {
   const interfaces = networkInterfaces();
   const preferred = ["en0", "bridge0", "en1", "en2"];
@@ -272,19 +243,11 @@ function createTransferManifest({
   files,
   deviceName,
   sessionId,
-  transferToken,
-  host,
-  port,
-  fingerprint,
   isPremium,
 }: {
   files: SelectedTransferFile[];
   deviceName: string;
   sessionId: string;
-  transferToken: string;
-  host: string;
-  port: number;
-  fingerprint: string;
   isPremium: boolean;
 }) {
   const totalBytes = files.reduce((sum, file) => sum + file.sizeBytes, 0);
@@ -295,10 +258,6 @@ function createTransferManifest({
     files,
     fileCount: files.length,
     totalBytes,
-    transferToken,
-    advertisedHost: host,
-    advertisedPort: port,
-    certificateFingerprint: fingerprint,
     isPremiumSender: isPremium,
     createdAt: nowIso(),
   } satisfies TransferManifest;
@@ -319,11 +278,6 @@ function toRelayAccess(relay: RelayCredentials | null): RelayAccess | null {
 function createSenderTransferAccess(manifest: TransferManifest, relay: RelayCredentials | null): SenderTransferAccess {
   return {
     sessionId: manifest.sessionId,
-    host: manifest.advertisedHost,
-    port: manifest.advertisedPort,
-    token: manifest.transferToken,
-    certificateFingerprint: manifest.certificateFingerprint,
-    directConnectionMode: "reverse-connect",
     relay: toRelayAccess(relay),
   };
 }
@@ -1224,76 +1178,6 @@ async function receiveTransferFromSocket({
   );
 }
 
-async function receiveDirectTransfer({
-  offer,
-  deviceName,
-  outputDir,
-  tlsMaterial,
-  onProgress,
-}: {
-  offer: IncomingTransferOffer;
-  deviceName: string;
-  outputDir: string;
-  tlsMaterial: ExtractedTlsMaterial;
-  onProgress?: (progress: TransferProgress) => void;
-}) {
-  const socket = tls.connect({
-    host: offer.sender.host,
-    port: offer.sender.port,
-    ca: tlsMaterial.cert,
-    rejectUnauthorized: false,
-    checkServerIdentity: () => undefined,
-  });
-
-  return receiveTransferFromSocket({
-    offer,
-    outputDir,
-    socket,
-    onProgress,
-    directTarget: `${offer.sender.host}:${offer.sender.port}`,
-    start: () =>
-      new Promise<void>((resolve, reject) => {
-        socket.once("secureConnect", () => {
-          void writeSocket(
-            socket,
-            encodeJsonFrame({
-              kind: "hello",
-              sessionId: offer.sender.sessionId,
-              transferToken: offer.sender.token,
-              deviceName,
-            }),
-          )
-            .then(() => {
-              resolve();
-            })
-            .catch((error) => {
-              reject(error);
-            });
-        });
-      }),
-  });
-}
-
-async function receiveAcceptedControlSocketTransfer({
-  offer,
-  outputDir,
-  socket,
-  onProgress,
-}: {
-  offer: IncomingTransferOffer;
-  outputDir: string;
-  socket: TLSSocket;
-  onProgress?: (progress: TransferProgress) => void;
-}) {
-  return receiveTransferFromSocket({
-    offer,
-    outputDir,
-    socket,
-    onProgress,
-    directTarget: `${offer.sender.host}:${offer.sender.port} (accepted control socket)`,
-  });
-}
-
 async function receiveRelayTransfer({
   apiUrl,
   offer,
@@ -1486,7 +1370,7 @@ async function sendOfferOverControlSocket({
   offer: IncomingTransferOffer;
   tlsMaterial: ExtractedTlsMaterial;
 }) {
-  const deferred = createDeferred<{ receiverDeviceName: string }>();
+  const deferred = createDeferred<{ receiverDeviceName: string; pushToken: string; controlSocket: TLSSocket }>();
   const socket = tls.connect({
     host: target.host,
     port: target.port,
@@ -1504,7 +1388,7 @@ async function sendOfferOverControlSocket({
 
     const message = decodeJsonFrame<
       | { kind: "offer-received" }
-      | { kind: "accepted"; receiverDeviceName?: string }
+      | { kind: "accepted"; receiverDeviceName?: string; pushToken?: string }
       | { kind: "rejected"; message: string }
       | { kind: "busy"; message: string }
       | { kind: "error"; message: string }
@@ -1521,10 +1405,18 @@ async function sendOfferOverControlSocket({
     resolved = true;
 
     if (message.kind === "accepted") {
+      const pushToken = message.pushToken?.trim();
+      if (!pushToken) {
+        deferred.reject(new Error("Receiver did not provide direct transfer access."));
+        socket.destroy();
+        return;
+      }
+
       deferred.resolve({
         receiverDeviceName: message.receiverDeviceName?.trim() || target.deviceName,
+        pushToken,
+        controlSocket: socket,
       });
-      socket.destroy();
       return;
     }
 
@@ -1646,6 +1538,69 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
 
   let nearbyAdvertisement: { stop(): void } | null = null;
   let isBusy = false;
+  let pendingOfferSocket: TLSSocket | null = null;
+  let pendingDirectTransferRequest: {
+    offerId: string;
+    pushToken: string;
+    resolve: (result: { receivedFiles: ReceivedFileOutput[]; bytesTransferred: number; detail: string }) => void;
+    reject: (error: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  } | null = null;
+  let pendingRelayOfferRequest: {
+    resolve: (offer: IncomingTransferOffer) => void;
+    reject: (error: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  } | null = null;
+
+  function takePendingDirectTransferRequest() {
+    if (!pendingDirectTransferRequest) {
+      return null;
+    }
+
+    const currentRequest = pendingDirectTransferRequest;
+    clearTimeout(currentRequest.timer);
+    pendingDirectTransferRequest = null;
+    return currentRequest;
+  }
+
+  function rejectPendingDirectTransferRequest(error: Error) {
+    takePendingDirectTransferRequest()?.reject(error);
+  }
+
+  function takePendingRelayOfferRequest() {
+    if (!pendingRelayOfferRequest) {
+      return null;
+    }
+
+    const currentRequest = pendingRelayOfferRequest;
+    clearTimeout(currentRequest.timer);
+    pendingRelayOfferRequest = null;
+    return currentRequest;
+  }
+
+  function resolvePendingRelayOfferRequest(offer: IncomingTransferOffer) {
+    takePendingRelayOfferRequest()?.resolve(offer);
+  }
+
+  function rejectPendingRelayOfferRequest(error: Error) {
+    takePendingRelayOfferRequest()?.reject(error);
+  }
+
+  function updateCurrentOfferRelay(relay: RelayAccess) {
+    if (!state.currentOffer) {
+      return null;
+    }
+
+    state.currentOffer = {
+      ...state.currentOffer,
+      sender: {
+        ...state.currentOffer.sender,
+        relay,
+      },
+    };
+    void writeStateFile(options.stateFile, state);
+    return state.currentOffer;
+  }
 
   function emitProgress(progress: TransferProgress) {
     state.progress = progress;
@@ -1662,6 +1617,9 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
   }
 
   function resetToDiscoverable() {
+    pendingOfferSocket = null;
+    rejectPendingDirectTransferRequest(new Error("That transfer request is no longer available."));
+    rejectPendingRelayOfferRequest(new Error("That transfer request is no longer available."));
     state.currentOffer = null;
     state.currentStatus = "discoverable";
     state.progress = createProgress(0, "discoverable", "Ready to receive files.");
@@ -1670,21 +1628,97 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
   }
 
   async function handleOfferSocket(socket: TLSSocket) {
-    let handled = false;
+    let registeredOfferId: string | null = null;
+    const detachClassifier = () => {
+      socket.off("data", handleData);
+      socket.off("error", handleError);
+      socket.off("close", handleClose);
+    };
 
     const parser = createFrameParser((frame) => {
-      if (frame.type !== "json" || handled) {
+      if (frame.type !== "json") {
         return;
       }
 
-      handled = true;
+      if (registeredOfferId) {
+        if (pendingOfferSocket === socket && state.currentOffer?.id === registeredOfferId) {
+          const message = decodeJsonFrame<
+            { kind: "relay-ready"; relay: RelayAccess } | { kind: "relay-failed"; message: string }
+          >(frame.payload);
+
+          if (message.kind === "relay-ready") {
+            const nextOffer = updateCurrentOfferRelay(message.relay);
+            if (nextOffer) {
+              rejectPendingDirectTransferRequest(
+                new DirectTransferFallbackError("Direct transfer unavailable. Switching to relay."),
+              );
+              resolvePendingRelayOfferRequest(nextOffer);
+            }
+          } else {
+            const error = new Error(message.message || "Unable to prepare relay fallback.");
+            rejectPendingDirectTransferRequest(error);
+            rejectPendingRelayOfferRequest(error);
+          }
+        }
+        return;
+      }
 
       const message = decodeJsonFrame<{
         kind: string;
         receiverSessionId?: string;
         receiverToken?: string;
         offer?: IncomingTransferOffer;
+        offerId?: string;
+        pushToken?: string;
       }>(frame.payload);
+
+      if (message.kind === "push-hello") {
+        const pendingDirectRequest = pendingDirectTransferRequest;
+        if (
+          !pendingDirectRequest ||
+          !state.currentOffer ||
+          message.receiverSessionId !== sessionId ||
+          message.offerId !== pendingDirectRequest.offerId ||
+          message.pushToken !== pendingDirectRequest.pushToken
+        ) {
+          void writeSocket(
+            socket,
+            encodeJsonFrame({
+              kind: "error",
+              message: "Unable to validate direct transfer session.",
+            }),
+          )
+            .catch(() => {})
+            .finally(() => {
+              socket.destroy();
+            });
+          return;
+        }
+
+        const directRequest = takePendingDirectTransferRequest();
+        if (!directRequest) {
+          socket.destroy();
+          return;
+        }
+
+        detachClassifier();
+        void writeSocket(socket, encodeJsonFrame({ kind: "push-ready" }))
+          .then(() => {
+            pendingOfferSocket = null;
+            return receiveTransferFromSocket({
+              offer: state.currentOffer as IncomingTransferOffer,
+              outputDir: options.outputDir,
+              socket,
+              onProgress: emitProgress,
+              directTarget: `${state.currentOffer?.senderDeviceName ?? "sender"} -> ${options.deviceName}`,
+            });
+          })
+          .then(directRequest.resolve)
+          .catch((error) => {
+            directRequest.reject(error instanceof Error ? error : new Error("Unable to receive transfer."));
+          });
+        return;
+      }
 
       if (
         message.kind !== "offer" ||
@@ -1721,84 +1755,70 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
         return;
       }
 
+      registeredOfferId = message.offer.id;
+      pendingOfferSocket = socket;
+      void writeSocket(socket, encodeJsonFrame({ kind: "offer-received" })).catch(() => {});
       void processIncomingOffer(socket, message.offer);
     });
 
-    socket.on("data", (chunk) => {
+    const handleData = (chunk: Buffer) => {
       parser(chunk as Uint8Array);
-    });
-    socket.on("error", () => {});
+    };
+    const handleSocketEnded = () => {
+      if (pendingOfferSocket === socket) {
+        pendingOfferSocket = null;
+        rejectPendingDirectTransferRequest(new Error("Sender is no longer available."));
+        rejectPendingRelayOfferRequest(new Error("Sender is no longer available."));
+      }
+
+      if (state.currentStatus === "waiting" && state.currentOffer?.id === registeredOfferId) {
+        resetToDiscoverable();
+      }
+    };
+    const handleError = () => {
+      handleSocketEnded();
+    };
+    const handleClose = () => {
+      handleSocketEnded();
+    };
+
+    socket.on("data", handleData);
+    socket.on("error", handleError);
+    socket.on("close", handleClose);
   }
 
   async function processIncomingOffer(socket: TLSSocket, offer: IncomingTransferOffer) {
-    const resolvedOffer = withResolvedSenderHost(offer, socket.remoteAddress);
-    const useAcceptedControlSocket =
-      resolvedOffer.sender.directConnectionMode === "same-socket" && options.transport !== "relay";
-    const canAttemptDirect =
-      (useAcceptedControlSocket ||
-        (resolvedOffer.sender.port > 0 &&
-          resolvedOffer.sender.host !== "0.0.0.0" &&
-          resolvedOffer.sender.token.trim())) &&
-      options.transport !== "relay";
-
     isBusy = true;
-    state.currentOffer = resolvedOffer;
+    state.currentOffer = offer;
     emitProgress({
       phase: "waiting",
-      totalBytes: resolvedOffer.totalBytes,
+      totalBytes: offer.totalBytes,
       bytesTransferred: 0,
       currentFileName: null,
       speedBytesPerSecond: 0,
-      detail: `${resolvedOffer.senderDeviceName} wants to send ${resolvedOffer.fileCount} file${
-        resolvedOffer.fileCount === 1 ? "" : "s"
-      }.`,
+      detail: `${offer.senderDeviceName} wants to send ${offer.fileCount} file${offer.fileCount === 1 ? "" : "s"}.`,
       updatedAt: nowIso(),
     });
 
     logLine(
-      `Incoming offer from ${resolvedOffer.senderDeviceName}: ${resolvedOffer.fileCount} file(s), ${formatBytes(
-        resolvedOffer.totalBytes,
+      `Incoming offer from ${offer.senderDeviceName}: ${offer.fileCount} file(s), ${formatBytes(
+        offer.totalBytes,
       )}.`,
     );
-    if (resolvedOffer.sender.host !== offer.sender.host) {
-      logLine(`Resolved sender host ${offer.sender.host} -> ${resolvedOffer.sender.host} from control socket.`);
-    }
-    logLine(`Direct sender endpoint: ${resolvedOffer.sender.host}:${resolvedOffer.sender.port}`);
-
-    await writeSocket(socket, encodeJsonFrame({ kind: "offer-received" }));
 
     if (options.acceptDelayMs > 0) {
       await sleep(options.acceptDelayMs);
     }
-
-    if (resolvedOffer.sender.relay) {
-      if (canAttemptDirect) {
-        void ensureRelayReceiverAccepted({
-          apiUrl: options.apiUrl,
-          offer: resolvedOffer,
-          receiverDeviceName: options.deviceName,
-          allowFailure: true,
-        });
-      } else {
-        await ensureRelayReceiverAccepted({
-          apiUrl: options.apiUrl,
-          offer: resolvedOffer,
-          receiverDeviceName: options.deviceName,
-        });
-      }
-    }
+    const pushToken = randomToken();
 
     await writeSocket(
       socket,
       encodeJsonFrame({
         kind: "accepted",
         receiverDeviceName: options.deviceName,
+        pushToken,
       }),
-    ).finally(() => {
-      if (!useAcceptedControlSocket) {
-        socket.destroy();
-      }
-    });
+    );
 
     emitProgress({
       phase: "connecting",
@@ -1806,7 +1826,7 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
       bytesTransferred: 0,
       currentFileName: null,
       speedBytesPerSecond: 0,
-      detail: "Connecting to the sender.",
+      detail: options.transport === "relay" ? "Connecting through relay." : "Waiting for the sender to connect.",
       updatedAt: nowIso(),
     });
 
@@ -1815,51 +1835,66 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
     try {
       const result =
         options.transport === "relay"
-          ? await receiveRelayTransfer({
-              apiUrl: options.apiUrl,
-              offer: resolvedOffer,
-              deviceName: options.deviceName,
-              outputDir: options.outputDir,
-              onProgress: emitProgress,
-            })
-          : useAcceptedControlSocket
-            ? await (async () => {
-                try {
-                  return await receiveAcceptedControlSocketTransfer({
-                    offer: resolvedOffer,
+          ? await (async () => {
+              const relayOffer = await waitForSenderRelayFallbackOffer();
+              return receiveRelayTransfer({
+                apiUrl: options.apiUrl,
+                offer: relayOffer,
+                deviceName: options.deviceName,
+                outputDir: options.outputDir,
+                onProgress: emitProgress,
+              });
+            })()
+          : await (async () => {
+              try {
+                return await new Promise<{
+                  receivedFiles: ReceivedFileOutput[];
+                  bytesTransferred: number;
+                  detail: string;
+                }>((resolve, reject) => {
+                  const timer = setTimeout(() => {
+                    if (pendingDirectTransferRequest?.timer !== timer) {
+                      return;
+                    }
+
+                    pendingDirectTransferRequest = null;
+                    reject(new DirectTransferFallbackError("Unable to connect over local WiFi."));
+                  }, DIRECT_CONNECT_TIMEOUT_MS);
+
+                  pendingDirectTransferRequest = {
+                    offerId: offer.id,
+                    pushToken,
+                    resolve,
+                    reject,
+                    timer,
+                  };
+                });
+              } catch (error) {
+                if (options.transport === "auto" && error instanceof DirectTransferFallbackError) {
+                  const relayOffer = await waitForSenderRelayFallbackOffer();
+
+                  emitProgress({
+                    phase: "connecting",
+                    totalBytes: relayOffer.totalBytes,
+                    bytesTransferred: 0,
+                    currentFileName: null,
+                    speedBytesPerSecond: 0,
+                    detail: "Direct transfer unavailable. Switching to relay.",
+                    updatedAt: nowIso(),
+                  });
+
+                  return receiveRelayTransfer({
+                    apiUrl: options.apiUrl,
+                    offer: relayOffer,
+                    deviceName: options.deviceName,
                     outputDir: options.outputDir,
-                    socket,
                     onProgress: emitProgress,
                   });
-                } catch (error) {
-                  if (
-                    resolvedOffer.sender.relay &&
-                    options.transport === "auto" &&
-                    error instanceof DirectTransferFallbackError
-                  ) {
-                    emitProgress({
-                      phase: "connecting",
-                      totalBytes: resolvedOffer.totalBytes,
-                      bytesTransferred: 0,
-                      currentFileName: null,
-                      speedBytesPerSecond: 0,
-                      detail: "Direct transfer unavailable. Switching to relay.",
-                      updatedAt: nowIso(),
-                    });
-
-                    return receiveRelayTransfer({
-                      apiUrl: options.apiUrl,
-                      offer: resolvedOffer,
-                      deviceName: options.deviceName,
-                      outputDir: options.outputDir,
-                      onProgress: emitProgress,
-                    });
-                  }
-
-                  throw error;
                 }
-              })()
-            : await receiveWithPreferredTransport(resolvedOffer);
+
+                throw error;
+              }
+            })();
 
       state.lastTransfer = {
         startedAt: transferStartedAt,
@@ -1872,13 +1907,13 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
       };
 
       logLine(
-        `Received ${result.receivedFiles.length} file(s) from ${resolvedOffer.senderDeviceName}. ${formatBytes(
+        `Received ${result.receivedFiles.length} file(s) from ${offer.senderDeviceName}. ${formatBytes(
           result.bytesTransferred,
         )} transferred.`,
       );
     } catch (error) {
-      if (resolvedOffer.sender.relay) {
-        await declineRelayTransferSession(options.apiUrl, resolvedOffer.sender.relay).catch(() => {});
+      if (state.currentOffer?.sender.relay) {
+        await declineRelayTransferSession(options.apiUrl, state.currentOffer.sender.relay).catch(() => {});
       }
 
       state.lastTransfer = {
@@ -1892,6 +1927,10 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
       };
       logLine(`Transfer failed: ${state.lastTransfer.detail}`);
     } finally {
+      if (pendingOfferSocket === socket) {
+        pendingOfferSocket = null;
+      }
+      socket.destroy();
       await writeStateFile(options.stateFile, state);
       resetToDiscoverable();
 
@@ -1901,58 +1940,35 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
     }
   }
 
-  async function receiveWithPreferredTransport(offer: IncomingTransferOffer) {
-    const canAttemptDirect =
-      offer.sender.port > 0 &&
-      offer.sender.host !== "0.0.0.0" &&
-      offer.sender.token.trim() &&
-      options.transport !== "relay";
+  async function waitForSenderRelayFallbackOffer() {
+    if (!state.currentOffer) {
+      throw new Error("That transfer request is no longer available.");
+    }
 
-    if (canAttemptDirect) {
-      try {
-        return await receiveDirectTransfer({
-          offer,
-          deviceName: options.deviceName,
-          outputDir: options.outputDir,
-          tlsMaterial,
-          onProgress: emitProgress,
-        });
-      } catch (error) {
-        if (offer.sender.relay && options.transport === "auto" && error instanceof DirectTransferFallbackError) {
-          emitProgress({
-            phase: "connecting",
-            totalBytes: offer.totalBytes,
-            bytesTransferred: 0,
-            currentFileName: null,
-            speedBytesPerSecond: 0,
-            detail: "Direct transfer unavailable. Switching to relay.",
-            updatedAt: nowIso(),
-          });
+    if (state.currentOffer.sender.relay) {
+      return state.currentOffer;
+    }
 
-          return receiveRelayTransfer({
-            apiUrl: options.apiUrl,
-            offer,
-            deviceName: options.deviceName,
-            outputDir: options.outputDir,
-            onProgress: emitProgress,
-          });
+    if (!pendingOfferSocket) {
+      throw new Error("Direct transfer is unavailable and relay fallback is not available.");
+    }
+
+    return await new Promise<IncomingTransferOffer>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (pendingRelayOfferRequest?.timer !== timer) {
+          return;
         }
 
-        throw error;
-      }
-    }
+        pendingRelayOfferRequest = null;
+        reject(new Error("The sender could not prepare relay fallback."));
+      }, RELAY_FALLBACK_WAIT_TIMEOUT_MS);
 
-    if (offer.sender.relay) {
-      return receiveRelayTransfer({
-        apiUrl: options.apiUrl,
-        offer,
-        deviceName: options.deviceName,
-        outputDir: options.outputDir,
-        onProgress: emitProgress,
-      });
-    }
-
-    throw new Error("This sender is not reachable over local WiFi.");
+      pendingRelayOfferRequest = {
+        resolve,
+        reject,
+        timer,
+      };
+    });
   }
 
   if (options.nearby) {
@@ -1991,29 +2007,17 @@ async function runSendCommand(options: SendCommandOptions) {
   const target = await resolveTargetRecord(options);
   const tlsMaterial = await loadTlsMaterial();
   const sessionId = randomUUID();
-  const transferToken = randomToken();
-  const deviceIp = safeDeviceIp(getPreferredLanAddress());
   const shouldUseRelay = options.transport !== "direct";
   const shouldUseDirect = options.transport !== "relay";
-  const relay = shouldUseRelay ? await createRelayTransferSession(options.apiUrl, options.deviceName, files) : null;
   const startedAt = nowIso();
-
-  let relayUsed = false;
-  let relayShouldDelete = false;
-  let directServer: tls.Server | null = null;
-  let directPort = 0;
-  let relayUploadStarted = false;
 
   const manifest = createTransferManifest({
     files,
     deviceName: options.deviceName,
     sessionId,
-    transferToken,
-    host: deviceIp,
-    port: 0,
-    fingerprint: tlsMaterial.fingerprint,
     isPremium: false,
   });
+  let relay: RelayCredentials | null = null;
 
   const state = {
     mode: "send",
@@ -2022,7 +2026,7 @@ async function runSendCommand(options: SendCommandOptions) {
     transport: options.transport,
     startedAt,
     target,
-    relay,
+    relay: relay as RelayCredentials | null,
     status: "waiting" as "waiting" | "connecting" | "transferring" | "completed" | "failed",
     progress: createProgress(manifest.totalBytes, "waiting", `Waiting for ${target.deviceName} to accept.`),
   };
@@ -2040,149 +2044,181 @@ async function runSendCommand(options: SendCommandOptions) {
     }
     void writeStateFile(options.stateFile, state);
   }
-
-  const directTransferDeferred = createDeferred<void>();
-  let didConnectDirectly = false;
-
-  if (shouldUseDirect) {
-    directServer = tls.createServer(
-      {
-        key: tlsMaterial.key,
-        cert: tlsMaterial.cert,
-        requestCert: false,
-        rejectUnauthorized: false,
-      },
-      (socket) => {
-        let didReceiveHello = false;
-        const parser = createFrameParser((frame) => {
-          if (frame.type !== "json") {
-            return;
-          }
-
-          const message = decodeJsonFrame<{
-            kind: string;
-            sessionId?: string;
-            transferToken?: string;
-          }>(frame.payload);
-
-          if (message.kind === "hello" && message.sessionId === sessionId && message.transferToken === transferToken) {
-            didReceiveHello = true;
-
-            if (relayUploadStarted) {
-              void writeSocket(
-                socket,
-                encodeJsonFrame({
-                  kind: "error",
-                  message: "Transfer has switched to relay.",
-                }),
-              )
-                .catch(() => {})
-                .finally(() => {
-                  socket.destroy();
-                });
-              return;
-            }
-
-            if (didConnectDirectly) {
-              void writeSocket(
-                socket,
-                encodeJsonFrame({
-                  kind: "error",
-                  message: "Another receiver is already connected.",
-                }),
-              )
-                .catch(() => {})
-                .finally(() => {
-                  socket.destroy();
-                });
-              return;
-            }
-
-            didConnectDirectly = true;
-            void streamFilesToSocket(manifestWithPort(), files, socket, emitProgress)
-              .then(() => {
-                emitProgress({
-                  phase: "completed",
-                  totalBytes: manifest.totalBytes,
-                  bytesTransferred: manifest.totalBytes,
-                  currentFileName: null,
-                  speedBytesPerSecond: 0,
-                  detail: "Transfer complete.",
-                  updatedAt: nowIso(),
-                });
-                directTransferDeferred.resolve();
-              })
-              .catch((error) => {
-                directTransferDeferred.reject(error);
-              });
-            return;
-          }
-
-          void writeSocket(
-            socket,
-            encodeJsonFrame({
-              kind: "error",
-              message: "Unable to validate transfer session.",
-            }),
-          )
-            .catch(() => {})
-            .finally(() => {
-              socket.destroy();
-            });
-        });
-
-        socket.on("data", (chunk) => {
-          parser(chunk as Uint8Array);
-        });
-        socket.on("error", (error) => {
-          if (!didReceiveHello) {
-            directTransferDeferred.reject(error instanceof Error ? error : new Error("Sender data socket error."));
-          }
-        });
-      },
-    );
-
-    await new Promise<void>((resolve, reject) => {
-      directServer?.once("error", reject);
-      directServer?.listen(0, "0.0.0.0", () => {
-        directServer?.off("error", reject);
-        resolve();
-      });
-    });
-
-    const directAddress = directServer.address();
-    directPort = typeof directAddress === "object" && directAddress ? Number(directAddress.port) : 0;
-
-    if (!directPort) {
-      throw new Error("Unable to allocate a sender data port.");
+  async function prepareRelayFallback(controlSocket: TLSSocket, receiverDeviceName: string) {
+    if (relay) {
+      return relay;
     }
 
-    logLine(`Direct sender server listening on ${deviceIp}:${directPort}.`);
+    try {
+      relay = await createRelayTransferSession(options.apiUrl, options.deviceName, files);
+      state.relay = relay;
+      emitProgress({
+        phase: "connecting",
+        totalBytes: manifest.totalBytes,
+        bytesTransferred: 0,
+        currentFileName: null,
+        speedBytesPerSecond: 0,
+        detail: `${receiverDeviceName} could not connect over local WiFi. Preparing relay transfer.`,
+        updatedAt: nowIso(),
+      });
+
+      await writeSocket(
+        controlSocket,
+        encodeJsonFrame({
+          kind: "relay-ready",
+          relay: toRelayAccess(relay),
+        }),
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to notify the receiver about relay fallback.";
+      await writeSocket(
+        controlSocket,
+        encodeJsonFrame({
+          kind: "relay-failed",
+          message,
+        }),
+      ).catch(() => {});
+      if (relay) {
+        await deleteRelayTransferSession(options.apiUrl, relay).catch(() => {});
+      }
+      relay = null;
+      state.relay = null;
+      throw new Error(message, {
+        cause: error,
+      });
+    }
+
+    return relay;
   }
 
-  function manifestWithPort() {
-    return {
-      ...manifest,
-      advertisedPort: directPort,
-    };
+  async function startDirectPushTransfer({
+    pushToken,
+    controlSocket,
+  }: {
+    pushToken: string;
+    controlSocket: TLSSocket;
+  }) {
+    const socket = tls.connect({
+      host: target.host,
+      port: target.port,
+      ca: tlsMaterial.cert,
+      rejectUnauthorized: false,
+      checkServerIdentity: () => undefined,
+    });
+
+    return await new Promise<void>((resolve, reject) => {
+      let didReceiveReady = false;
+      let settled = false;
+      const directTarget = `${target.host}:${target.port}`;
+      const handshakeTimer = setTimeout(() => {
+        fail(new DirectTransferFallbackError(`Unable to connect over local WiFi at ${directTarget}.`));
+      }, DIRECT_CONNECT_TIMEOUT_MS);
+
+      function finish() {
+        settled = true;
+        clearTimeout(handshakeTimer);
+      }
+
+      function fail(error: Error) {
+        if (settled) {
+          return;
+        }
+
+        finish();
+        socket.destroy();
+        reject(error);
+      }
+
+      const parser = createFrameParser((frame) => {
+        if (frame.type !== "json") {
+          return;
+        }
+
+        const message = decodeJsonFrame<{ kind: "push-ready" } | { kind: "error"; message: string }>(frame.payload);
+        if (message.kind === "push-ready") {
+          if (settled) {
+            return;
+          }
+
+          didReceiveReady = true;
+          finish();
+          controlSocket.destroy();
+          void streamFilesToSocket(manifest, files, socket, emitProgress)
+            .then(() => {
+              emitProgress({
+                phase: "completed",
+                totalBytes: manifest.totalBytes,
+                bytesTransferred: manifest.totalBytes,
+                currentFileName: null,
+                speedBytesPerSecond: 0,
+                detail: "Transfer complete.",
+                updatedAt: nowIso(),
+              });
+              resolve();
+            })
+            .catch((error) => {
+              reject(error instanceof Error ? error : new Error("Transfer failed."));
+            });
+          return;
+        }
+
+        fail(new DirectTransferFallbackError(message.message));
+      });
+
+      socket.on("secureConnect", () => {
+        void writeSocket(
+          socket,
+          encodeJsonFrame({
+            kind: "push-hello",
+            receiverSessionId: target.sessionId,
+            offerId: sessionId,
+            pushToken,
+          }),
+        ).catch((error) => {
+          fail(
+            error instanceof Error
+              ? new DirectTransferFallbackError(error.message)
+              : new DirectTransferFallbackError("Unable to start transfer session."),
+          );
+        });
+      });
+      socket.on("data", (chunk) => {
+        parser(chunk as Uint8Array);
+      });
+      socket.on("error", (error) => {
+        if (didReceiveReady) {
+          return;
+        }
+
+        const baseError = error instanceof Error ? error : new Error("Transfer connection failed.");
+        fail(new DirectTransferFallbackError(`${baseError.message} (${directTarget})`));
+      });
+      socket.on("close", () => {
+        if (didReceiveReady || settled) {
+          return;
+        }
+
+        fail(new DirectTransferFallbackError(`Unable to reach the receiver over local WiFi at ${directTarget}.`));
+      });
+    });
   }
 
-  const offer = createIncomingTransferOffer(manifestWithPort(), relay);
+  const offer = createIncomingTransferOffer(manifest, null);
 
   await writeStateFile(options.stateFile, state);
 
   logLine(`Sending ${files.length} file(s) to ${target.deviceName} (${target.host}:${target.port}).`);
   logLine(`Transport mode: ${options.transport}`);
-  if (relay) {
-    logLine(`Relay fallback provisioned: ${relay.sessionId}`);
-  }
 
+  let controlSocket: TLSSocket | null = null;
   try {
-    const { receiverDeviceName } = await sendOfferOverControlSocket({
+    const accepted = await sendOfferOverControlSocket({
       target,
       offer,
       tlsMaterial,
     });
+    const { receiverDeviceName, pushToken } = accepted;
+    controlSocket = accepted.controlSocket;
 
     emitProgress({
       phase: "connecting",
@@ -2191,24 +2227,20 @@ async function runSendCommand(options: SendCommandOptions) {
       currentFileName: null,
       speedBytesPerSecond: 0,
       detail: shouldUseDirect
-        ? `${receiverDeviceName} accepted. Waiting for them to connect.`
+        ? `${receiverDeviceName} accepted. Starting transfer.`
         : `${receiverDeviceName} accepted. Preparing relay transfer.`,
       updatedAt: nowIso(),
     });
 
-    if (shouldUseDirect && directServer) {
+    if (shouldUseDirect) {
       try {
-        await Promise.race([
-          directTransferDeferred.promise,
-          sleep(DIRECT_CONNECT_TIMEOUT_MS).then(() => {
-            throw new DirectTransferFallbackError("Receiver could not connect to this transfer.");
-          }),
-        ]);
-
-        relayShouldDelete = Boolean(relay);
+        await startDirectPushTransfer({
+          pushToken,
+          controlSocket,
+        });
         return;
       } catch (error) {
-        if (!(error instanceof DirectTransferFallbackError) || !relay) {
+        if (!(error instanceof DirectTransferFallbackError) || !shouldUseRelay || !controlSocket) {
           throw error;
         }
 
@@ -2224,12 +2256,11 @@ async function runSendCommand(options: SendCommandOptions) {
       }
     }
 
-    if (!relay) {
+    if (!shouldUseRelay || !controlSocket) {
       throw new Error("Relay fallback is not available for this transfer.");
     }
 
-    relayUsed = true;
-    relayUploadStarted = true;
+    relay = await prepareRelayFallback(controlSocket, receiverDeviceName);
     const result = await uploadFilesToRelay({
       apiUrl: options.apiUrl,
       relay,
@@ -2259,9 +2290,9 @@ async function runSendCommand(options: SendCommandOptions) {
     });
     throw error;
   } finally {
-    directServer?.close();
+    controlSocket?.destroy();
 
-    if (relay && (relayShouldDelete || (!relayUsed && state.status !== "completed"))) {
+    if (relay && (state.status !== "completed" || state.progress.detail !== "Transfer complete through relay.")) {
       await deleteRelayTransferSession(options.apiUrl, relay).catch(() => {});
     }
 

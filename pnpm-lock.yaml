@@ -32,6 +32,12 @@ importers:
       '@better-fetch/fetch':
         specifier: 1.1.21
         version: 1.1.21
+      '@dr.pogodin/react-native-fs':
+        specifier: ^2.37.0
+        version: 2.37.0(react-native@0.83.2(@babel/core@7.29.0)(@types/react@19.2.14)(react@19.2.0))(react@19.2.0)
+      '@dr.pogodin/react-native-static-server':
+        specifier: ^0.26.0
+        version: 0.26.0(@dr.pogodin/react-native-fs@2.37.0(react-native@0.83.2(@babel/core@7.29.0)(@types/react@19.2.14)(react@19.2.0))(react@19.2.0))(react-native@0.83.2(@babel/core@7.29.0)(@types/react@19.2.14)(react@19.2.0))(react@19.2.0)
       '@expo-google-fonts/geist':
         specifier: ^0.4.1
         version: 0.4.1
@@ -1070,6 +1076,22 @@ packages:
 
   '@clack/prompts@0.11.0':
     resolution: {integrity: sha512-pMN5FcrEw9hUkZA4f+zLlzivQSeQf5dRGJjSUbvVYDLvpKCdQx5OaknvKzgbtXOizhP+SJJJjqEbOe55uKKfAw==}
+
+  '@dr.pogodin/js-utils@0.1.6':
+    resolution: {integrity: sha512-v4hYKgHEL9Nfzoe4Vn4Sq2y7To46Q8V6vEBMpteghGOvitXmbhgmYV03GPh9SUuu9CV6vT+4u4GBnhBcK2m9vQ==}
+
+  '@dr.pogodin/react-native-fs@2.37.0':
+    resolution: {integrity: sha512-0LtRxZ+yJm3z4eiNmwkYvdMvglq74MZcqQBBJwaUwILqfSBNYAkO3jJZOvJdIR2+e06FJBoxuQ1P34mSDj8T8w==}
+    peerDependencies:
+      react: '*'
+      react-native: '*'
+
+  '@dr.pogodin/react-native-static-server@0.26.0':
+    resolution: {integrity: sha512-BDvi9L6SvH3lJFq5mJWO8FMHBWk9C+PHruniT+XVSKusiuL9cVXxNHyjE5aS/+ZzDiqEQKStexDPsiUZE2m3nw==}
+    peerDependencies:
+      '@dr.pogodin/react-native-fs': '>= 2.22.0'
+      react: '*'
+      react-native: '*'
 
   '@drizzle-team/brocli@0.10.2':
     resolution: {integrity: sha512-z33Il7l5dKjUgGULTqBsQBQwckHh5AbIuxhdsIxDDiZAzBOrZO6q9ogcWC65kU382AfynTfgNumVcNIjuIua6w==}
@@ -3435,6 +3457,9 @@ packages:
 
   buffer@5.7.1:
     resolution: {integrity: sha512-EHcyIPBQ4BSGlvjB16k5KgAJ27CIsHY/2JBmCRReo48y9rQ3MaUzWX3KVlBa4U7MyX02HdVj0K7C3WaB3ju7FQ==}
+
+  buffer@6.0.3:
+    resolution: {integrity: sha512-FTiCpNxtwiZZHEZbcbTIcZjERVICn9yq/pDFkTl95/AxzD1naBctN7YO68riM/gLSDY7sdrMby8hofADYuuqOA==}
 
   bundle-name@4.1.0:
     resolution: {integrity: sha512-tjwM5exMg6BGRI+kNmTntNsvdZS1X8BFYS6tnJ2hdH0kVxM6/eVZ2xy+FqStSWvYmtfFMDLIxurorHwDKfDz5Q==}
@@ -7809,6 +7834,24 @@ snapshots:
       picocolors: 1.1.1
       sisteransi: 1.0.5
 
+  '@dr.pogodin/js-utils@0.1.6':
+    dependencies:
+      '@babel/runtime': 7.28.6
+
+  '@dr.pogodin/react-native-fs@2.37.0(react-native@0.83.2(@babel/core@7.29.0)(@types/react@19.2.14)(react@19.2.0))(react@19.2.0)':
+    dependencies:
+      buffer: 6.0.3
+      http-status-codes: 2.3.0
+      react: 19.2.0
+      react-native: 0.83.2(@babel/core@7.29.0)(@types/react@19.2.14)(react@19.2.0)
+
+  '@dr.pogodin/react-native-static-server@0.26.0(@dr.pogodin/react-native-fs@2.37.0(react-native@0.83.2(@babel/core@7.29.0)(@types/react@19.2.14)(react@19.2.0))(react@19.2.0))(react-native@0.83.2(@babel/core@7.29.0)(@types/react@19.2.14)(react@19.2.0))(react@19.2.0)':
+    dependencies:
+      '@dr.pogodin/js-utils': 0.1.6
+      '@dr.pogodin/react-native-fs': 2.37.0(react-native@0.83.2(@babel/core@7.29.0)(@types/react@19.2.14)(react@19.2.0))(react@19.2.0)
+      react: 19.2.0
+      react-native: 0.83.2(@babel/core@7.29.0)(@types/react@19.2.14)(react@19.2.0)
+
   '@drizzle-team/brocli@0.10.2': {}
 
   '@egjs/hammerjs@2.0.17':
@@ -10139,6 +10182,11 @@ snapshots:
   buffer-from@1.1.2: {}
 
   buffer@5.7.1:
+    dependencies:
+      base64-js: 1.5.1
+      ieee754: 1.2.1
+
+  buffer@6.0.3:
     dependencies:
       base64-js: 1.5.1
       ieee754: 1.2.1
