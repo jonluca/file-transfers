@@ -53,6 +53,7 @@ export const serverEnv = {
   revenueCatWebhookSecret: optionalEnv("REVENUECAT_WEBHOOK_SECRET"),
   hostedFilesBaseUrl: defaultHostedFilesBaseUrl,
   hostedFilesLocalDirectory: process.env.HOSTED_FILES_LOCAL_DIRECTORY ?? "server/storage/hosted-files",
+  relaySessionsLocalDirectory: process.env.RELAY_SESSIONS_LOCAL_DIRECTORY ?? "server/storage/relay-sessions",
   r2AccountId,
   r2Bucket: optionalEnv("R2_BUCKET"),
   r2Endpoint: optionalEnv("R2_ENDPOINT") ?? (r2AccountId ? `https://${r2AccountId}.r2.cloudflarestorage.com` : null),

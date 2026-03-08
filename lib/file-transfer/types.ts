@@ -45,6 +45,7 @@ export interface DiscoveryRecord {
   advertisedAt: string;
   isPremiumSender: boolean;
   serviceName: string | null;
+  relay: RelayAccess | null;
 }
 
 export interface TransferProgress {
@@ -67,6 +68,7 @@ export interface TransferSession {
   previewMode: boolean;
   peerDeviceName: string | null;
   awaitingApproval: boolean;
+  relay: RelayCredentials | null;
   progress: TransferProgress;
 }
 
@@ -119,4 +121,14 @@ export interface EntitlementStatus {
 export interface HostedUploadDraft {
   file: SelectedTransferFile;
   passcode: string | null;
+}
+
+export interface RelayAccess {
+  sessionId: string;
+  receiverToken: string;
+  expiresAt: string;
+}
+
+export interface RelayCredentials extends RelayAccess {
+  senderToken: string;
 }

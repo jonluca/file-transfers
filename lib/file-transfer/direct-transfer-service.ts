@@ -5,6 +5,18 @@ import * as Network from "expo-network";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 import type { ZeroconfService } from "react-native-zeroconf";
 import {
+  approveRelayTransferSession,
+  completeRelayTransferSession,
+  createRelayTransferSession,
+  deleteRelayTransferSession,
+  downloadRelayTransferFile,
+  getRelayReceiverState,
+  getRelaySenderState,
+  joinRelayTransferSession,
+  rejectRelayTransferSession,
+  uploadRelayTransferFile,
+} from "./relay-client";
+import {
   LOCAL_TRANSFER_CERT_FINGERPRINT,
   LOCAL_TRANSFER_CERTIFICATE_ASSET,
   LOCAL_TRANSFER_CHUNK_SIZE_BYTES,
@@ -19,6 +31,8 @@ import { getReceivedFilesDirectory } from "./files";
 import { createFrameParser, decodeJsonFrame, encodeChunkFrame, encodeJsonFrame } from "./protocol";
 import type {
   DiscoveryRecord,
+  RelayAccess,
+  RelayCredentials,
   ReceivedFileRecord,
   SelectedTransferFile,
   TransferManifest,
@@ -33,6 +47,7 @@ interface SendRuntime {
   files: SelectedTransferFile[];
   updateSession?: RuntimeUpdate;
   pendingSocket?: TransferSocket;
+  relayPollTimer?: ReturnType<typeof setInterval>;
   zeroconf?: {
     publisher: {
       stop(): void;
@@ -92,6 +107,10 @@ interface TcpSocketLike {
 }
 
 const activeSendRuntimes = new Map<string, SendRuntime>();
+const RELAY_POLL_INTERVAL_MS = 1500;
+const DIRECT_CONNECT_TIMEOUT_MS = 8000;
+
+class DirectTransferFallbackError extends Error {}
 
 function createProgress(totalBytes: number, phase: TransferProgress["phase"], detail: string | null): TransferProgress {
   return {
@@ -208,10 +227,23 @@ function createTransferManifest({
   };
 }
 
+function toRelayAccess(relay: RelayCredentials | null): RelayAccess | null {
+  if (!relay) {
+    return null;
+  }
+
+  return {
+    sessionId: relay.sessionId,
+    receiverToken: relay.receiverToken,
+    expiresAt: relay.expiresAt,
+  };
+}
+
 function createDiscoveryRecord(
   manifest: TransferManifest,
   method: DiscoveryRecord["method"],
   serviceName: string | null,
+  relay: RelayAccess | null,
 ) {
   return {
     sessionId: manifest.sessionId,
@@ -226,6 +258,7 @@ function createDiscoveryRecord(
     advertisedAt: manifest.createdAt,
     isPremiumSender: manifest.isPremiumSender,
     serviceName,
+    relay,
   } satisfies DiscoveryRecord;
 }
 
@@ -242,6 +275,7 @@ function buildQrPayload(record: DiscoveryRecord) {
     certificateFingerprint: record.certificateFingerprint,
     advertisedAt: record.advertisedAt,
     isPremiumSender: record.isPremiumSender,
+    relay: record.relay,
   });
 }
 
@@ -249,8 +283,17 @@ function createServiceName(deviceName: string, sessionId: string) {
   return `${deviceName.trim().slice(0, 24)}-${sessionId.slice(0, 6)}`;
 }
 
-function createInitialSendSession(manifest: TransferManifest, previewMode: boolean): TransferSession {
-  const discoveryRecord = createDiscoveryRecord(manifest, previewMode ? "preview" : "nearby", null);
+function createInitialSendSession(
+  manifest: TransferManifest,
+  previewMode: boolean,
+  relay: RelayCredentials | null,
+): TransferSession {
+  const discoveryRecord = createDiscoveryRecord(
+    manifest,
+    previewMode ? "preview" : "nearby",
+    null,
+    toRelayAccess(relay),
+  );
 
   return {
     id: manifest.sessionId,
@@ -258,10 +301,11 @@ function createInitialSendSession(manifest: TransferManifest, previewMode: boole
     status: "discoverable",
     manifest,
     discoveryRecord,
-    qrPayload: buildQrPayload(createDiscoveryRecord(manifest, "qr", null)),
+    qrPayload: buildQrPayload(createDiscoveryRecord(manifest, "qr", null, toRelayAccess(relay))),
     previewMode,
     peerDeviceName: null,
     awaitingApproval: false,
+    relay,
     progress: createProgress(manifest.totalBytes, "discoverable", "Waiting for a nearby device to connect."),
   };
 }
@@ -270,6 +314,12 @@ function createTransferOutputFile(directory: Directory, fileName: string, mimeTy
   const safeName = fileName.replace(/[^\w.\-() ]+/g, "_");
   const targetName = `${Date.now()}-${safeName}`;
   return directory.createFile(targetName, mimeType);
+}
+
+function createTransferOutputReference(directory: Directory, fileName: string) {
+  const safeName = fileName.replace(/[^\w.\-() ]+/g, "_");
+  const targetName = `${Date.now()}-${safeName}`;
+  return new File(directory, targetName);
 }
 
 async function sleep(milliseconds: number) {
@@ -302,6 +352,7 @@ async function streamFilesToSocket(runtime: SendRuntime, socket: TransferSocket)
   let windowStartedAt = Date.now();
 
   await activateKeepAwakeAsync(LOCAL_TRANSFER_KEEP_AWAKE_TAG).catch(() => {});
+  stopRelayPolling(runtime);
 
   try {
     withSessionUpdate(runtime, {
@@ -434,6 +485,140 @@ function getReceiverName(value: string | undefined) {
   return value?.trim() ? value.trim().slice(0, 40) : "Nearby device";
 }
 
+function stopRelayPolling(runtime: SendRuntime) {
+  if (!runtime.relayPollTimer) {
+    return;
+  }
+
+  clearInterval(runtime.relayPollTimer);
+  runtime.relayPollTimer = undefined;
+}
+
+async function syncRelaySenderState(runtime: SendRuntime) {
+  if (!runtime.session.relay) {
+    return;
+  }
+
+  try {
+    const state = await getRelaySenderState(runtime.session.relay);
+
+    if (state.status === "waiting_approval" && !runtime.pendingSocket) {
+      const receiverName = getReceiverName(state.receiverDeviceName ?? undefined);
+      withSessionUpdate(runtime, {
+        status: "waiting",
+        peerDeviceName: receiverName,
+        awaitingApproval: true,
+        progress: {
+          ...runtime.session.progress,
+          phase: "waiting",
+          detail: `${receiverName} wants to receive your files through relay.`,
+          updatedAt: nowIso(),
+        },
+      });
+      return;
+    }
+
+    if (state.status === "rejected" && runtime.session.awaitingApproval && !runtime.pendingSocket) {
+      clearPendingApproval(runtime, "Transfer declined. Waiting for a nearby device to connect.");
+      return;
+    }
+
+    if (state.status === "waiting_receiver" && runtime.session.awaitingApproval && !runtime.pendingSocket) {
+      clearPendingApproval(runtime);
+    }
+  } catch (error) {
+    console.warn("Unable to refresh relay sender state", error);
+  }
+}
+
+function startRelayPolling(runtime: SendRuntime) {
+  if (!runtime.session.relay || runtime.relayPollTimer) {
+    return;
+  }
+
+  void syncRelaySenderState(runtime);
+  runtime.relayPollTimer = setInterval(() => {
+    void syncRelaySenderState(runtime);
+  }, RELAY_POLL_INTERVAL_MS);
+}
+
+async function uploadFilesToRelay(runtime: SendRuntime) {
+  if (!runtime.session.relay) {
+    throw new Error("Relay session is not available.");
+  }
+
+  await activateKeepAwakeAsync(LOCAL_TRANSFER_KEEP_AWAKE_TAG).catch(() => {});
+
+  let bytesTransferred = 0;
+
+  try {
+    withSessionUpdate(runtime, {
+      status: "transferring",
+      awaitingApproval: false,
+      progress: {
+        ...runtime.session.progress,
+        phase: "transferring",
+        detail: "Uploading files through relay.",
+        updatedAt: nowIso(),
+      },
+    });
+
+    for (const file of runtime.files) {
+      const startedAt = Date.now();
+      await uploadRelayTransferFile({
+        relay: runtime.session.relay,
+        file,
+      });
+
+      bytesTransferred += file.sizeBytes;
+      const elapsedMilliseconds = Math.max(Date.now() - startedAt, 1);
+      const speedBytesPerSecond = Math.round((file.sizeBytes / elapsedMilliseconds) * 1000);
+
+      withSessionUpdate(runtime, {
+        progress: {
+          phase: "transferring",
+          totalBytes: runtime.session.manifest.totalBytes,
+          bytesTransferred,
+          currentFileName: file.name,
+          speedBytesPerSecond,
+          detail: "Uploading files through relay.",
+          updatedAt: nowIso(),
+        },
+      });
+    }
+
+    withSessionUpdate(runtime, {
+      status: "completed",
+      progress: {
+        phase: "completed",
+        totalBytes: runtime.session.manifest.totalBytes,
+        bytesTransferred: runtime.session.manifest.totalBytes,
+        currentFileName: null,
+        speedBytesPerSecond: 0,
+        detail: "Transfer complete through relay.",
+        updatedAt: nowIso(),
+      },
+    });
+    stopRelayPolling(runtime);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Relay upload failed.";
+    withSessionUpdate(runtime, {
+      status: "failed",
+      awaitingApproval: false,
+      progress: {
+        ...runtime.session.progress,
+        phase: "failed",
+        detail: message,
+        updatedAt: nowIso(),
+      },
+    });
+    stopRelayPolling(runtime);
+    throw error;
+  } finally {
+    await deactivateKeepAwake(LOCAL_TRANSFER_KEEP_AWAKE_TAG).catch(() => {});
+  }
+}
+
 export async function startHostingTransfer({
   files,
   deviceName,
@@ -448,6 +633,17 @@ export async function startHostingTransfer({
   const sessionId = Crypto.randomUUID();
   const transferToken = Crypto.randomUUID().replace(/-/g, "");
   const deviceIp = safeDeviceIp(await Network.getIpAddressAsync().catch(() => null));
+  let relay: RelayCredentials | null = null;
+
+  try {
+    relay = await createRelayTransferSession({
+      senderDeviceName: deviceName,
+      files,
+    });
+  } catch (error) {
+    console.warn("Unable to provision relay fallback for transfer session", error);
+  }
+
   const provisionalManifest = createTransferManifest({
     files,
     deviceName,
@@ -458,7 +654,7 @@ export async function startHostingTransfer({
     isPremium,
   });
   const runtime: SendRuntime = {
-    session: createInitialSendSession(provisionalManifest, true),
+    session: createInitialSendSession(provisionalManifest, true, relay),
     files,
     updateSession,
   };
@@ -468,7 +664,8 @@ export async function startHostingTransfer({
   const tcpSocket = await loadTcpSocket();
   const zeroconfModule = await loadZeroconf();
 
-  if (!tcpSocket || !zeroconfModule) {
+  if (!tcpSocket) {
+    startRelayPolling(runtime);
     updateSession?.(runtime.session);
     return runtime.session;
   }
@@ -589,6 +786,7 @@ export async function startHostingTransfer({
   const resolvedPort = address?.port ?? 0;
 
   if (!resolvedPort) {
+    startRelayPolling(runtime);
     updateSession?.(runtime.session);
     return runtime.session;
   }
@@ -603,49 +801,67 @@ export async function startHostingTransfer({
     isPremium,
   });
 
-  runtime.session = createInitialSendSession(manifest, false);
+  runtime.session = createInitialSendSession(manifest, false, relay);
   runtime.server = {
     close() {
       server.close();
     },
   };
 
-  const serviceName = createServiceName(deviceName, sessionId);
-  const zeroconf = new zeroconfModule.Zeroconf();
-  zeroconf.publishService(
-    LOCAL_TRANSFER_SERVICE_TYPE,
-    LOCAL_TRANSFER_SERVICE_PROTOCOL,
-    LOCAL_TRANSFER_SERVICE_DOMAIN,
-    serviceName,
-    resolvedPort,
-    {
-      sessionId,
-      transferToken,
-      deviceName,
-      fileCount: String(manifest.fileCount),
-      totalBytes: String(manifest.totalBytes),
-      certificateFingerprint: manifest.certificateFingerprint,
-      premium: manifest.isPremiumSender ? "1" : "0",
-    },
-    zeroconfModule.ImplType.DNSSD,
-  );
+  let serviceName: string | null = null;
 
-  runtime.zeroconf = {
-    publisher: {
-      stop() {
-        zeroconf.unpublishService(serviceName, zeroconfModule.ImplType.DNSSD);
-        zeroconf.removeDeviceListeners();
+  if (zeroconfModule) {
+    serviceName = createServiceName(deviceName, sessionId);
+    const publishedServiceName = serviceName;
+    const zeroconf = new zeroconfModule.Zeroconf();
+    zeroconf.publishService(
+      LOCAL_TRANSFER_SERVICE_TYPE,
+      LOCAL_TRANSFER_SERVICE_PROTOCOL,
+      LOCAL_TRANSFER_SERVICE_DOMAIN,
+      publishedServiceName,
+      resolvedPort,
+      {
+        sessionId,
+        transferToken,
+        deviceName,
+        fileCount: String(manifest.fileCount),
+        totalBytes: String(manifest.totalBytes),
+        certificateFingerprint: manifest.certificateFingerprint,
+        premium: manifest.isPremiumSender ? "1" : "0",
+        ...(relay
+          ? {
+              relaySessionId: relay.sessionId,
+              relayReceiverToken: relay.receiverToken,
+              relayExpiresAt: relay.expiresAt,
+            }
+          : {}),
       },
-    },
-  };
+      zeroconfModule.ImplType.DNSSD,
+    );
+
+    runtime.zeroconf = {
+      publisher: {
+        stop() {
+          zeroconf.unpublishService(publishedServiceName, zeroconfModule.ImplType.DNSSD);
+          zeroconf.removeDeviceListeners();
+        },
+      },
+    };
+  }
 
   runtime.session = {
     ...runtime.session,
-    discoveryRecord: createDiscoveryRecord(manifest, "nearby", serviceName),
-    qrPayload: buildQrPayload(createDiscoveryRecord(manifest, "qr", serviceName)),
+    discoveryRecord: createDiscoveryRecord(
+      manifest,
+      zeroconfModule ? "nearby" : "qr",
+      serviceName,
+      toRelayAccess(relay),
+    ),
+    qrPayload: buildQrPayload(createDiscoveryRecord(manifest, "qr", serviceName, toRelayAccess(relay))),
     previewMode: false,
   };
   activeSendRuntimes.set(sessionId, runtime);
+  startRelayPolling(runtime);
   updateSession?.(runtime.session);
   return runtime.session;
 }
@@ -658,65 +874,131 @@ export async function stopHostingTransfer(sessionId: string) {
   }
 
   runtime.pendingSocket?.destroy();
+  stopRelayPolling(runtime);
   runtime.zeroconf?.publisher.stop();
   runtime.server?.close();
   activeSendRuntimes.delete(sessionId);
+
+  if (
+    runtime.session.relay &&
+    (runtime.session.status !== "completed" || runtime.session.progress.detail !== "Transfer complete through relay.")
+  ) {
+    await deleteRelayTransferSession(runtime.session.relay).catch((error) => {
+      console.warn("Unable to delete relay transfer session", error);
+    });
+  }
 }
 
 export async function approveTransferRequest(sessionId: string) {
   const runtime = activeSendRuntimes.get(sessionId);
 
-  if (!runtime?.pendingSocket || !runtime.session.awaitingApproval) {
+  if (!runtime || !runtime.session.awaitingApproval) {
     return false;
   }
 
-  const socket = runtime.pendingSocket;
-  runtime.pendingSocket = undefined;
+  if (runtime.pendingSocket) {
+    const socket = runtime.pendingSocket;
+    runtime.pendingSocket = undefined;
+
+    try {
+      await writeSocket(
+        socket,
+        encodeJsonFrame({
+          kind: "approved",
+        }),
+      );
+    } catch (error) {
+      clearPendingApproval(runtime, error instanceof Error ? error.message : "Unable to approve the transfer.");
+      socket.destroy();
+      return false;
+    }
+
+    void streamFilesToSocket(runtime, socket);
+    return true;
+  }
+
+  if (!runtime.session.relay) {
+    return false;
+  }
 
   try {
-    await writeSocket(
-      socket,
-      encodeJsonFrame({
-        kind: "approved",
-      }),
-    );
+    await approveRelayTransferSession(runtime.session.relay);
+    void uploadFilesToRelay(runtime).catch(() => {});
+    return true;
   } catch (error) {
-    clearPendingApproval(runtime, error instanceof Error ? error.message : "Unable to approve the transfer.");
-    socket.destroy();
+    withSessionUpdate(runtime, {
+      status: "failed",
+      awaitingApproval: false,
+      progress: {
+        ...runtime.session.progress,
+        phase: "failed",
+        detail: error instanceof Error ? error.message : "Unable to approve the relay transfer.",
+        updatedAt: nowIso(),
+      },
+    });
     return false;
   }
-
-  void streamFilesToSocket(runtime, socket);
-  return true;
 }
 
 export async function rejectTransferRequest(sessionId: string) {
   const runtime = activeSendRuntimes.get(sessionId);
 
-  if (!runtime?.pendingSocket || !runtime.session.awaitingApproval) {
+  if (!runtime || !runtime.session.awaitingApproval) {
     return false;
   }
 
-  const socket = runtime.pendingSocket;
+  if (runtime.pendingSocket) {
+    const socket = runtime.pendingSocket;
 
-  await writeSocket(
-    socket,
-    encodeJsonFrame({
-      kind: "rejected",
-      message: "Transfer declined.",
-    }),
-  ).catch(() => {});
-  socket.destroy();
-  clearPendingApproval(runtime);
-  return true;
+    await writeSocket(
+      socket,
+      encodeJsonFrame({
+        kind: "rejected",
+        message: "Transfer declined.",
+      }),
+    ).catch(() => {});
+    socket.destroy();
+    clearPendingApproval(runtime);
+    return true;
+  }
+
+  if (!runtime.session.relay) {
+    return false;
+  }
+
+  try {
+    await rejectRelayTransferSession(runtime.session.relay);
+    clearPendingApproval(runtime, "Transfer declined. Waiting for a nearby device to connect.");
+    return true;
+  } catch (error) {
+    withSessionUpdate(runtime, {
+      status: "failed",
+      awaitingApproval: false,
+      progress: {
+        ...runtime.session.progress,
+        phase: "failed",
+        detail: error instanceof Error ? error.message : "Unable to reject the relay transfer.",
+        updatedAt: nowIso(),
+      },
+    });
+    return false;
+  }
 }
 
 function mapResolvedService(service: ZeroconfService) {
   const sessionId = service.txt?.sessionId;
   const transferToken = service.txt?.transferToken;
-  const host = service.addresses?.find((address) => address.includes(".")) ?? service.host ?? null;
+  const relay =
+    service.txt?.relaySessionId && service.txt?.relayReceiverToken && service.txt?.relayExpiresAt
+      ? ({
+          sessionId: service.txt.relaySessionId,
+          receiverToken: service.txt.relayReceiverToken,
+          expiresAt: service.txt.relayExpiresAt,
+        } satisfies RelayAccess)
+      : null;
+  const host = service.addresses?.find((address) => address.includes(".")) ?? service.host ?? "0.0.0.0";
 
-  if (!sessionId || !transferToken || !host) {
+  if (!sessionId || (!transferToken && !relay)) {
     return null;
   }
 
@@ -725,14 +1007,15 @@ function mapResolvedService(service: ZeroconfService) {
     method: "nearby",
     deviceName: service.txt?.deviceName ?? service.name,
     host,
-    port: service.port,
-    token: transferToken,
+    port: service.port ?? 0,
+    token: transferToken ?? "",
     fileCount: Number(service.txt?.fileCount ?? "0"),
     totalBytes: Number(service.txt?.totalBytes ?? "0"),
     certificateFingerprint: service.txt?.certificateFingerprint ?? LOCAL_TRANSFER_CERT_FINGERPRINT,
     advertisedAt: nowIso(),
     isPremiumSender: service.txt?.premium === "1",
     serviceName: service.name,
+    relay,
   } satisfies DiscoveryRecord;
 }
 
@@ -749,7 +1032,8 @@ export async function startNearbyScan({
     for (const runtime of activeSendRuntimes.values()) {
       currentRecords.set(
         runtime.session.id,
-        runtime.session.discoveryRecord ?? createDiscoveryRecord(runtime.session.manifest, "preview", null),
+        runtime.session.discoveryRecord ??
+          createDiscoveryRecord(runtime.session.manifest, "preview", null, toRelayAccess(runtime.session.relay)),
       );
     }
 
@@ -822,6 +1106,7 @@ export function parseDiscoveryQrPayload(value: string) {
     certificateFingerprint: string;
     advertisedAt: string;
     isPremiumSender: boolean;
+    relay?: RelayAccess | null;
   };
 
   return {
@@ -837,6 +1122,7 @@ export function parseDiscoveryQrPayload(value: string) {
     advertisedAt: parsed.advertisedAt,
     isPremiumSender: parsed.isPremiumSender,
     serviceName: null,
+    relay: parsed.relay ?? null,
   } satisfies DiscoveryRecord;
 }
 
@@ -880,7 +1166,11 @@ async function receivePreviewTransfer(record: DiscoveryRecord) {
   };
 }
 
-export async function receiveTransfer({
+function canAttemptDirectTransfer(record: DiscoveryRecord, tcpSocket: TcpSocketLike | null) {
+  return Boolean(tcpSocket && record.port > 0 && record.host !== "0.0.0.0" && record.token.trim());
+}
+
+async function receiveRelayTransfer({
   record,
   deviceName,
   onProgress,
@@ -889,23 +1179,115 @@ export async function receiveTransfer({
   deviceName: string;
   onProgress?: (progress: TransferProgress) => void;
 }) {
-  const previewRuntime = activeSendRuntimes.get(record.sessionId);
-  const tcpSocket = await loadTcpSocket();
-
-  if (record.method === "preview" || !tcpSocket) {
-    if (!previewRuntime) {
-      throw new Error("That transfer preview is no longer available.");
-    }
-
-    const previewResult = await receivePreviewTransfer(record);
-
-    return {
-      receivedFiles: previewResult.receivedFiles,
-      bytesTransferred: previewResult.bytesTransferred,
-      detail: "Transfer complete.",
-    };
+  if (!record.relay) {
+    throw new Error("Relay access is not available for this transfer.");
   }
 
+  await activateKeepAwakeAsync(LOCAL_TRANSFER_KEEP_AWAKE_TAG).catch(() => {});
+
+  try {
+    let state = await joinRelayTransferSession({
+      relay: record.relay,
+      receiverDeviceName: deviceName,
+    });
+
+    while (!["ready", "completed"].includes(state.status)) {
+      if (state.status === "rejected") {
+        throw new Error("Transfer declined.");
+      }
+
+      if (state.status === "expired") {
+        throw new Error("This relay transfer expired before it could start.");
+      }
+
+      onProgress?.({
+        phase: state.status === "waiting_approval" ? "waiting" : "connecting",
+        totalBytes: record.totalBytes,
+        bytesTransferred: 0,
+        currentFileName: null,
+        speedBytesPerSecond: 0,
+        detail:
+          state.status === "waiting_approval"
+            ? "Waiting for the sender to approve this transfer."
+            : "Connecting through relay.",
+        updatedAt: nowIso(),
+      });
+
+      await sleep(RELAY_POLL_INTERVAL_MS);
+      state = await getRelayReceiverState(record.relay);
+    }
+
+    const receivedFiles: ReceivedFileRecord[] = [];
+    let bytesTransferred = 0;
+
+    for (const file of state.files) {
+      const outputFile = createTransferOutputReference(getReceivedFilesDirectory(), file.name);
+      const startedAt = Date.now();
+
+      onProgress?.({
+        phase: "transferring",
+        totalBytes: record.totalBytes,
+        bytesTransferred,
+        currentFileName: file.name,
+        speedBytesPerSecond: 0,
+        detail: "Downloading files through relay.",
+        updatedAt: nowIso(),
+      });
+
+      await downloadRelayTransferFile({
+        relay: record.relay,
+        fileId: file.id,
+        destination: outputFile,
+      });
+
+      bytesTransferred += file.sizeBytes;
+      const elapsedMilliseconds = Math.max(Date.now() - startedAt, 1);
+      const speedBytesPerSecond = Math.round((file.sizeBytes / elapsedMilliseconds) * 1000);
+
+      receivedFiles.push({
+        id: Crypto.randomUUID(),
+        transferId: record.sessionId,
+        name: file.name,
+        uri: outputFile.uri,
+        mimeType: file.mimeType,
+        sizeBytes: file.sizeBytes,
+        receivedAt: nowIso(),
+      });
+
+      onProgress?.({
+        phase: "transferring",
+        totalBytes: record.totalBytes,
+        bytesTransferred,
+        currentFileName: file.name,
+        speedBytesPerSecond,
+        detail: "Downloading files through relay.",
+        updatedAt: nowIso(),
+      });
+    }
+
+    await completeRelayTransferSession(record.relay).catch(() => {});
+
+    return {
+      receivedFiles,
+      bytesTransferred,
+      detail: "Transfer complete through relay.",
+    };
+  } finally {
+    await deactivateKeepAwake(LOCAL_TRANSFER_KEEP_AWAKE_TAG).catch(() => {});
+  }
+}
+
+async function receiveDirectTransfer({
+  record,
+  deviceName,
+  tcpSocket,
+  onProgress,
+}: {
+  record: DiscoveryRecord;
+  deviceName: string;
+  tcpSocket: TcpSocketLike;
+  onProgress?: (progress: TransferProgress) => void;
+}) {
   const socket = tcpSocket.connectTLS({
     host: record.host,
     port: record.port,
@@ -930,6 +1312,19 @@ export async function receiveTransfer({
     let windowStartedAt = Date.now();
     let windowBytesTransferred = 0;
     let didResolve = false;
+    let didReceiveDirectFrame = false;
+    let handshakeTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+      fail(new DirectTransferFallbackError("Unable to connect over local WiFi."));
+    }, DIRECT_CONNECT_TIMEOUT_MS);
+
+    function clearHandshakeTimer() {
+      if (!handshakeTimer) {
+        return;
+      }
+
+      clearTimeout(handshakeTimer);
+      handshakeTimer = null;
+    }
 
     function finish(result: { receivedFiles: ReceivedFileRecord[]; bytesTransferred: number; detail: string | null }) {
       if (didResolve) {
@@ -937,6 +1332,7 @@ export async function receiveTransfer({
       }
 
       didResolve = true;
+      clearHandshakeTimer();
       outputHandle?.close();
       outputHandle = null;
       socket.destroy();
@@ -950,6 +1346,7 @@ export async function receiveTransfer({
       }
 
       didResolve = true;
+      clearHandshakeTimer();
       outputHandle?.close();
       outputHandle = null;
       socket.destroy();
@@ -960,6 +1357,9 @@ export async function receiveTransfer({
     const parser = createFrameParser((frame) => {
       try {
         if (frame.type === "json") {
+          didReceiveDirectFrame = true;
+          clearHandshakeTimer();
+
           const message = decodeJsonFrame<
             | { kind: "manifest"; manifest: TransferManifest }
             | { kind: "approval-required" }
@@ -1105,19 +1505,110 @@ export async function receiveTransfer({
           deviceName,
         }),
       ).catch((error) => {
-        fail(error instanceof Error ? error : new Error("Unable to start transfer session."));
+        fail(
+          error instanceof Error
+            ? new DirectTransferFallbackError(error.message)
+            : new DirectTransferFallbackError("Unable to start transfer session."),
+        );
       });
     });
     socket.on("data", (chunk) => {
       parser(chunk as Uint8Array | Buffer | string);
     });
     socket.on("error", (error) => {
-      fail(error instanceof Error ? error : new Error("Transfer connection failed."));
+      const baseError = error instanceof Error ? error : new Error("Transfer connection failed.");
+      fail(didReceiveDirectFrame ? baseError : new DirectTransferFallbackError(baseError.message));
     });
     socket.on("close", () => {
       if (!didResolve) {
-        fail(new Error("The transfer ended before all files finished downloading."));
+        fail(
+          didReceiveDirectFrame
+            ? new Error("The transfer ended before all files finished downloading.")
+            : new DirectTransferFallbackError("Unable to reach the sender over local WiFi."),
+        );
       }
     });
   });
+}
+
+export async function receiveTransfer({
+  record,
+  deviceName,
+  onProgress,
+}: {
+  record: DiscoveryRecord;
+  deviceName: string;
+  onProgress?: (progress: TransferProgress) => void;
+}) {
+  const previewRuntime = activeSendRuntimes.get(record.sessionId);
+  const tcpSocket = await loadTcpSocket();
+
+  if (record.method === "preview" && previewRuntime) {
+    const previewResult = await receivePreviewTransfer(record);
+
+    return {
+      receivedFiles: previewResult.receivedFiles,
+      bytesTransferred: previewResult.bytesTransferred,
+      detail: "Transfer complete.",
+    };
+  }
+
+  if (canAttemptDirectTransfer(record, tcpSocket)) {
+    try {
+      return await receiveDirectTransfer({
+        record,
+        deviceName,
+        tcpSocket: tcpSocket as TcpSocketLike,
+        onProgress,
+      });
+    } catch (error) {
+      if (record.relay && error instanceof DirectTransferFallbackError) {
+        onProgress?.({
+          phase: "connecting",
+          totalBytes: record.totalBytes,
+          bytesTransferred: 0,
+          currentFileName: null,
+          speedBytesPerSecond: 0,
+          detail: "Direct transfer unavailable. Switching to relay.",
+          updatedAt: nowIso(),
+        });
+
+        return receiveRelayTransfer({
+          record,
+          deviceName,
+          onProgress,
+        });
+      }
+
+      throw error;
+    }
+  }
+
+  if (record.relay) {
+    return receiveRelayTransfer({
+      record,
+      deviceName,
+      onProgress,
+    });
+  }
+
+  if (record.method === "preview") {
+    if (!previewRuntime) {
+      throw new Error("That transfer preview is no longer available.");
+    }
+
+    const previewResult = await receivePreviewTransfer(record);
+
+    return {
+      receivedFiles: previewResult.receivedFiles,
+      bytesTransferred: previewResult.bytesTransferred,
+      detail: "Transfer complete.",
+    };
+  }
+
+  if (!tcpSocket) {
+    throw new Error("Local WiFi transfer is not available on this device.");
+  }
+
+  throw new Error("This transfer is not reachable over local WiFi.");
 }

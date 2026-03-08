@@ -1,9 +1,14 @@
-import { Tabs, usePathname } from "expo-router";
+import MaterialIcons from "@expo/vector-icons/MaterialIcons";
+import { usePathname } from "expo-router";
+import { NativeTabs } from "expo-router/unstable-native-tabs";
 import React, { useEffect, useRef } from "react";
 import { View } from "react-native";
 import { queryClient } from "@/app/_layout";
-import { AppTabBar } from "@/components/app-design/tab-bar";
 import { designMetrics, designTheme } from "@/lib/design/theme";
+
+const screenContentStyle = {
+  backgroundColor: designTheme.background,
+} as const;
 
 export default function TabLayout() {
   const pathname = usePathname();
@@ -29,20 +34,30 @@ export default function TabLayout() {
           backgroundColor: designTheme.background,
         }}
       >
-        <Tabs
-          tabBar={(props) => <AppTabBar {...props} />}
-          screenOptions={{
-            headerShown: false,
-            sceneStyle: {
-              backgroundColor: designTheme.background,
-            },
-          }}
-        >
-          <Tabs.Screen name={"index"} options={{ title: "Transfer" }} />
-          <Tabs.Screen name={"history"} options={{ title: "History" }} />
-          <Tabs.Screen name={"settings"} options={{ title: "Settings" }} />
-          <Tabs.Screen name={"ui"} options={{ href: null }} />
-        </Tabs>
+        <NativeTabs minimizeBehavior={"onScrollDown"} tintColor={designTheme.primary} backgroundColor={"transparent"}>
+          <NativeTabs.Trigger name={"index"} disableAutomaticContentInsets contentStyle={screenContentStyle}>
+            <NativeTabs.Trigger.Label>Transfer</NativeTabs.Trigger.Label>
+            <NativeTabs.Trigger.Icon
+              sf={{ default: "arrow.up.arrow.down.circle", selected: "arrow.up.arrow.down.circle.fill" }}
+              src={<NativeTabs.Trigger.VectorIcon family={MaterialIcons} name={"swap-vert"} />}
+            />
+          </NativeTabs.Trigger>
+          <NativeTabs.Trigger name={"history"} disableAutomaticContentInsets contentStyle={screenContentStyle}>
+            <NativeTabs.Trigger.Label>History</NativeTabs.Trigger.Label>
+            <NativeTabs.Trigger.Icon
+              sf={{ default: "clock", selected: "clock.fill" }}
+              src={<NativeTabs.Trigger.VectorIcon family={MaterialIcons} name={"history"} />}
+            />
+          </NativeTabs.Trigger>
+          <NativeTabs.Trigger name={"settings"} disableAutomaticContentInsets contentStyle={screenContentStyle}>
+            <NativeTabs.Trigger.Label>Settings</NativeTabs.Trigger.Label>
+            <NativeTabs.Trigger.Icon
+              sf={{ default: "gearshape", selected: "gearshape.fill" }}
+              src={<NativeTabs.Trigger.VectorIcon family={MaterialIcons} name={"settings"} />}
+            />
+          </NativeTabs.Trigger>
+          <NativeTabs.Trigger name={"ui"} hidden disableAutomaticContentInsets contentStyle={screenContentStyle} />
+        </NativeTabs>
       </View>
     </View>
   );

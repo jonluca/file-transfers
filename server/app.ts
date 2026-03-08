@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { readFile } from "node:fs/promises";
 import { and, eq, sql } from "drizzle-orm";
 import { fetchRequestHandler } from "@trpc/server/adapters/fetch";
 import { Hono } from "hono";
@@ -9,6 +10,18 @@ import { db } from "./db/client";
 import { hostedFile, subscriptionMembership } from "./db/schema";
 import { serverEnv } from "./env";
 import { createDownloadLink, readLocalStoredFile, storeUploadedFile } from "./storage/hosted-storage";
+import {
+  approveRelaySession,
+  completeRelaySession,
+  createRelaySession,
+  deleteRelaySession,
+  getRelayDownloadPath,
+  getRelayReceiverState,
+  getRelaySenderState,
+  joinRelaySession,
+  rejectRelaySession,
+  storeRelayFile,
+} from "./storage/relay-sessions";
 import { verifyHostedFilePasscode } from "./trpc/routers/hosted-files";
 import { createTRPCContext } from "./trpc/context";
 import { appRouter } from "./trpc/router";
@@ -93,8 +106,8 @@ app.use(
   "*",
   cors({
     origin: (origin) => origin ?? serverEnv.betterAuthUrl,
-    allowHeaders: ["Content-Type", "Authorization", "Cookie"],
-    allowMethods: ["GET", "POST", "PUT", "OPTIONS"],
+    allowHeaders: ["Content-Type", "Authorization", "Cookie", "X-Relay-Token"],
+    allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     credentials: true,
   }),
 );
@@ -135,6 +148,182 @@ app.put("/uploads/:fileId/:uploadToken", async (c) => {
   });
 
   return c.json({ success: true });
+});
+
+app.post("/relay/sessions", async (c) => {
+  const payload = (await c.req.json()) as {
+    senderDeviceName?: string;
+    files?: Array<{ id: string; name: string; mimeType: string; sizeBytes: number }>;
+  };
+
+  const files = payload.files ?? [];
+  if (!files.length) {
+    return c.json({ error: "At least one file is required." }, 400);
+  }
+
+  const created = await createRelaySession({
+    senderDeviceName: payload.senderDeviceName ?? "This device",
+    files,
+  });
+
+  return c.json(created);
+});
+
+app.get("/relay/sessions/:sessionId/sender", async (c) => {
+  const senderToken = c.req.header("x-relay-token");
+  if (!senderToken) {
+    return c.json({ error: "Missing relay token." }, 401);
+  }
+
+  const state = await getRelaySenderState(c.req.param("sessionId"), senderToken);
+  if (!state) {
+    return c.json({ error: "Relay session not found." }, 404);
+  }
+
+  return c.json(state);
+});
+
+app.get("/relay/sessions/:sessionId/receiver", async (c) => {
+  const receiverToken = c.req.header("x-relay-token");
+  if (!receiverToken) {
+    return c.json({ error: "Missing relay token." }, 401);
+  }
+
+  const state = await getRelayReceiverState(c.req.param("sessionId"), receiverToken);
+  if (!state) {
+    return c.json({ error: "Relay session not found." }, 404);
+  }
+
+  return c.json(state);
+});
+
+app.post("/relay/sessions/:sessionId/join", async (c) => {
+  const receiverToken = c.req.header("x-relay-token");
+  if (!receiverToken) {
+    return c.json({ error: "Missing relay token." }, 401);
+  }
+
+  const payload = (await c.req.json()) as {
+    receiverDeviceName?: string;
+  };
+
+  const state = await joinRelaySession({
+    sessionId: c.req.param("sessionId"),
+    receiverToken,
+    receiverDeviceName: payload.receiverDeviceName ?? "Nearby device",
+  });
+  if (!state) {
+    return c.json({ error: "Relay session not found." }, 404);
+  }
+
+  return c.json(state);
+});
+
+app.post("/relay/sessions/:sessionId/approve", async (c) => {
+  const senderToken = c.req.header("x-relay-token");
+  if (!senderToken) {
+    return c.json({ error: "Missing relay token." }, 401);
+  }
+
+  const state = await approveRelaySession({
+    sessionId: c.req.param("sessionId"),
+    senderToken,
+  });
+  if (!state) {
+    return c.json({ error: "Relay session not found." }, 404);
+  }
+
+  return c.json(state);
+});
+
+app.post("/relay/sessions/:sessionId/reject", async (c) => {
+  const senderToken = c.req.header("x-relay-token");
+  if (!senderToken) {
+    return c.json({ error: "Missing relay token." }, 401);
+  }
+
+  const state = await rejectRelaySession({
+    sessionId: c.req.param("sessionId"),
+    senderToken,
+  });
+  if (!state) {
+    return c.json({ error: "Relay session not found." }, 404);
+  }
+
+  return c.json(state);
+});
+
+app.put("/relay/sessions/:sessionId/files/:fileId", async (c) => {
+  const senderToken = c.req.header("x-relay-token");
+  if (!senderToken) {
+    return c.json({ error: "Missing relay token." }, 401);
+  }
+
+  const body = await c.req.arrayBuffer();
+  const state = await storeRelayFile({
+    sessionId: c.req.param("sessionId"),
+    senderToken,
+    fileId: c.req.param("fileId"),
+    body,
+  });
+  if (!state) {
+    return c.json({ error: "Relay session or file not found." }, 404);
+  }
+
+  return c.json(state);
+});
+
+app.get("/relay/sessions/:sessionId/files/:fileId", async (c) => {
+  const receiverToken = c.req.header("x-relay-token");
+  if (!receiverToken) {
+    return c.json({ error: "Missing relay token." }, 401);
+  }
+
+  const result = await getRelayDownloadPath({
+    sessionId: c.req.param("sessionId"),
+    receiverToken,
+    fileId: c.req.param("fileId"),
+  });
+  if (!result) {
+    return c.json({ error: "Relay file not found." }, 404);
+  }
+
+  const contents = await readFile(result.absolutePath);
+  c.header("content-type", result.file.mimeType);
+  c.header("content-disposition", `attachment; filename="${result.file.name}"`);
+  return c.body(contents);
+});
+
+app.post("/relay/sessions/:sessionId/complete", async (c) => {
+  const receiverToken = c.req.header("x-relay-token");
+  if (!receiverToken) {
+    return c.json({ error: "Missing relay token." }, 401);
+  }
+
+  const state = await completeRelaySession({
+    sessionId: c.req.param("sessionId"),
+    receiverToken,
+  });
+  if (!state) {
+    return c.json({ error: "Relay session not found." }, 404);
+  }
+
+  return c.json(state);
+});
+
+app.delete("/relay/sessions/:sessionId", async (c) => {
+  const senderToken = c.req.header("x-relay-token");
+  if (!senderToken) {
+    return c.json({ error: "Missing relay token." }, 401);
+  }
+
+  const state = await getRelaySenderState(c.req.param("sessionId"), senderToken);
+  if (!state) {
+    return c.json({ error: "Relay session not found." }, 404);
+  }
+
+  await deleteRelaySession(c.req.param("sessionId"));
+  return c.body(null, 204);
 });
 
 app.get("/h/:slug", async (c) => {

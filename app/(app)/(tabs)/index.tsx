@@ -262,6 +262,11 @@ function WaitingPulse() {
 
 export default function TransferScreen() {
   const insets = useSafeAreaInsets();
+  const compactBottomPadding = insets.bottom + 16;
+  const regularBottomPadding = insets.bottom + 24;
+  const roomyBottomPadding = insets.bottom + 32;
+  const footerBottomPadding = insets.bottom + 12;
+  const bottomLinkPadding = insets.bottom + 16;
   const deviceName = useDeviceName();
   const upsertRecentTransfer = useAppStore((state) => state.upsertRecentTransfer);
   const entitlementsQuery = useEntitlements();
@@ -441,6 +446,15 @@ export default function TransferScreen() {
     });
 
     setActiveSendSession(session);
+
+    if (session.previewMode && session.relay) {
+      setNotice("Nearby WiFi discovery is unavailable here. Use the QR code to connect through relay.");
+      return;
+    }
+
+    if (session.previewMode) {
+      setNotice("Nearby transfer is unavailable on this build.");
+    }
   }
 
   async function handleApproveTransfer() {
@@ -574,6 +588,9 @@ export default function TransferScreen() {
     currentProgress && currentProgress.totalBytes > 0
       ? Math.round((currentProgress.bytesTransferred / currentProgress.totalBytes) * 100)
       : 0;
+  const canShowTransferQr = Boolean(
+    activeSendSession?.qrPayload && (!activeSendSession.previewMode || activeSendSession.relay),
+  );
   const currentTransferName = activeReceiveRecord?.deviceName ?? activeSendSession?.peerDeviceName ?? "Nearby device";
   const transferTitle =
     currentProgress?.phase === "waiting"
@@ -584,7 +601,7 @@ export default function TransferScreen() {
 
   if (mode === "idle") {
     return (
-      <View style={[styles.root, { paddingTop: insets.top, paddingBottom: 16 }]}>
+      <View style={[styles.root, { paddingTop: insets.top, paddingBottom: compactBottomPadding }]}>
         <View style={styles.idleWrap}>
           <LargeActionCard
             icon={<ArrowUp color={designTheme.primaryForeground} size={64} strokeWidth={1.5} />}
@@ -641,7 +658,7 @@ export default function TransferScreen() {
           </Pressable>
         </ScrollView>
 
-        <View style={styles.footerArea}>
+        <View style={[styles.footerArea, { paddingBottom: footerBottomPadding }]}>
           <Text style={styles.footerMeta}>
             {stagedFiles.length} file{stagedFiles.length === 1 ? "" : "s"} · {formatBytes(totalStagedBytes)}
           </Text>
@@ -655,7 +672,7 @@ export default function TransferScreen() {
   if (mode === "waiting") {
     if (activeSendSession?.awaitingApproval && activeSendSession.peerDeviceName) {
       return (
-        <View style={[styles.root, { paddingTop: insets.top, paddingBottom: 24 }]}>
+        <View style={[styles.root, { paddingTop: insets.top, paddingBottom: regularBottomPadding }]}>
           <View style={styles.centerWrap}>
             <View style={styles.transferAvatar}>
               <Text style={styles.transferAvatarLabel}>{activeSendSession.peerDeviceName.charAt(0).toUpperCase()}</Text>
@@ -690,7 +707,7 @@ export default function TransferScreen() {
     }
 
     return (
-      <View style={[styles.root, { paddingTop: insets.top, paddingBottom: 24 }]}>
+      <View style={[styles.root, { paddingTop: insets.top, paddingBottom: regularBottomPadding }]}>
         <View style={styles.centerWrap}>
           <WaitingPulse />
           <Text style={styles.centerTitle}>Waiting for receiver</Text>
@@ -704,7 +721,7 @@ export default function TransferScreen() {
               void handleCancel();
             }}
           />
-          {activeSendSession?.qrPayload ? (
+          {canShowTransferQr ? (
             <>
               <Pressable
                 onPress={() => setShowQrCode((current) => !current)}
@@ -714,7 +731,7 @@ export default function TransferScreen() {
               </Pressable>
               {showQrCode ? (
                 <View style={styles.qrCard}>
-                  <QRCode value={activeSendSession.qrPayload} size={172} color={designTheme.foreground} />
+                  <QRCode value={activeSendSession?.qrPayload ?? ""} size={172} color={designTheme.foreground} />
                 </View>
               ) : null}
             </>
@@ -780,7 +797,11 @@ export default function TransferScreen() {
 
         <Pressable
           onPress={() => void handleScanQrPress()}
-          style={({ pressed }) => [styles.bottomLink, pressed ? styles.pressed : null]}
+          style={({ pressed }) => [
+            styles.bottomLink,
+            { paddingBottom: bottomLinkPadding },
+            pressed ? styles.pressed : null,
+          ]}
         >
           <Text style={styles.bottomLinkLabel}>
             {showQrScanner ? "Hide QR scanner" : "Can't find device? Scan QR code"}
@@ -791,7 +812,7 @@ export default function TransferScreen() {
   }
 
   return (
-    <View style={[styles.root, { paddingTop: insets.top, paddingBottom: 32 }]}>
+    <View style={[styles.root, { paddingTop: insets.top, paddingBottom: roomyBottomPadding }]}>
       <View style={styles.transferWrap}>
         <View style={styles.transferAvatar}>
           <Text style={styles.transferAvatarLabel}>{currentTransferName.charAt(0).toUpperCase()}</Text>
