@@ -34,7 +34,11 @@ export default function TabLayout() {
           backgroundColor: designTheme.background,
         }}
       >
-        <NativeTabs minimizeBehavior={"onScrollDown"} tintColor={designTheme.primary} backgroundColor={"transparent"}>
+        <NativeTabs
+          minimizeBehavior={"onScrollDown"}
+          tintColor={designTheme.primary}
+          backgroundColor={designTheme.background}
+        >
           <NativeTabs.Trigger name={"index"} disableAutomaticContentInsets contentStyle={screenContentStyle}>
             <NativeTabs.Trigger.Label>Transfer</NativeTabs.Trigger.Label>
             <NativeTabs.Trigger.Icon

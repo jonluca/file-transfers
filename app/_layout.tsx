@@ -8,6 +8,7 @@ import {
 } from "@expo-google-fonts/geist";
 import { QueryClientProvider, focusManager } from "@tanstack/react-query";
 import type { QueryCacheNotifyEvent } from "@tanstack/query-core";
+import * as SystemUI from "expo-system-ui";
 import { Slot } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import React, { useEffect } from "react";
@@ -16,6 +17,7 @@ import type { AppStateStatus } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { FullScreenLoader } from "@/components/ui";
+import { designTheme } from "@/lib/design/theme";
 import { createBoilerplateQueryClient, getTrpcClient, TRPCProvider } from "@/lib/trpc";
 import { RevenueCatProvider } from "@/providers/revenuecat-provider";
 import { useHasHydrated } from "@/store";
@@ -49,6 +51,14 @@ export default function RootLayout() {
   useEffect(() => {
     const subscription = AppState.addEventListener("change", onAppStateChange);
     return () => subscription.remove();
+  }, []);
+
+  useEffect(() => {
+    if (Platform.OS === "web") {
+      return;
+    }
+
+    void SystemUI.setBackgroundColorAsync(designTheme.background);
   }, []);
 
   useEffect(() => {
@@ -94,12 +104,12 @@ export default function RootLayout() {
       <QueryClientProvider client={queryClient}>
         <TRPCProvider trpcClient={trpcClient} queryClient={queryClient}>
           <RevenueCatProvider>
-            <GestureHandlerRootView style={{ flex: 1 }}>
+            <GestureHandlerRootView style={{ flex: 1, backgroundColor: designTheme.background }}>
               <RootLayoutContent />
             </GestureHandlerRootView>
           </RevenueCatProvider>
         </TRPCProvider>
-        <StatusBar style={"dark"} />
+        <StatusBar backgroundColor={designTheme.background} style={"dark"} />
       </QueryClientProvider>
     </SafeAreaProvider>
   );

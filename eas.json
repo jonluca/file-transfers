@@ -14,5 +14,15 @@
     "production": {
       "autoIncrement": true
     }
+  },
+  "submit": {
+    "production": {
+      "ios": {
+        "appleId": "jonluca.decaro@gmail.com",
+        "ascAppId": "6760266762",
+        "appleTeamId": "F35YQQ5672",
+        "appName": "File Transfers"
+      }
+    }
   }
 }

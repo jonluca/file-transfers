@@ -189,6 +189,36 @@ function safeDeviceIp(value: string | null | undefined) {
   return value;
 }
 
+function getPeerIpv4Address(value: string | null | undefined) {
+  if (!value) {
+    return null;
+  }
+
+  const normalized =
+    value
+      .trim()
+      .replace(/^\[|\]$/g, "")
+      .replace(/^::ffff:/i, "")
+      .split("%")[0] ?? "";
+
+  return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(normalized) ? normalized : null;
+}
+
+function withResolvedSenderHost(offer: IncomingTransferOffer, peerAddress: string | null | undefined) {
+  const peerHost = getPeerIpv4Address(peerAddress);
+  if (!peerHost || peerHost === offer.sender.host) {
+    return offer;
+  }
+
+  return {
+    ...offer,
+    sender: {
+      ...offer.sender,
+      host: peerHost,
+    },
+  } satisfies IncomingTransferOffer;
+}
+
 function getPreferredLanAddress() {
   const interfaces = networkInterfaces();
   const preferred = ["en0", "bridge0", "en1", "en2"];
@@ -847,6 +877,35 @@ async function deleteRelayTransferSession(apiUrl: string, relay: RelayCredential
   await parseRelayResponse<RelaySessionState>(response);
 }
 
+async function ensureRelayReceiverAccepted({
+  apiUrl,
+  offer,
+  receiverDeviceName,
+  allowFailure = false,
+}: {
+  apiUrl: string;
+  offer: IncomingTransferOffer;
+  receiverDeviceName: string;
+  allowFailure?: boolean;
+}) {
+  if (!offer.sender.relay) {
+    return false;
+  }
+
+  try {
+    await acceptRelayTransferSession(apiUrl, offer.sender.relay, receiverDeviceName);
+    return true;
+  } catch (error) {
+    if (!allowFailure) {
+      throw error;
+    }
+
+    const message = error instanceof Error ? error.message : "Unknown relay error.";
+    logLine(`Relay fallback could not be primed; continuing direct transfer. ${message}`);
+    return false;
+  }
+}
+
 async function uploadRelayTransferFile(apiUrl: string, relay: RelayCredentials, file: SelectedTransferFile) {
   const payload = await readFile(file.uri);
   const response = await fetch(relayUrl(apiUrl, `/relay/sessions/${relay.sessionId}/files/${file.id}`), {
@@ -1176,11 +1235,13 @@ async function receiveDirectTransfer({
 async function receiveRelayTransfer({
   apiUrl,
   offer,
+  deviceName,
   outputDir,
   onProgress,
 }: {
   apiUrl: string;
   offer: IncomingTransferOffer;
+  deviceName: string;
   outputDir: string;
   onProgress?: (progress: TransferProgress) => void;
 }) {
@@ -1189,6 +1250,11 @@ async function receiveRelayTransfer({
   }
 
   await ensureDirectory(outputDir);
+  await ensureRelayReceiverAccepted({
+    apiUrl,
+    offer,
+    receiverDeviceName: deviceName,
+  });
 
   let state = await getRelayReceiverState(apiUrl, offer.sender.relay);
 
@@ -1603,20 +1669,31 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
   }
 
   async function processIncomingOffer(socket: TLSSocket, offer: IncomingTransferOffer) {
+    const resolvedOffer = withResolvedSenderHost(offer, socket.remoteAddress);
+    const canAttemptDirect =
+      resolvedOffer.sender.port > 0 &&
+      resolvedOffer.sender.host !== "0.0.0.0" &&
+      resolvedOffer.sender.token.trim() &&
+      options.transport !== "relay";
+
     isBusy = true;
-    state.currentOffer = offer;
+    state.currentOffer = resolvedOffer;
     emitProgress({
       phase: "waiting",
-      totalBytes: offer.totalBytes,
+      totalBytes: resolvedOffer.totalBytes,
       bytesTransferred: 0,
       currentFileName: null,
       speedBytesPerSecond: 0,
-      detail: `${offer.senderDeviceName} wants to send ${offer.fileCount} file${offer.fileCount === 1 ? "" : "s"}.`,
+      detail: `${resolvedOffer.senderDeviceName} wants to send ${resolvedOffer.fileCount} file${
+        resolvedOffer.fileCount === 1 ? "" : "s"
+      }.`,
       updatedAt: nowIso(),
     });
 
     logLine(
-      `Incoming offer from ${offer.senderDeviceName}: ${offer.fileCount} file(s), ${formatBytes(offer.totalBytes)}.`,
+      `Incoming offer from ${resolvedOffer.senderDeviceName}: ${resolvedOffer.fileCount} file(s), ${formatBytes(
+        resolvedOffer.totalBytes,
+      )}.`,
     );
 
     await writeSocket(socket, encodeJsonFrame({ kind: "offer-received" }));
@@ -1625,8 +1702,21 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
       await sleep(options.acceptDelayMs);
     }
 
-    if (offer.sender.relay) {
-      await acceptRelayTransferSession(options.apiUrl, offer.sender.relay, options.deviceName);
+    if (resolvedOffer.sender.relay) {
+      if (canAttemptDirect) {
+        void ensureRelayReceiverAccepted({
+          apiUrl: options.apiUrl,
+          offer: resolvedOffer,
+          receiverDeviceName: options.deviceName,
+          allowFailure: true,
+        });
+      } else {
+        await ensureRelayReceiverAccepted({
+          apiUrl: options.apiUrl,
+          offer: resolvedOffer,
+          receiverDeviceName: options.deviceName,
+        });
+      }
     }
 
     await writeSocket(
@@ -1656,11 +1746,12 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
         options.transport === "relay"
           ? await receiveRelayTransfer({
               apiUrl: options.apiUrl,
-              offer,
+              offer: resolvedOffer,
+              deviceName: options.deviceName,
               outputDir: options.outputDir,
               onProgress: emitProgress,
             })
-          : await receiveWithPreferredTransport(offer);
+          : await receiveWithPreferredTransport(resolvedOffer);
 
       state.lastTransfer = {
         startedAt: transferStartedAt,
@@ -1673,11 +1764,13 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
       };
 
       logLine(
-        `Received ${result.receivedFiles.length} file(s) from ${offer.senderDeviceName}. ${formatBytes(result.bytesTransferred)} transferred.`,
+        `Received ${result.receivedFiles.length} file(s) from ${resolvedOffer.senderDeviceName}. ${formatBytes(
+          result.bytesTransferred,
+        )} transferred.`,
       );
     } catch (error) {
-      if (offer.sender.relay) {
-        await declineRelayTransferSession(options.apiUrl, offer.sender.relay).catch(() => {});
+      if (resolvedOffer.sender.relay) {
+        await declineRelayTransferSession(options.apiUrl, resolvedOffer.sender.relay).catch(() => {});
       }
 
       state.lastTransfer = {
@@ -1731,6 +1824,7 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
           return receiveRelayTransfer({
             apiUrl: options.apiUrl,
             offer,
+            deviceName: options.deviceName,
             outputDir: options.outputDir,
             onProgress: emitProgress,
           });
@@ -1744,6 +1838,7 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
       return receiveRelayTransfer({
         apiUrl: options.apiUrl,
         offer,
+        deviceName: options.deviceName,
         outputDir: options.outputDir,
         onProgress: emitProgress,
       });

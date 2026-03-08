@@ -77,6 +77,7 @@ interface ReceiveRuntime {
 interface TransferSocket {
   destroy(): void;
   on(event: string, handler: (...args: unknown[]) => void): void;
+  remoteAddress?: string;
   write(buffer: Uint8Array | Buffer | string, cb?: (error?: Error) => void): boolean;
 }
 
@@ -207,6 +208,36 @@ function safeDeviceIp(value: string | null | undefined) {
   }
 
   return value;
+}
+
+function getPeerIpv4Address(value: string | null | undefined) {
+  if (!value) {
+    return null;
+  }
+
+  const normalized =
+    value
+      .trim()
+      .replace(/^\[|\]$/g, "")
+      .replace(/^::ffff:/i, "")
+      .split("%")[0] ?? "";
+
+  return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(normalized) ? normalized : null;
+}
+
+function withResolvedSenderHost(offer: IncomingTransferOffer, peerAddress: string | null | undefined) {
+  const peerHost = getPeerIpv4Address(peerAddress);
+  if (!peerHost || peerHost === offer.sender.host) {
+    return offer;
+  }
+
+  return {
+    ...offer,
+    sender: {
+      ...offer.sender,
+      host: peerHost,
+    },
+  } satisfies IncomingTransferOffer;
 }
 
 function createTransferManifest({
@@ -419,6 +450,35 @@ function clearSenderConnectTimer(runtime: SendRuntime) {
 
 function hasDirectSendPath(runtime: SendRuntime) {
   return Boolean(runtime.server && runtime.session.manifest.advertisedPort > 0);
+}
+
+async function ensureRelayReceiverAccepted({
+  offer,
+  receiverDeviceName,
+  allowFailure = false,
+}: {
+  offer: IncomingTransferOffer;
+  receiverDeviceName: string;
+  allowFailure?: boolean;
+}) {
+  if (!offer.sender.relay) {
+    return false;
+  }
+
+  try {
+    await acceptRelayTransferSession({
+      relay: offer.sender.relay,
+      receiverDeviceName,
+    });
+    return true;
+  } catch (error) {
+    if (!allowFailure) {
+      throw error;
+    }
+
+    console.warn("Unable to prime relay fallback for direct transfer", error);
+    return false;
+  }
 }
 
 function failSendSession(runtime: SendRuntime, detail: string) {
@@ -817,20 +877,23 @@ function registerIncomingOffer(runtime: ReceiveRuntime, offer: IncomingTransferO
     return false;
   }
 
+  const resolvedOffer = withResolvedSenderHost(offer, socket?.remoteAddress);
   runtime.pendingOfferSocket = socket;
 
   withReceiveSessionUpdate(runtime, {
     status: "waiting",
-    incomingOffer: offer,
-    peerDeviceName: offer.senderDeviceName,
+    incomingOffer: resolvedOffer,
+    peerDeviceName: resolvedOffer.senderDeviceName,
     receivedFiles: [],
     progress: {
       phase: "waiting",
-      totalBytes: offer.totalBytes,
+      totalBytes: resolvedOffer.totalBytes,
       bytesTransferred: 0,
       currentFileName: null,
       speedBytesPerSecond: 0,
-      detail: `${offer.senderDeviceName} wants to send ${offer.fileCount} file${offer.fileCount === 1 ? "" : "s"}.`,
+      detail: `${resolvedOffer.senderDeviceName} wants to send ${resolvedOffer.fileCount} file${
+        resolvedOffer.fileCount === 1 ? "" : "s"
+      }.`,
       updatedAt: nowIso(),
     },
   });
@@ -947,9 +1010,11 @@ function canAttemptDirectTransfer(offer: IncomingTransferOffer, tcpSocket: TcpSo
 
 async function receiveRelayTransfer({
   offer,
+  receiverDeviceName,
   onProgress,
 }: {
   offer: IncomingTransferOffer;
+  receiverDeviceName: string;
   onProgress?: (progress: TransferProgress) => void;
 }) {
   if (!offer.sender.relay) {
@@ -959,6 +1024,11 @@ async function receiveRelayTransfer({
   await activateKeepAwakeAsync(LOCAL_TRANSFER_KEEP_AWAKE_TAG).catch(() => {});
 
   try {
+    await ensureRelayReceiverAccepted({
+      offer,
+      receiverDeviceName,
+    });
+
     let state = await getRelayReceiverState(offer.sender.relay);
 
     while (!["ready", "completed"].includes(state.status)) {
@@ -1275,17 +1345,17 @@ async function runReceiveTransfer(runtime: ReceiveRuntime) {
   const canUseDirect = canAttemptDirectTransfer(offer, tcpSocket);
 
   if (offer.sender.relay) {
-    try {
-      await acceptRelayTransferSession({
-        relay: offer.sender.relay,
+    if (canUsePreview || canUseDirect) {
+      void ensureRelayReceiverAccepted({
+        offer,
+        receiverDeviceName: runtime.session.discoveryRecord.deviceName,
+        allowFailure: true,
+      });
+    } else {
+      await ensureRelayReceiverAccepted({
+        offer,
         receiverDeviceName: runtime.session.discoveryRecord.deviceName,
       });
-    } catch (error) {
-      if (!canUsePreview && !canUseDirect) {
-        throw error;
-      }
-
-      console.warn("Unable to accept relay transfer for fallback", error);
     }
   }
 
@@ -1350,6 +1420,7 @@ async function runReceiveTransfer(runtime: ReceiveRuntime) {
 
         return receiveRelayTransfer({
           offer,
+          receiverDeviceName: runtime.session.discoveryRecord.deviceName,
           onProgress: (progress) => {
             withReceiveSessionUpdate(runtime, {
               status: progress.phase === "transferring" ? "transferring" : "connecting",
@@ -1366,6 +1437,7 @@ async function runReceiveTransfer(runtime: ReceiveRuntime) {
   if (offer.sender.relay) {
     return receiveRelayTransfer({
       offer,
+      receiverDeviceName: runtime.session.discoveryRecord.deviceName,
       onProgress: (progress) => {
         withReceiveSessionUpdate(runtime, {
           status: progress.phase === "transferring" ? "transferring" : "connecting",

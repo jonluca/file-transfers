@@ -11,7 +11,7 @@ export default function getConfig({ config }: ConfigContext): ExpoConfig {
     icon: "./assets/icon.png",
     orientation: "portrait",
     scheme: "filetransfers",
-    userInterfaceStyle: "automatic",
+    userInterfaceStyle: "light",
     ios: {
       ...config.ios,
       supportsTablet: false,
@@ -56,6 +56,9 @@ export default function getConfig({ config }: ConfigContext): ExpoConfig {
     },
     extra: {
       router: {},
+      eas: {
+        projectId: "1070ca5a-5d8a-48ee-a705-b039eccc579b",
+      },
     },
   } satisfies ExpoConfig;
 }

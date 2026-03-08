@@ -15,6 +15,7 @@
     "ios": "expo run:ios",
     "mobile:prepare": "expo prebuild --clean",
     "mobile:dev": "expo run:ios --device",
+    "mobile:submit": "eas build --platform ios --auto-submit --non-interactive",
     "macos:device": "tsx scripts/macos-transfer-device.ts",
     "android": "expo run:android",
     "auth:generate": "better-auth generate --config server/auth.ts --output server/db/schema/auth-schema.ts --yes",
