@@ -6,5 +6,6 @@
   "tabWidth": 2,
   "trailingComma": "all",
   "singleQuote": false,
-  "sortPackageJson": false
+  "sortPackageJson": false,
+  "ignorePatterns": [".yarn", "uniwind.d.ts", "uniwind-types.d.ts"]
 }
