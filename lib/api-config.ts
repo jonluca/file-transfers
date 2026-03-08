@@ -1,4 +1,4 @@
-const LOCAL_API_URL = "http://127.0.0.1:3001";
+const LOCAL_API_URL = "https://filetransfersapp.com";
 
 function trimTrailingSlash(value: string) {
   return value.replace(/\/+$/, "");

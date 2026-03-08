@@ -35,27 +35,40 @@ export function encodeFrame(type: TransferFrameType, payload: Uint8Array) {
   return frame;
 }
 
+function toUint8Array(chunk: Uint8Array | Buffer | string) {
+  if (typeof chunk === "string") {
+    const encoded = Buffer.from(chunk, "utf8");
+    return new Uint8Array(encoded.buffer, encoded.byteOffset, encoded.byteLength);
+  }
+
+  return new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+}
+
+function concatUint8Arrays(left: Uint8Array, right: Uint8Array) {
+  const merged = new Uint8Array(left.byteLength + right.byteLength);
+  merged.set(left, 0);
+  merged.set(right, left.byteLength);
+  return merged;
+}
+
 export function createFrameParser(onFrame: (frame: TransferFrame) => void) {
-  let buffered = Buffer.alloc(0);
+  let buffered = new Uint8Array(0);
 
   return (chunk: Uint8Array | Buffer | string) => {
-    const nextChunk =
-      typeof chunk === "string"
-        ? Buffer.from(chunk, "utf8")
-        : Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
-    buffered = Buffer.concat([buffered, nextChunk]);
+    buffered = concatUint8Arrays(buffered, toUint8Array(chunk));
 
     while (buffered.length >= 5) {
-      const typeId = buffered.readUInt8(0);
-      const payloadLength = buffered.readUInt32BE(1);
+      const header = new DataView(buffered.buffer, buffered.byteOffset, 5);
+      const typeId = header.getUint8(0);
+      const payloadLength = header.getUint32(1, false);
       const frameLength = 5 + payloadLength;
 
       if (buffered.length < frameLength) {
         return;
       }
 
-      const payload = buffered.subarray(5, frameLength);
-      buffered = buffered.subarray(frameLength);
+      const payload = buffered.slice(5, frameLength);
+      buffered = buffered.slice(frameLength);
       onFrame({
         type: getFrameType(typeId),
         payload,
