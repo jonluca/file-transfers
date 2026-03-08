@@ -1,27 +1,24 @@
 import AsyncStorage from "expo-sqlite/kv-store";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
-import type { AccentTheme } from "@/lib/accent-theme";
+import type { TransferHistoryEntry } from "@/lib/file-transfer";
 
 interface AppState {
   hasHydrated: boolean;
-  preferredAccent: AccentTheme;
-  enableHaptics: boolean;
-  useCompactCards: boolean;
-  enableExperimentalUi: boolean;
+  deviceName: string;
+  autoAcceptKnownDevices: boolean;
+  recentTransfers: TransferHistoryEntry[];
   setHasHydrated: (value: boolean) => void;
-  setPreferredAccent: (value: AccentTheme) => void;
-  setEnableHaptics: (value: boolean) => void;
-  setUseCompactCards: (value: boolean) => void;
-  setEnableExperimentalUi: (value: boolean) => void;
-  resetPreferences: () => void;
+  setDeviceName: (value: string) => void;
+  setAutoAcceptKnownDevices: (value: boolean) => void;
+  upsertRecentTransfer: (value: TransferHistoryEntry) => void;
+  clearRecentTransfers: () => void;
 }
 
 const defaultState = {
-  preferredAccent: "blue" as AccentTheme,
-  enableHaptics: true,
-  useCompactCards: false,
-  enableExperimentalUi: true,
+  deviceName: "This device",
+  autoAcceptKnownDevices: false,
+  recentTransfers: [] as TransferHistoryEntry[],
 };
 
 export const useAppStore = create<AppState>()(
@@ -30,20 +27,43 @@ export const useAppStore = create<AppState>()(
       hasHydrated: false,
       ...defaultState,
       setHasHydrated: (value) => set({ hasHydrated: value }),
-      setPreferredAccent: (value) => set({ preferredAccent: value }),
-      setEnableHaptics: (value) => set({ enableHaptics: value }),
-      setUseCompactCards: (value) => set({ useCompactCards: value }),
-      setEnableExperimentalUi: (value) => set({ enableExperimentalUi: value }),
-      resetPreferences: () => set({ ...defaultState }),
+      setDeviceName: (value) =>
+        set({
+          deviceName: value.trim().length > 0 ? value.trim().slice(0, 40) : defaultState.deviceName,
+        }),
+      setAutoAcceptKnownDevices: (value) =>
+        set({
+          autoAcceptKnownDevices: value,
+        }),
+      upsertRecentTransfer: (value) =>
+        set((state) => {
+          const existingIndex = state.recentTransfers.findIndex((entry) => entry.id === value.id);
+          const nextTransfers = [...state.recentTransfers];
+
+          if (existingIndex >= 0) {
+            nextTransfers.splice(existingIndex, 1, value);
+          } else {
+            nextTransfers.unshift(value);
+          }
+
+          nextTransfers.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+
+          return {
+            recentTransfers: nextTransfers.slice(0, 40),
+          };
+        }),
+      clearRecentTransfers: () =>
+        set({
+          recentTransfers: [],
+        }),
     }),
     {
-      name: "mobile-boilerplate-app-store",
+      name: "file-transfers-app-store",
       storage: createJSONStorage(() => AsyncStorage),
       partialize: (state) => ({
-        preferredAccent: state.preferredAccent,
-        enableHaptics: state.enableHaptics,
-        useCompactCards: state.useCompactCards,
-        enableExperimentalUi: state.enableExperimentalUi,
+        deviceName: state.deviceName,
+        autoAcceptKnownDevices: state.autoAcceptKnownDevices,
+        recentTransfers: state.recentTransfers,
       }),
       onRehydrateStorage: () => (state) => {
         state?.setHasHydrated(true);
@@ -53,7 +73,6 @@ export const useAppStore = create<AppState>()(
 );
 
 export const useHasHydrated = () => useAppStore((state) => state.hasHydrated);
-export const usePreferredAccent = () => useAppStore((state) => state.preferredAccent);
-export const useEnableHaptics = () => useAppStore((state) => state.enableHaptics);
-export const useUseCompactCards = () => useAppStore((state) => state.useCompactCards);
-export const useEnableExperimentalUi = () => useAppStore((state) => state.enableExperimentalUi);
+export const useDeviceName = () => useAppStore((state) => state.deviceName);
+export const useAutoAcceptKnownDevices = () => useAppStore((state) => state.autoAcceptKnownDevices);
+export const useRecentTransfers = () => useAppStore((state) => state.recentTransfers);

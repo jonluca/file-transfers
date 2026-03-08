@@ -4,13 +4,14 @@ import * as SecureStore from "expo-secure-store";
 import { createAuthClient } from "better-auth/react";
 import { getApiBaseUrl } from "@/lib/api-config";
 
-const AUTH_STORAGE_PREFIX = "mobile-boilerplate-auth";
+const AUTH_STORAGE_PREFIX = "file-transfers-auth";
+const AUTH_CALLBACK_URL = "filetransfers://auth-callback";
 
 export const authClient = createAuthClient({
   baseURL: getApiBaseUrl(),
   plugins: [
     expoClient({
-      scheme: "mobileboilerplate",
+      scheme: "filetransfers",
       storagePrefix: AUTH_STORAGE_PREFIX,
       storage: {
         getItem: (key) => SecureStore.getItem(key) ?? null,
@@ -54,11 +55,24 @@ export async function signInWithApple() {
   return result;
 }
 
+export async function signInWithGoogle() {
+  const result = await signIn.social({
+    provider: "google",
+    callbackURL: AUTH_CALLBACK_URL,
+  });
+
+  if (!result.error) {
+    await refreshAuthSession();
+  }
+
+  return result;
+}
+
 export function isAppleSignInCanceled(error: unknown) {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ERR_REQUEST_CANCELED";
 }
 
-export function getAppleSignInErrorMessage(error: unknown) {
+export function getSocialSignInErrorMessage(error: unknown) {
   if (typeof error === "object" && error !== null) {
     const candidate = error as {
       status?: number;
@@ -66,7 +80,7 @@ export function getAppleSignInErrorMessage(error: unknown) {
     };
 
     if (candidate.status === 404) {
-      return "Apple sign-in is not configured on the backend yet. Add the Apple provider env vars and restart the server.";
+      return "The selected sign-in provider is not configured on the backend yet.";
     }
 
     if (candidate.message) {
@@ -78,5 +92,5 @@ export function getAppleSignInErrorMessage(error: unknown) {
     return error.message;
   }
 
-  return "Unable to sign in with Apple.";
+  return "Unable to sign in right now.";
 }

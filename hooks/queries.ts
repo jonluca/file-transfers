@@ -1,11 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { getTrpcClient, type RouterOutputs } from "@/lib/trpc";
+import { getTrpcClient } from "@/lib/trpc";
 
 const trpcClient = getTrpcClient();
 
 export const cloudQueryKeys = {
   health: ["cloud", "health"] as const,
-  viewer: ["cloud", "viewer"] as const,
+  entitlements: ["cloud", "entitlements"] as const,
+  hostedFiles: ["cloud", "hosted-files"] as const,
 };
 
 export function useServerHealth() {
@@ -15,28 +16,76 @@ export function useServerHealth() {
   });
 }
 
-export function useViewer(enabled: boolean) {
+export function useEntitlements() {
   return useQuery({
-    queryKey: cloudQueryKeys.viewer,
-    queryFn: () => trpcClient.viewer.me.query(),
+    queryKey: cloudQueryKeys.entitlements,
+    queryFn: () => trpcClient.entitlements.me.query(),
+  });
+}
+
+export function useSyncPurchase() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (input: {
+      appUserId: string;
+      isPremium: boolean;
+      source: "preview" | "client_sync" | "anonymous" | "webhook";
+      managementUrl: string | null;
+      expiresAt: string | null;
+    }) =>
+      trpcClient.entitlements.syncPurchase.mutate({
+        appUserId: input.appUserId,
+        isPremium: input.isPremium,
+        source: input.source === "preview" ? "preview" : "client_sync",
+        managementUrl: input.managementUrl,
+        expiresAt: input.expiresAt,
+      }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: cloudQueryKeys.entitlements });
+      await queryClient.invalidateQueries({ queryKey: cloudQueryKeys.hostedFiles });
+    },
+  });
+}
+
+export function useHostedFiles(enabled: boolean) {
+  return useQuery({
+    queryKey: cloudQueryKeys.hostedFiles,
+    queryFn: () => trpcClient.hostedFiles.listMine.query(),
     enabled,
   });
 }
 
-interface ViewerProfileInput {
-  displayName: string | null;
-  bio: string | null;
-  accentTheme: RouterOutputs["viewer"]["me"]["profile"]["accentTheme"];
-  emailUpdatesEnabled: boolean;
-}
-
-export function useUpdateViewerProfile() {
+export function useCreateHostedUpload() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: (input: ViewerProfileInput) => trpcClient.viewer.updateProfile.mutate(input),
+    mutationFn: (input: { fileName: string; mimeType: string; sizeBytes: number; passcode: string | null }) =>
+      trpcClient.hostedFiles.createUpload.mutate(input),
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: cloudQueryKeys.viewer });
+      await queryClient.invalidateQueries({ queryKey: cloudQueryKeys.hostedFiles });
+    },
+  });
+}
+
+export function useCompleteHostedUpload() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (input: { hostedFileId: string }) => trpcClient.hostedFiles.completeUpload.mutate(input),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: cloudQueryKeys.hostedFiles });
+    },
+  });
+}
+
+export function useDeleteHostedFile() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (input: { hostedFileId: string }) => trpcClient.hostedFiles.delete.mutate(input),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: cloudQueryKeys.hostedFiles });
     },
   });
 }

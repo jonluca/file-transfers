@@ -8,6 +8,6 @@ serve(
     port: serverEnv.port,
   },
   (info) => {
-    console.info(`Mobile Boilerplate backend listening on http://127.0.0.1:${info.port}`);
+    console.info(`File Transfers backend listening on http://127.0.0.1:${info.port}`);
   },
 );

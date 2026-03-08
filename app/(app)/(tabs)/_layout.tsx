@@ -1,16 +1,13 @@
-import MaterialIcons from "@expo/vector-icons/MaterialIcons";
-import { usePathname } from "expo-router";
-import { NativeTabs } from "expo-router/unstable-native-tabs";
+import { Tabs, usePathname } from "expo-router";
 import React, { useEffect, useRef } from "react";
-import { Platform } from "react-native";
+import { View } from "react-native";
 import { queryClient } from "@/app/_layout";
-import { useSession } from "@/lib/auth-client";
+import { AppTabBar } from "@/components/app-design/tab-bar";
+import { designMetrics, designTheme } from "@/lib/design/theme";
 
 export default function TabLayout() {
   const pathname = usePathname();
   const isInitialMount = useRef(true);
-  const { data: session } = useSession();
-  const settingsLabel = session?.user ? "Account" : "Settings";
 
   useEffect(() => {
     if (isInitialMount.current) {
@@ -22,50 +19,31 @@ export default function TabLayout() {
   }, [pathname]);
 
   return (
-    <NativeTabs minimizeBehavior={"onScrollDown"} tintColor={"#2563eb"} backgroundColor={"transparent"}>
-      <NativeTabs.Trigger name={"index"}>
-        <NativeTabs.Trigger.Label>Home</NativeTabs.Trigger.Label>
-        {Platform.select({
-          ios: <NativeTabs.Trigger.Icon sf={{ default: "square.grid.2x2", selected: "square.grid.2x2.fill" }} />,
-          android: (
-            <NativeTabs.Trigger.Icon
-              src={<NativeTabs.Trigger.VectorIcon family={MaterialIcons} name={"dashboard"} />}
-            />
-          ),
-        })}
-      </NativeTabs.Trigger>
-
-      <NativeTabs.Trigger name={"ui"}>
-        <NativeTabs.Trigger.Label>UI</NativeTabs.Trigger.Label>
-        {Platform.select({
-          ios: <NativeTabs.Trigger.Icon sf={{ default: "slider.horizontal.3", selected: "slider.horizontal.3" }} />,
-          android: (
-            <NativeTabs.Trigger.Icon src={<NativeTabs.Trigger.VectorIcon family={MaterialIcons} name={"tune"} />} />
-          ),
-        })}
-      </NativeTabs.Trigger>
-
-      <NativeTabs.Trigger name={"settings"}>
-        <NativeTabs.Trigger.Label>{settingsLabel}</NativeTabs.Trigger.Label>
-        {Platform.select({
-          ios: (
-            <NativeTabs.Trigger.Icon
-              sf={
-                session?.user
-                  ? { default: "person.crop.circle", selected: "person.crop.circle.fill" }
-                  : { default: "gearshape", selected: "gearshape.fill" }
-              }
-            />
-          ),
-          android: (
-            <NativeTabs.Trigger.Icon
-              src={
-                <NativeTabs.Trigger.VectorIcon family={MaterialIcons} name={session?.user ? "person" : "settings"} />
-              }
-            />
-          ),
-        })}
-      </NativeTabs.Trigger>
-    </NativeTabs>
+    <View style={{ flex: 1, backgroundColor: designTheme.background }}>
+      <View
+        style={{
+          flex: 1,
+          alignSelf: "center",
+          width: "100%",
+          maxWidth: designMetrics.appMaxWidth,
+          backgroundColor: designTheme.background,
+        }}
+      >
+        <Tabs
+          tabBar={(props) => <AppTabBar {...props} />}
+          screenOptions={{
+            headerShown: false,
+            sceneStyle: {
+              backgroundColor: designTheme.background,
+            },
+          }}
+        >
+          <Tabs.Screen name={"index"} options={{ title: "Transfer" }} />
+          <Tabs.Screen name={"history"} options={{ title: "History" }} />
+          <Tabs.Screen name={"settings"} options={{ title: "Settings" }} />
+          <Tabs.Screen name={"ui"} options={{ href: null }} />
+        </Tabs>
+      </View>
+    </View>
   );
 }

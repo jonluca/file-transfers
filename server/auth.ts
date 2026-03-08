@@ -63,11 +63,21 @@ async function appleProvider() {
   };
 }
 
-const socialProviders = serverEnv.appleClientId
-  ? {
-      apple: appleProvider,
-    }
-  : {};
+const socialProviders = {
+  ...(serverEnv.appleClientId
+    ? {
+        apple: appleProvider,
+      }
+    : {}),
+  ...(serverEnv.googleClientId && serverEnv.googleClientSecret
+    ? {
+        google: {
+          clientId: serverEnv.googleClientId,
+          clientSecret: serverEnv.googleClientSecret,
+        },
+      }
+    : {}),
+};
 
 export const auth = betterAuth({
   secret: serverEnv.betterAuthSecret,

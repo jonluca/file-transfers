@@ -1,18 +1,17 @@
-import * as AppleAuthentication from "expo-apple-authentication";
 import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { getSocialSignInErrorMessage, isAppleSignInCanceled, signInWithApple } from "@/lib/auth-client";
+import { getSocialSignInErrorMessage, signInWithGoogle } from "@/lib/auth-client";
 
-interface UseAppleSignInOptions {
+interface UseGoogleSignInOptions {
   onSuccess?: () => void;
 }
 
-export function useAppleSignIn({ onSuccess }: UseAppleSignInOptions = {}) {
+export function useGoogleSignIn({ onSuccess }: UseGoogleSignInOptions = {}) {
   const queryClient = useQueryClient();
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  async function triggerAppleSignIn() {
+  async function triggerGoogleSignIn() {
     if (isSigningIn) {
       return false;
     }
@@ -21,14 +20,7 @@ export function useAppleSignIn({ onSuccess }: UseAppleSignInOptions = {}) {
     setErrorMessage(null);
 
     try {
-      const isAvailable = await AppleAuthentication.isAvailableAsync();
-
-      if (!isAvailable) {
-        setErrorMessage("Apple sign-in is only available in an Apple build on a supported device.");
-        return false;
-      }
-
-      const result = await signInWithApple();
+      const result = await signInWithGoogle();
 
       if (result.error) {
         setErrorMessage(getSocialSignInErrorMessage(result.error));
@@ -39,10 +31,7 @@ export function useAppleSignIn({ onSuccess }: UseAppleSignInOptions = {}) {
       onSuccess?.();
       return true;
     } catch (error) {
-      if (!isAppleSignInCanceled(error)) {
-        setErrorMessage(getSocialSignInErrorMessage(error));
-      }
-
+      setErrorMessage(getSocialSignInErrorMessage(error));
       return false;
     } finally {
       setIsSigningIn(false);
@@ -52,6 +41,6 @@ export function useAppleSignIn({ onSuccess }: UseAppleSignInOptions = {}) {
   return {
     errorMessage,
     isSigningIn,
-    triggerAppleSignIn,
+    triggerGoogleSignIn,
   };
 }

@@ -1,10 +1,12 @@
+import { entitlementsRouter } from "./routers/entitlements";
 import { healthRouter } from "./routers/health";
-import { viewerRouter } from "./routers/viewer";
+import { hostedFilesRouter } from "./routers/hosted-files";
 import { router } from "./trpc";
 
 export const appRouter = router({
+  entitlements: entitlementsRouter,
   health: healthRouter,
-  viewer: viewerRouter,
+  hostedFiles: hostedFilesRouter,
 });
 
 export type AppRouter = typeof appRouter;

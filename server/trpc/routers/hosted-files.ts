@@ -1,0 +1,260 @@
+import { createHash, randomBytes } from "node:crypto";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { TRPCError } from "@trpc/server";
+import { z } from "zod";
+import { hostedFile, subscriptionMembership } from "../../db/schema";
+import { serverEnv } from "../../env";
+import type { TRPCContext } from "../context";
+import {
+  buildHostedStorageKey,
+  createUploadTarget,
+  deleteStoredFile,
+  uploadedFileExists,
+} from "../../storage/hosted-storage";
+import { protectedProcedure, router } from "../trpc";
+
+const MAX_HOSTED_FILE_SIZE_BYTES = 10 * 1024 * 1024 * 1024;
+const MAX_ACTIVE_STORAGE_BYTES = 100 * 1024 * 1024 * 1024;
+const DEFAULT_EXPIRY_MILLISECONDS = 7 * 24 * 60 * 60 * 1000;
+
+function mapHostedFile(value: typeof hostedFile.$inferSelect) {
+  return {
+    id: value.id,
+    slug: value.slug,
+    fileName: value.fileName,
+    mimeType: value.mimeType,
+    sizeBytes: value.sizeBytes,
+    downloadUrl: `${serverEnv.hostedFilesBaseUrl.replace(/\/+$/, "")}/h/${value.slug}/download`,
+    downloadPageUrl: `${serverEnv.hostedFilesBaseUrl.replace(/\/+$/, "")}/h/${value.slug}`,
+    requiresPasscode: value.requiresPasscode,
+    status: value.status as "pending_upload" | "active" | "expired" | "deleted",
+    expiresAt: value.expiresAt.toISOString(),
+    createdAt: value.createdAt.toISOString(),
+  };
+}
+
+function assertValidPasscode(passcode: string | null) {
+  if (!passcode) {
+    return;
+  }
+
+  if (!/^\d{6}$/.test(passcode)) {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: "Hosted link passcodes must be 6 digits.",
+    });
+  }
+}
+
+function createPasscodeDigest(passcode: string | null) {
+  if (!passcode) {
+    return {
+      requiresPasscode: false,
+      passcodeSalt: null,
+      passcodeHash: null,
+    };
+  }
+
+  const passcodeSalt = randomBytes(16).toString("hex");
+  const passcodeHash = createHash("sha256").update(`${passcodeSalt}:${passcode}`).digest("hex");
+
+  return {
+    requiresPasscode: true,
+    passcodeSalt,
+    passcodeHash,
+  };
+}
+
+export function verifyHostedFilePasscode(
+  value: typeof hostedFile.$inferSelect,
+  submittedPasscode: string | null | undefined,
+) {
+  if (!value.requiresPasscode) {
+    return true;
+  }
+
+  if (!submittedPasscode || !value.passcodeHash || !value.passcodeSalt) {
+    return false;
+  }
+
+  const submittedHash = createHash("sha256").update(`${value.passcodeSalt}:${submittedPasscode}`).digest("hex");
+
+  return submittedHash === value.passcodeHash;
+}
+
+async function requirePremium(ctx: TRPCContext & { session: NonNullable<TRPCContext["session"]> }) {
+  const membership = await ctx.db.query.subscriptionMembership.findFirst({
+    where: eq(subscriptionMembership.userId, ctx.session.user.id),
+  });
+
+  if (!membership?.isPremium || (membership.expiresAt && membership.expiresAt <= new Date())) {
+    throw new TRPCError({
+      code: "FORBIDDEN",
+      message: "Premium is required for hosted files.",
+    });
+  }
+}
+
+export const hostedFilesRouter = router({
+  listMine: protectedProcedure.query(async ({ ctx }) => {
+    const rows = await ctx.db.query.hostedFile.findMany({
+      where: eq(hostedFile.ownerUserId, ctx.session.user.id),
+      orderBy: [desc(hostedFile.createdAt)],
+    });
+
+    return rows.map(mapHostedFile);
+  }),
+  createUpload: protectedProcedure
+    .input(
+      z.object({
+        fileName: z.string().min(1).max(255),
+        mimeType: z.string().min(1).max(255),
+        sizeBytes: z.number().int().positive().max(MAX_HOSTED_FILE_SIZE_BYTES),
+        passcode: z
+          .string()
+          .regex(/^\d{6}$/)
+          .nullable(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      await requirePremium(ctx);
+      assertValidPasscode(input.passcode);
+
+      const [{ usedBytes }] = await ctx.db
+        .select({
+          usedBytes: sql<number>`coalesce(sum(${hostedFile.sizeBytes}), 0)`,
+        })
+        .from(hostedFile)
+        .where(
+          and(
+            eq(hostedFile.ownerUserId, ctx.session.user.id),
+            inArray(hostedFile.status, ["pending_upload", "active"]),
+          ),
+        );
+
+      if ((usedBytes ?? 0) + input.sizeBytes > MAX_ACTIVE_STORAGE_BYTES) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "This upload would exceed the current 100 GB hosted storage limit.",
+        });
+      }
+
+      const id = randomBytes(16).toString("hex");
+      const slug = randomBytes(6).toString("hex");
+      const uploadToken = randomBytes(16).toString("hex");
+      const storageKey = buildHostedStorageKey({
+        ownerUserId: ctx.session.user.id,
+        slug,
+        fileName: input.fileName,
+      });
+      const passcodeDigest = createPasscodeDigest(input.passcode);
+      const now = new Date();
+      const expiresAt = new Date(now.getTime() + DEFAULT_EXPIRY_MILLISECONDS);
+      const uploadTarget = await createUploadTarget({
+        storageKey,
+        mimeType: input.mimeType,
+      });
+
+      const [created] = await ctx.db
+        .insert(hostedFile)
+        .values({
+          id,
+          ownerUserId: ctx.session.user.id,
+          slug,
+          storageKey,
+          uploadToken,
+          fileName: input.fileName,
+          mimeType: input.mimeType,
+          sizeBytes: input.sizeBytes,
+          requiresPasscode: passcodeDigest.requiresPasscode,
+          passcodeSalt: passcodeDigest.passcodeSalt,
+          passcodeHash: passcodeDigest.passcodeHash,
+          status: "pending_upload",
+          expiresAt,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+
+      return {
+        hostedFile: mapHostedFile(created),
+        uploadMethod: uploadTarget.uploadMethod,
+        uploadUrl:
+          uploadTarget.provider === "local"
+            ? `${uploadTarget.uploadUrl}/${created.id}/${uploadToken}`
+            : uploadTarget.uploadUrl,
+        uploadHeaders: uploadTarget.uploadHeaders,
+      };
+    }),
+  completeUpload: protectedProcedure
+    .input(
+      z.object({
+        hostedFileId: z.string().min(1),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      await requirePremium(ctx);
+
+      const row = await ctx.db.query.hostedFile.findFirst({
+        where: and(eq(hostedFile.id, input.hostedFileId), eq(hostedFile.ownerUserId, ctx.session.user.id)),
+      });
+
+      if (!row) {
+        throw new TRPCError({
+          code: "NOT_FOUND",
+          message: "Hosted file not found.",
+        });
+      }
+
+      const exists = await uploadedFileExists(row.storageKey);
+      if (!exists) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "The upload has not finished yet.",
+        });
+      }
+
+      const [updated] = await ctx.db
+        .update(hostedFile)
+        .set({
+          status: "active",
+          updatedAt: new Date(),
+        })
+        .where(eq(hostedFile.id, row.id))
+        .returning();
+
+      return mapHostedFile(updated);
+    }),
+  delete: protectedProcedure
+    .input(
+      z.object({
+        hostedFileId: z.string().min(1),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const row = await ctx.db.query.hostedFile.findFirst({
+        where: and(eq(hostedFile.id, input.hostedFileId), eq(hostedFile.ownerUserId, ctx.session.user.id)),
+      });
+
+      if (!row) {
+        throw new TRPCError({
+          code: "NOT_FOUND",
+          message: "Hosted file not found.",
+        });
+      }
+
+      await deleteStoredFile(row.storageKey);
+
+      await ctx.db
+        .update(hostedFile)
+        .set({
+          status: "deleted",
+          updatedAt: new Date(),
+        })
+        .where(eq(hostedFile.id, row.id));
+
+      return {
+        success: true,
+      };
+    }),
+});

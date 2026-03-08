@@ -1,6 +1,7 @@
 import { Stack } from "expo-router";
 import React from "react";
 import { Platform } from "react-native";
+import { designTheme } from "@/lib/design/theme";
 
 export default function AppLayout() {
   return (
@@ -11,20 +12,19 @@ export default function AppLayout() {
         headerTransparent: Platform.OS === "ios",
         headerBlurEffect: Platform.OS === "ios" ? "systemMaterial" : undefined,
         headerStyle: {
-          backgroundColor: Platform.OS === "ios" ? "rgba(245, 247, 251, 0.92)" : "#f5f7fb",
+          backgroundColor: Platform.OS === "ios" ? "rgba(250, 250, 250, 0.92)" : designTheme.background,
         },
-        headerTintColor: "#2563eb",
+        headerTintColor: designTheme.primary,
         headerTitleStyle: {
-          color: "#0f172a",
+          color: designTheme.foreground,
           fontWeight: "700",
         },
         contentStyle: {
-          backgroundColor: "#f5f7fb",
+          backgroundColor: designTheme.background,
         },
       }}
     >
       <Stack.Screen name={"(tabs)"} options={{ headerShown: false }} />
-      <Stack.Screen name={"account"} options={{ title: "Edit Account" }} />
     </Stack>
   );
 }

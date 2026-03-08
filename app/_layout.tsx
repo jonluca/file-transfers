@@ -1,4 +1,11 @@
 import "@/globals.css";
+import {
+  Geist_400Regular,
+  Geist_500Medium,
+  Geist_600SemiBold,
+  Geist_700Bold,
+  useFonts,
+} from "@expo-google-fonts/geist";
 import { QueryClientProvider, focusManager } from "@tanstack/react-query";
 import type { QueryCacheNotifyEvent } from "@tanstack/query-core";
 import { Slot } from "expo-router";
@@ -9,6 +16,8 @@ import type { AppStateStatus } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { FullScreenLoader } from "@/components/ui";
+import { useSession } from "@/lib/auth-client";
+import { configurePurchases, loginPurchases, logoutPurchases } from "@/lib/purchases";
 import { createBoilerplateQueryClient, getTrpcClient, TRPCProvider } from "@/lib/trpc";
 import { useHasHydrated } from "@/store";
 
@@ -23,9 +32,31 @@ const trpcClient = getTrpcClient();
 
 function RootLayoutContent() {
   const hasHydrated = useHasHydrated();
+  const { data: session } = useSession();
+  const [fontsLoaded] = useFonts({
+    Geist_400Regular,
+    Geist_500Medium,
+    Geist_600SemiBold,
+    Geist_700Bold,
+  });
 
-  if (!hasHydrated) {
-    return <FullScreenLoader label={"Loading Mobile Boilerplate..."} />;
+  useEffect(() => {
+    configurePurchases(session?.user?.id ?? null);
+
+    if (session?.user?.id) {
+      void loginPurchases(session.user.id).catch((error) => {
+        console.error("Unable to attach RevenueCat to the signed-in user", error);
+      });
+      return;
+    }
+
+    void logoutPurchases().catch((error) => {
+      console.error("Unable to clear RevenueCat session", error);
+    });
+  }, [session?.user?.id]);
+
+  if (!hasHydrated || !fontsLoaded) {
+    return <FullScreenLoader label={"Loading File Transfers..."} />;
   }
 
   return <Slot />;
