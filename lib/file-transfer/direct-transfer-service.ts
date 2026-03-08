@@ -1,7 +1,7 @@
 import * as Crypto from "expo-crypto";
 import { File, type Directory } from "expo-file-system";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
-import type { ZeroconfService } from "react-native-zeroconf";
+import Zeroconf, { ImplType, type ZeroconfService } from "react-native-zeroconf";
 import {
   acceptRelayTransferSession,
   completeRelayTransferSession,
@@ -117,35 +117,8 @@ interface ReceiveRuntime {
   updateSession?: ReceiveRuntimeUpdate;
   pendingRelayReady?: PendingRelayReadyRequest;
   activeDownloadAbortController?: AbortController;
-  zeroconf?: {
-    publisher: {
-      stop(): void;
-    };
-  };
+  stopZeroconfPublishing?: () => void;
   stopping: boolean;
-}
-
-interface ZeroconfInstance {
-  on(event: string, handler: (...args: unknown[]) => void): void;
-  scan(type: string, protocol: string, domain: string, implType: string): void;
-  stop(implType?: string): void;
-  publishService(
-    type: string,
-    protocol: string,
-    domain: string,
-    name: string,
-    port: number,
-    txt: Record<string, string>,
-    implType: string,
-  ): void;
-  unpublishService(name: string, implType?: string): void;
-  removeAllListeners?(): void;
-  removeDeviceListeners(): void;
-}
-
-interface ZeroconfModuleLike {
-  Zeroconf: new () => ZeroconfInstance;
-  ImplType: { DNSSD: string };
 }
 
 interface TransferResult {
@@ -162,6 +135,7 @@ const PEER_REQUEST_TIMEOUT_MS = 8000;
 const PROGRESS_UPDATE_INTERVAL_MS = 250;
 const PROGRESS_UPDATE_BYTES = 128 * 1024;
 const DIRECT_TOKEN_HEADER = "x-direct-token";
+const ZEROCONF_IMPL_TYPE = ImplType.DNSSD;
 
 class DirectTransferFallbackError extends Error {}
 
@@ -435,25 +409,41 @@ async function sleep(milliseconds: number) {
   await new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-async function loadZeroconf() {
-  try {
-    const module = (await import("react-native-zeroconf")) as unknown as {
-      default?: new () => ZeroconfInstance;
-      ImplType?: { DNSSD: string };
-    };
-    const Zeroconf = (module.default ??
-      (module as unknown as {
-        new (): ZeroconfInstance;
-      })) as new () => ZeroconfInstance;
+function createZeroconfPublisher({
+  deviceName,
+  port,
+  receiverToken,
+  sessionId,
+}: {
+  deviceName: string;
+  port: number;
+  receiverToken: string;
+  sessionId: string;
+}) {
+  const serviceName = createServiceName(deviceName, sessionId);
+  const zeroconf = new Zeroconf();
 
-    return {
-      Zeroconf,
-      ImplType: module.ImplType ?? { DNSSD: "DNSSD" },
-    } satisfies ZeroconfModuleLike;
-  } catch (error) {
-    console.warn("react-native-zeroconf unavailable, using QR only", error);
-    return null;
-  }
+  zeroconf.publishService(
+    LOCAL_TRANSFER_SERVICE_TYPE,
+    LOCAL_TRANSFER_SERVICE_PROTOCOL,
+    LOCAL_TRANSFER_SERVICE_DOMAIN,
+    serviceName,
+    port,
+    {
+      sessionId,
+      receiverToken,
+      deviceName,
+    },
+    ZEROCONF_IMPL_TYPE,
+  );
+
+  return {
+    serviceName,
+    stop() {
+      zeroconf.unpublishService(serviceName, ZEROCONF_IMPL_TYPE);
+      zeroconf.removeDeviceListeners();
+    },
+  };
 }
 
 function buildDirectSessionUrl(peer: Pick<DirectPeerAccess, "host" | "port" | "sessionId">, suffix: string) {
@@ -1693,54 +1683,15 @@ export async function startReceivingAvailability({
       await handleReceiveRegistrationInterrupted(runtime, detail);
     },
   });
-
-  const zeroconfModule = await loadZeroconf();
-  let serviceName: string | null = null;
+  const zeroconfPublisher = createZeroconfPublisher({
+    sessionId,
+    deviceName,
+    port: direct.port,
+    receiverToken,
+  });
 
   const runtime: ReceiveRuntime = {
     session: createInitialReceiveSession(
-      createReceiverDiscoveryRecord({
-        sessionId,
-        method: zeroconfModule ? "nearby" : "qr",
-        deviceName,
-        host: direct.host,
-        port: direct.port,
-        token: direct.token,
-        serviceName: null,
-      }),
-    ),
-    updateSession,
-    stopping: false,
-  };
-
-  if (zeroconfModule) {
-    serviceName = createServiceName(deviceName, sessionId);
-    const publishedServiceName = serviceName;
-    const zeroconf = new zeroconfModule.Zeroconf();
-    zeroconf.publishService(
-      LOCAL_TRANSFER_SERVICE_TYPE,
-      LOCAL_TRANSFER_SERVICE_PROTOCOL,
-      LOCAL_TRANSFER_SERVICE_DOMAIN,
-      publishedServiceName,
-      direct.port,
-      {
-        sessionId,
-        receiverToken,
-        deviceName,
-      },
-      zeroconfModule.ImplType.DNSSD,
-    );
-
-    runtime.zeroconf = {
-      publisher: {
-        stop() {
-          zeroconf.unpublishService(publishedServiceName, zeroconfModule.ImplType.DNSSD);
-          zeroconf.removeDeviceListeners();
-        },
-      },
-    };
-
-    runtime.session = createInitialReceiveSession(
       createReceiverDiscoveryRecord({
         sessionId,
         method: "nearby",
@@ -1748,10 +1699,13 @@ export async function startReceivingAvailability({
         host: direct.host,
         port: direct.port,
         token: direct.token,
-        serviceName,
+        serviceName: zeroconfPublisher.serviceName,
       }),
-    );
-  }
+    ),
+    updateSession,
+    stopZeroconfPublishing: zeroconfPublisher.stop,
+    stopping: false,
+  };
 
   activeReceiveRuntimes.set(sessionId, runtime);
   updateSession?.(runtime.session);
@@ -1785,7 +1739,7 @@ export async function stopReceivingAvailability(sessionId: string) {
     }
   }
 
-  runtime.zeroconf?.publisher.stop();
+  runtime.stopZeroconfPublishing?.();
   await unregisterDirectReceiveSession(sessionId).catch(() => {});
   activeReceiveRuntimes.delete(sessionId);
 }
@@ -1866,17 +1820,9 @@ export async function startNearbyScan({
       Array.from(currentRecords.values()).sort((left, right) => right.advertisedAt.localeCompare(left.advertisedAt)),
     );
   }
-
-  const zeroconfModule = await loadZeroconf();
-  if (!zeroconfModule) {
-    return () => {
-      currentRecords.clear();
-    };
-  }
-
-  const zeroconf = new zeroconfModule.Zeroconf();
-  zeroconf.on("resolved", (service) => {
-    const nextRecord = mapResolvedService(service as ZeroconfService);
+  const zeroconf = new Zeroconf();
+  zeroconf.on("resolved", (service: ZeroconfService) => {
+    const nextRecord = mapResolvedService(service);
     if (!nextRecord) {
       return;
     }
@@ -1884,7 +1830,7 @@ export async function startNearbyScan({
     currentRecords.set(nextRecord.sessionId, nextRecord);
     emitCurrentRecords();
   });
-  zeroconf.on("remove", (serviceName) => {
+  zeroconf.on("remove", (serviceName: string) => {
     for (const [sessionId, record] of currentRecords) {
       if (record.serviceName === serviceName && record.method === "nearby") {
         currentRecords.delete(sessionId);
@@ -1892,18 +1838,18 @@ export async function startNearbyScan({
     }
     emitCurrentRecords();
   });
-  zeroconf.on("error", (error) => {
+  zeroconf.on("error", (error: unknown) => {
     onError?.(error instanceof Error ? error : new Error("Nearby scanning failed."));
   });
   zeroconf.scan(
     LOCAL_TRANSFER_SERVICE_TYPE,
     LOCAL_TRANSFER_SERVICE_PROTOCOL,
     LOCAL_TRANSFER_SERVICE_DOMAIN,
-    zeroconfModule.ImplType.DNSSD,
+    ZEROCONF_IMPL_TYPE,
   );
 
   return () => {
-    zeroconf.stop(zeroconfModule.ImplType.DNSSD);
+    zeroconf.stop(ZEROCONF_IMPL_TYPE);
     zeroconf.removeAllListeners?.();
     zeroconf.removeDeviceListeners();
   };
