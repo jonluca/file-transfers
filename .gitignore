@@ -1,0 +1,10 @@
+.DS_Store
+.env
+.env.local
+.expo
+.idea
+.pnpm-store
+android
+ios
+dist
+node_modules
