@@ -34,7 +34,6 @@ export async function startHttpShareSession({
   const session = await startLocalHttpSession({
     files,
     deviceName,
-    mode: "browser",
     updateSession: updateSession
       ? (nextSession) => {
           updateSession(toHttpShareSession(nextSession));

@@ -59,7 +59,6 @@ export interface DiscoveryRecord {
   host: string;
   port: number;
   token: string;
-  certificateFingerprint: string;
   advertisedAt: string;
   serviceName: string | null;
 }
@@ -86,8 +85,16 @@ export interface TransferSession {
   progress: TransferProgress;
 }
 
+export interface DirectPeerAccess {
+  sessionId: string;
+  host: string;
+  port: number;
+  token: string;
+}
+
 export interface SenderTransferAccess {
   sessionId: string;
+  direct: DirectPeerAccess;
   relay: RelayAccess | null;
 }
 

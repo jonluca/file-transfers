@@ -1,7 +1,5 @@
-import { Buffer } from "buffer";
 import * as Crypto from "expo-crypto";
 import { File, type Directory } from "expo-file-system";
-import * as Network from "expo-network";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 import type { ZeroconfService } from "react-native-zeroconf";
 import {
@@ -16,17 +14,20 @@ import {
   uploadRelayTransferFile,
 } from "./relay-client";
 import {
-  LOCAL_TRANSFER_CERT_FINGERPRINT,
-  LOCAL_TRANSFER_CERTIFICATE_ASSET,
   LOCAL_TRANSFER_KEEP_AWAKE_TAG,
-  LOCAL_TRANSFER_KEYSTORE_ASSET,
   LOCAL_TRANSFER_SERVICE_DOMAIN,
   LOCAL_TRANSFER_SERVICE_PROTOCOL,
   LOCAL_TRANSFER_SERVICE_TYPE,
 } from "./constants";
-import { createReceivedFileRecord, getReceivedFilesDirectory } from "./files";
-import { startLocalHttpSession, stopLocalHttpSession, type LocalHttpSession } from "./local-http-runtime";
+import { getReceivedFilesDirectory } from "./files";
+import {
+  registerDirectReceiveSession,
+  registerDirectSendSession,
+  unregisterDirectReceiveSession,
+  unregisterDirectSendSession,
+} from "./local-http-runtime";
 import type {
+  DirectPeerAccess,
   DiscoveryRecord,
   DownloadableTransferManifest,
   IncomingTransferOffer,
@@ -45,49 +46,13 @@ import type {
 type SendRuntimeUpdate = (session: TransferSession) => void;
 type ReceiveRuntimeUpdate = (session: ReceiveSession) => void;
 
-type SenderControlMessage =
-  | {
-      kind: "offer";
-      receiverSessionId: string;
-      receiverToken: string;
-      offer: IncomingTransferOffer;
-    }
-  | {
-      kind: "http-ready";
-      manifestUrl: string;
-      shareUrl: string;
-    }
-  | {
-      kind: "relay-ready";
-      relay: RelayAccess;
-    }
-  | {
-      kind: "relay-failed";
-      message: string;
-    }
-  | {
-      kind: "failed";
-      message: string;
-    }
-  | {
-      kind: "canceled";
-      message: string;
-    };
-
-type ReceiverControlMessage =
-  | {
-      kind: "offer-received";
-    }
+type ReceiverToSenderEvent =
   | {
       kind: "accepted";
       receiverDeviceName: string;
     }
   | {
       kind: "rejected";
-      message: string;
-    }
-  | {
-      kind: "busy";
       message: string;
     }
   | {
@@ -111,24 +76,34 @@ type ReceiverControlMessage =
       message: string;
     };
 
-type ControlMessage = SenderControlMessage | ReceiverControlMessage;
+type SenderToReceiverEvent =
+  | {
+      kind: "relay-ready";
+      relay: RelayAccess;
+    }
+  | {
+      kind: "relay-failed";
+      message: string;
+    }
+  | {
+      kind: "failed";
+      message: string;
+    }
+  | {
+      kind: "canceled";
+      message: string;
+    };
 
 interface SendRuntime {
   session: TransferSession;
   files: SelectedTransferFile[];
   target: DiscoveryRecord;
+  direct: DirectPeerAccess;
   updateSession?: SendRuntimeUpdate;
-  controlSocket?: TransferSocket;
   relayPollTimer?: ReturnType<typeof setInterval>;
   relayUploadStarted: boolean;
-  httpSessionId: string | null;
+  offerDelivered: boolean;
   stopping: boolean;
-}
-
-interface PendingHttpReadyRequest {
-  resolve: (value: { manifestUrl: string; shareUrl: string }) => void;
-  reject: (error: Error) => void;
-  timer: ReturnType<typeof setTimeout>;
 }
 
 interface PendingRelayReadyRequest {
@@ -140,8 +115,6 @@ interface PendingRelayReadyRequest {
 interface ReceiveRuntime {
   session: ReceiveSession;
   updateSession?: ReceiveRuntimeUpdate;
-  controlSocket?: TransferSocket;
-  pendingHttpReady?: PendingHttpReadyRequest;
   pendingRelayReady?: PendingRelayReadyRequest;
   activeDownloadAbortController?: AbortController;
   zeroconf?: {
@@ -149,28 +122,7 @@ interface ReceiveRuntime {
       stop(): void;
     };
   };
-  server?: {
-    close(): void;
-  };
   stopping: boolean;
-}
-
-interface TransferSocket {
-  destroy(): void;
-  on(event: string, handler: (...args: unknown[]) => void): void;
-  off?(event: string, handler: (...args: unknown[]) => void): void;
-  removeAllListeners?(event?: string): void;
-  remoteAddress?: string;
-  setNoDelay?(noDelay?: boolean): void;
-  write(buffer: Uint8Array | Buffer | string, cb?: (error?: Error) => void): boolean;
-}
-
-interface TransferServer {
-  once(event: string, handler: (error: Error) => void): void;
-  off(event: string, handler: (error: Error) => void): void;
-  listen(options: { port: number; host: string; reuseAddress: boolean }, callback: () => void): void;
-  close(): void;
-  address(): { port?: number } | null;
 }
 
 interface ZeroconfInstance {
@@ -196,17 +148,6 @@ interface ZeroconfModuleLike {
   ImplType: { DNSSD: string };
 }
 
-interface TcpSocketLike {
-  createTLSServer: (options: { keystore: number }, listener: (socket: TransferSocket) => void) => TransferServer;
-  connectTLS: (options: {
-    host: string;
-    port: number;
-    ca: number;
-    tlsCheckValidity: boolean;
-    interface?: "wifi" | "cellular" | "ethernet";
-  }) => TransferSocket;
-}
-
 interface TransferResult {
   receivedFiles: ReceivedFileRecord[];
   bytesTransferred: number;
@@ -216,76 +157,13 @@ interface TransferResult {
 const activeSendRuntimes = new Map<string, SendRuntime>();
 const activeReceiveRuntimes = new Map<string, ReceiveRuntime>();
 const RELAY_POLL_INTERVAL_MS = 1500;
-const CONTROL_RESPONSE_TIMEOUT_MS = 8000;
-const HTTP_READY_TIMEOUT_MS = 15000;
 const RELAY_FALLBACK_WAIT_TIMEOUT_MS = 12000;
-const CONTROL_MESSAGE_BUFFER_LIMIT = 64 * 1024;
+const PEER_REQUEST_TIMEOUT_MS = 8000;
 const PROGRESS_UPDATE_INTERVAL_MS = 250;
 const PROGRESS_UPDATE_BYTES = 128 * 1024;
+const DIRECT_TOKEN_HEADER = "x-direct-token";
 
 class DirectTransferFallbackError extends Error {}
-
-function createProgress(totalBytes: number, phase: TransferProgress["phase"], detail: string | null): TransferProgress {
-  return {
-    phase,
-    totalBytes,
-    bytesTransferred: 0,
-    currentFileName: null,
-    speedBytesPerSecond: 0,
-    detail,
-    updatedAt: new Date().toISOString(),
-  };
-}
-
-function withSendSessionUpdate(runtime: SendRuntime, patch: Partial<TransferSession>) {
-  runtime.session = {
-    ...runtime.session,
-    ...patch,
-    progress: patch.progress ?? runtime.session.progress,
-  };
-  runtime.updateSession?.(runtime.session);
-}
-
-function withReceiveSessionUpdate(runtime: ReceiveRuntime, patch: Partial<ReceiveSession>) {
-  runtime.session = {
-    ...runtime.session,
-    ...patch,
-    progress: patch.progress ?? runtime.session.progress,
-    receivedFiles: patch.receivedFiles ?? runtime.session.receivedFiles,
-  };
-  runtime.updateSession?.(runtime.session);
-}
-
-async function loadTcpSocket() {
-  try {
-    const module = (await import("react-native-tcp-socket")) as unknown as { default?: TcpSocketLike };
-    return (module.default ?? module) as TcpSocketLike;
-  } catch (error) {
-    console.warn("react-native-tcp-socket unavailable, using preview mode", error);
-    return null;
-  }
-}
-
-async function loadZeroconf() {
-  try {
-    const module = (await import("react-native-zeroconf")) as unknown as {
-      default?: new () => ZeroconfInstance;
-      ImplType?: { DNSSD: string };
-    };
-    const Zeroconf = (module.default ??
-      (module as unknown as {
-        new (): ZeroconfInstance;
-      })) as new () => ZeroconfInstance;
-
-    return {
-      Zeroconf,
-      ImplType: module.ImplType ?? { DNSSD: "DNSSD" },
-    } satisfies ZeroconfModuleLike;
-  } catch (error) {
-    console.warn("react-native-zeroconf unavailable, using QR only", error);
-    return null;
-  }
-}
 
 function nowIso() {
   return new Date().toISOString();
@@ -357,6 +235,37 @@ function createTransferManifest({
   };
 }
 
+function createProgress(totalBytes: number, phase: TransferProgress["phase"], detail: string | null): TransferProgress {
+  return {
+    phase,
+    totalBytes,
+    bytesTransferred: 0,
+    currentFileName: null,
+    speedBytesPerSecond: 0,
+    detail,
+    updatedAt: nowIso(),
+  };
+}
+
+function withSendSessionUpdate(runtime: SendRuntime, patch: Partial<TransferSession>) {
+  runtime.session = {
+    ...runtime.session,
+    ...patch,
+    progress: patch.progress ?? runtime.session.progress,
+  };
+  runtime.updateSession?.(runtime.session);
+}
+
+function withReceiveSessionUpdate(runtime: ReceiveRuntime, patch: Partial<ReceiveSession>) {
+  runtime.session = {
+    ...runtime.session,
+    ...patch,
+    progress: patch.progress ?? runtime.session.progress,
+    receivedFiles: patch.receivedFiles ?? runtime.session.receivedFiles,
+  };
+  runtime.updateSession?.(runtime.session);
+}
+
 function toRelayAccess(relay: RelayCredentials | null): RelayAccess | null {
   if (!relay) {
     return null;
@@ -369,23 +278,41 @@ function toRelayAccess(relay: RelayCredentials | null): RelayAccess | null {
   };
 }
 
-function createSenderTransferAccess(manifest: TransferManifest, relay: RelayCredentials | null): SenderTransferAccess {
+function createSenderTransferAccess({
+  manifest,
+  direct,
+  relay,
+}: {
+  manifest: TransferManifest;
+  direct: DirectPeerAccess;
+  relay: RelayCredentials | null;
+}): SenderTransferAccess {
   return {
     sessionId: manifest.sessionId,
+    direct,
     relay: toRelayAccess(relay),
   };
 }
 
-function createIncomingTransferOffer(
-  manifest: TransferManifest,
-  relay: RelayCredentials | null,
-): IncomingTransferOffer {
+function createIncomingTransferOffer({
+  manifest,
+  direct,
+  relay,
+}: {
+  manifest: TransferManifest;
+  direct: DirectPeerAccess;
+  relay: RelayCredentials | null;
+}): IncomingTransferOffer {
   return {
     id: manifest.sessionId,
     senderDeviceName: manifest.deviceName,
     fileCount: manifest.fileCount,
     totalBytes: manifest.totalBytes,
-    sender: createSenderTransferAccess(manifest, relay),
+    sender: createSenderTransferAccess({
+      manifest,
+      direct,
+      relay,
+    }),
     createdAt: manifest.createdAt,
   };
 }
@@ -414,7 +341,6 @@ function createReceiverDiscoveryRecord({
     host,
     port,
     token,
-    certificateFingerprint: LOCAL_TRANSFER_CERT_FINGERPRINT,
     advertisedAt: nowIso(),
     serviceName,
   };
@@ -433,7 +359,6 @@ function buildQrPayload(record: DiscoveryRecord) {
     port: record.port,
     token: record.token,
     deviceName: record.deviceName,
-    certificateFingerprint: record.certificateFingerprint,
     advertisedAt: record.advertisedAt,
   });
 }
@@ -445,7 +370,6 @@ function createServiceName(deviceName: string, sessionId: string) {
 function createInitialSendSession(
   manifest: TransferManifest,
   target: DiscoveryRecord,
-  previewMode: boolean,
   relay: RelayCredentials | null,
 ): TransferSession {
   return {
@@ -453,7 +377,7 @@ function createInitialSendSession(
     direction: "send",
     status: "waiting",
     manifest,
-    previewMode,
+    previewMode: false,
     peerDeviceName: target.deviceName,
     awaitingReceiverResponse: true,
     relay,
@@ -461,13 +385,13 @@ function createInitialSendSession(
   };
 }
 
-function createInitialReceiveSession(record: DiscoveryRecord, previewMode: boolean): ReceiveSession {
+function createInitialReceiveSession(record: DiscoveryRecord): ReceiveSession {
   return {
     id: record.sessionId,
     status: "discoverable",
     discoveryRecord: record,
-    qrPayload: buildQrPayload({ ...record, method: "qr" }),
-    previewMode,
+    qrPayload: buildQrPayload(record),
+    previewMode: false,
     incomingOffer: null,
     peerDeviceName: null,
     receivedFiles: [],
@@ -477,8 +401,7 @@ function createInitialReceiveSession(record: DiscoveryRecord, previewMode: boole
 
 function createTransferOutputFile(directory: Directory, fileName: string, mimeType: string) {
   const safeName = fileName.replace(/[^\w.\-() ]+/g, "_");
-  const targetName = `${Date.now()}-${safeName}`;
-  const outputFile = new File(directory, targetName);
+  const outputFile = new File(directory, `${Date.now()}-${safeName}`);
   outputFile.create({ overwrite: true, intermediates: true });
   return {
     file: outputFile,
@@ -490,405 +413,122 @@ async function sleep(milliseconds: number) {
   await new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-async function writeSocket(socket: Pick<TransferSocket, "write">, payload: Uint8Array | Buffer | string) {
-  await new Promise<void>((resolve, reject) => {
-    socket.write(payload, (error?: Error) => {
-      if (error) {
-        reject(error);
-        return;
-      }
-
-      resolve();
-    });
-  });
-}
-
-async function writeControlMessage(socket: Pick<TransferSocket, "write">, message: ControlMessage) {
-  await writeSocket(socket, `${JSON.stringify(message)}\n`);
-}
-
-function createControlMessageParser(onMessage: (message: ControlMessage) => void) {
-  let buffer = "";
-
-  return (chunk: Uint8Array | Buffer | string) => {
-    buffer += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
-    if (buffer.length > CONTROL_MESSAGE_BUFFER_LIMIT) {
-      throw new Error("Control connection exceeded the supported message size.");
-    }
-
-    while (true) {
-      const newLineIndex = buffer.indexOf("\n");
-      if (newLineIndex === -1) {
-        return;
-      }
-
-      const rawLine = buffer.slice(0, newLineIndex);
-      buffer = buffer.slice(newLineIndex + 1);
-
-      const line = rawLine.trim();
-      if (!line) {
-        continue;
-      }
-
-      onMessage(JSON.parse(line) as ControlMessage);
-    }
-  };
-}
-
-function getPeerName(value: string | undefined) {
-  return value?.trim() ? value.trim().slice(0, 40) : "Nearby device";
-}
-
-function stopRelayPolling(runtime: SendRuntime) {
-  if (!runtime.relayPollTimer) {
-    return;
-  }
-
-  clearInterval(runtime.relayPollTimer);
-  runtime.relayPollTimer = undefined;
-}
-
-function closeSendControlSocket(runtime: SendRuntime, activeSocket?: TransferSocket) {
-  if (!runtime.controlSocket) {
-    return;
-  }
-
-  if (!activeSocket || runtime.controlSocket !== activeSocket) {
-    runtime.controlSocket.destroy();
-  }
-
-  if (!activeSocket || runtime.controlSocket === activeSocket) {
-    runtime.controlSocket = undefined;
-  }
-}
-
-function closeReceiveControlSocket(runtime: ReceiveRuntime, activeSocket?: TransferSocket) {
-  if (!runtime.controlSocket) {
-    return;
-  }
-
-  if (!activeSocket || runtime.controlSocket !== activeSocket) {
-    runtime.controlSocket.destroy();
-  }
-
-  if (!activeSocket || runtime.controlSocket === activeSocket) {
-    runtime.controlSocket = undefined;
-  }
-}
-
-function isSendRuntimeSettled(runtime: SendRuntime) {
-  return ["completed", "failed", "canceled"].includes(runtime.session.status);
-}
-
-function takePendingHttpReady(runtime: ReceiveRuntime) {
-  if (!runtime.pendingHttpReady) {
-    return null;
-  }
-
-  const pending = runtime.pendingHttpReady;
-  clearTimeout(pending.timer);
-  runtime.pendingHttpReady = undefined;
-  return pending;
-}
-
-function rejectPendingHttpReady(runtime: ReceiveRuntime, error: Error) {
-  takePendingHttpReady(runtime)?.reject(error);
-}
-
-function takePendingRelayReady(runtime: ReceiveRuntime) {
-  if (!runtime.pendingRelayReady) {
-    return null;
-  }
-
-  const pending = runtime.pendingRelayReady;
-  clearTimeout(pending.timer);
-  runtime.pendingRelayReady = undefined;
-  return pending;
-}
-
-function rejectPendingRelayReady(runtime: ReceiveRuntime, error: Error) {
-  takePendingRelayReady(runtime)?.reject(error);
-}
-
-function rejectPendingReceiveWaits(runtime: ReceiveRuntime, error: Error) {
-  rejectPendingHttpReady(runtime, error);
-  rejectPendingRelayReady(runtime, error);
-}
-
-function updateIncomingOfferRelay(runtime: ReceiveRuntime, relay: RelayAccess) {
-  const offer = runtime.session.incomingOffer;
-  if (!offer) {
-    return null;
-  }
-
-  const nextOffer = {
-    ...offer,
-    sender: {
-      ...offer.sender,
-      relay,
-    },
-  } satisfies IncomingTransferOffer;
-
-  withReceiveSessionUpdate(runtime, {
-    incomingOffer: nextOffer,
-  });
-
-  return nextOffer;
-}
-
-async function ensureRelayReceiverAccepted({
-  offer,
-  receiverDeviceName,
-}: {
-  offer: IncomingTransferOffer;
-  receiverDeviceName: string;
-}) {
-  if (!offer.sender.relay) {
-    return;
-  }
-
-  await acceptRelayTransferSession({
-    relay: offer.sender.relay,
-    receiverDeviceName,
-  });
-}
-
-async function stopSenderHttpRuntime(runtime: SendRuntime, detail: string) {
-  if (!runtime.httpSessionId) {
-    return;
-  }
-
-  const sessionId = runtime.httpSessionId;
-  runtime.httpSessionId = null;
-  await stopLocalHttpSession(sessionId, detail).catch(() => {});
-}
-
-function failSendSession(runtime: SendRuntime, detail: string) {
-  stopRelayPolling(runtime);
-  withSendSessionUpdate(runtime, {
-    status: "failed",
-    awaitingReceiverResponse: false,
-    progress: {
-      ...runtime.session.progress,
-      phase: "failed",
-      detail,
-      updatedAt: nowIso(),
-    },
-  });
-}
-
-async function completeSendSession(runtime: SendRuntime, detail: string) {
-  stopRelayPolling(runtime);
-  await stopSenderHttpRuntime(runtime, detail);
-
-  withSendSessionUpdate(runtime, {
-    status: "completed",
-    awaitingReceiverResponse: false,
-    progress: {
-      phase: "completed",
-      totalBytes: runtime.session.manifest.totalBytes,
-      bytesTransferred: runtime.session.manifest.totalBytes,
-      currentFileName: null,
-      speedBytesPerSecond: 0,
-      detail,
-      updatedAt: nowIso(),
-    },
-  });
-}
-
-function resetReceiveToDiscoverable(runtime: ReceiveRuntime, detail = "Ready to receive files.") {
-  closeReceiveControlSocket(runtime);
-  rejectPendingReceiveWaits(runtime, new Error("That transfer request is no longer available."));
-  runtime.activeDownloadAbortController?.abort();
-  runtime.activeDownloadAbortController = undefined;
-
-  withReceiveSessionUpdate(runtime, {
-    status: "discoverable",
-    incomingOffer: null,
-    peerDeviceName: null,
-    receivedFiles: [],
-    progress: {
-      phase: "discoverable",
-      totalBytes: 0,
-      bytesTransferred: 0,
-      currentFileName: null,
-      speedBytesPerSecond: 0,
-      detail,
-      updatedAt: nowIso(),
-    },
-  });
-}
-
-function isReceiveRuntimeBusy(runtime: ReceiveRuntime) {
-  return Boolean(
-    runtime.session.incomingOffer ||
-    runtime.session.status === "connecting" ||
-    runtime.session.status === "transferring",
-  );
-}
-
-function registerIncomingOffer(runtime: ReceiveRuntime, offer: IncomingTransferOffer, socket?: TransferSocket) {
-  if (isReceiveRuntimeBusy(runtime)) {
-    return false;
-  }
-
-  runtime.controlSocket = socket;
-
-  withReceiveSessionUpdate(runtime, {
-    status: "waiting",
-    incomingOffer: offer,
-    peerDeviceName: offer.senderDeviceName,
-    receivedFiles: [],
-    progress: {
-      phase: "waiting",
-      totalBytes: offer.totalBytes,
-      bytesTransferred: 0,
-      currentFileName: null,
-      speedBytesPerSecond: 0,
-      detail: `${offer.senderDeviceName} wants to send ${offer.fileCount} file${offer.fileCount === 1 ? "" : "s"}.`,
-      updatedAt: nowIso(),
-    },
-  });
-
-  return true;
-}
-
-async function runPreviewTransfer(senderRuntime: SendRuntime, receiverRuntime: ReceiveRuntime) {
-  const offer = receiverRuntime.session.incomingOffer;
-  if (!offer) {
-    throw new Error("That transfer request is no longer available.");
-  }
-
-  const receivedFiles: ReceivedFileRecord[] = [];
-  let bytesTransferred = 0;
-
-  await activateKeepAwakeAsync(LOCAL_TRANSFER_KEEP_AWAKE_TAG).catch(() => {});
-
+async function loadZeroconf() {
   try {
-    withSendSessionUpdate(senderRuntime, {
-      status: "transferring",
-      awaitingReceiverResponse: false,
-      progress: {
-        ...senderRuntime.session.progress,
-        phase: "transferring",
-        detail: "Sending files in preview mode.",
-        updatedAt: nowIso(),
-      },
-    });
-
-    withReceiveSessionUpdate(receiverRuntime, {
-      status: "transferring",
-      progress: {
-        ...receiverRuntime.session.progress,
-        phase: "transferring",
-        totalBytes: offer.totalBytes,
-        detail: "Receiving files in preview mode.",
-        updatedAt: nowIso(),
-      },
-    });
-
-    for (const file of senderRuntime.files) {
-      const record = createReceivedFileRecord({
-        transferId: offer.id,
-        sourceFileUri: file.uri,
-        fileName: file.name,
-        mimeType: file.mimeType,
-        sizeBytes: file.sizeBytes,
-      });
-
-      bytesTransferred += file.sizeBytes;
-      receivedFiles.push(record);
-
-      withSendSessionUpdate(senderRuntime, {
-        progress: {
-          phase: "transferring",
-          totalBytes: senderRuntime.session.manifest.totalBytes,
-          bytesTransferred,
-          currentFileName: file.name,
-          speedBytesPerSecond: 0,
-          detail: "Sending files in preview mode.",
-          updatedAt: nowIso(),
-        },
-      });
-
-      withReceiveSessionUpdate(receiverRuntime, {
-        progress: {
-          phase: "transferring",
-          totalBytes: offer.totalBytes,
-          bytesTransferred,
-          currentFileName: file.name,
-          speedBytesPerSecond: 0,
-          detail: "Receiving files in preview mode.",
-          updatedAt: nowIso(),
-        },
-      });
-
-      await sleep(120);
-    }
-
-    withSendSessionUpdate(senderRuntime, {
-      status: "completed",
-      progress: {
-        phase: "completed",
-        totalBytes: senderRuntime.session.manifest.totalBytes,
-        bytesTransferred: senderRuntime.session.manifest.totalBytes,
-        currentFileName: null,
-        speedBytesPerSecond: 0,
-        detail: "Transfer complete.",
-        updatedAt: nowIso(),
-      },
-    });
+    const module = (await import("react-native-zeroconf")) as unknown as {
+      default?: new () => ZeroconfInstance;
+      ImplType?: { DNSSD: string };
+    };
+    const Zeroconf = (module.default ??
+      (module as unknown as {
+        new (): ZeroconfInstance;
+      })) as new () => ZeroconfInstance;
 
     return {
-      receivedFiles,
-      bytesTransferred,
-      detail: "Transfer complete.",
-    } satisfies TransferResult;
+      Zeroconf,
+      ImplType: module.ImplType ?? { DNSSD: "DNSSD" },
+    } satisfies ZeroconfModuleLike;
   } catch (error) {
-    failSendSession(senderRuntime, error instanceof Error ? error.message : "Transfer failed.");
-    throw error;
-  } finally {
-    await deactivateKeepAwake(LOCAL_TRANSFER_KEEP_AWAKE_TAG).catch(() => {});
+    console.warn("react-native-zeroconf unavailable, using QR only", error);
+    return null;
   }
 }
 
-function createReceiveProgressReporter(runtime: ReceiveRuntime) {
-  let lastSentAt = 0;
-  let lastSentBytes = 0;
+function buildDirectSessionUrl(peer: Pick<DirectPeerAccess, "host" | "port" | "sessionId">, suffix: string) {
+  return `http://${peer.host}:${peer.port}/direct/sessions/${encodeURIComponent(peer.sessionId)}${suffix}`;
+}
 
-  return (progress: TransferProgress, force = false) => {
-    withReceiveSessionUpdate(runtime, {
-      status: progress.phase === "transferring" ? "transferring" : "connecting",
-      progress,
-    });
-
-    if (!runtime.controlSocket) {
-      return;
-    }
-
-    const now = Date.now();
-    const shouldSend =
-      force ||
-      progress.phase === "completed" ||
-      progress.phase === "failed" ||
-      progress.bytesTransferred === progress.totalBytes ||
-      progress.bytesTransferred - lastSentBytes >= PROGRESS_UPDATE_BYTES ||
-      now - lastSentAt >= PROGRESS_UPDATE_INTERVAL_MS;
-
-    if (!shouldSend) {
-      return;
-    }
-
-    lastSentAt = now;
-    lastSentBytes = progress.bytesTransferred;
-    void writeControlMessage(runtime.controlSocket, {
-      kind: "progress",
-      progress,
-    }).catch(() => {});
+function buildPeerAccessFromDiscovery(record: DiscoveryRecord): DirectPeerAccess {
+  return {
+    sessionId: record.sessionId,
+    host: record.host,
+    port: record.port,
+    token: record.token,
   };
 }
 
-function validateDownloadableManifest(offer: IncomingTransferOffer, payload: DownloadableTransferManifest) {
+async function postJsonWithTimeout({
+  url,
+  token,
+  body,
+}: {
+  url: string;
+  token: string;
+  body: unknown;
+}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => {
+    controller.abort();
+  }, PEER_REQUEST_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        [DIRECT_TOKEN_HEADER]: token,
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+      throw new Error(payload?.error ?? `Direct transfer request failed with status ${response.status}.`);
+    }
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error("Nearby device did not respond in time.");
+    }
+
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function postDirectEvent(peer: DirectPeerAccess, event: ReceiverToSenderEvent | SenderToReceiverEvent) {
+  await postJsonWithTimeout({
+    url: buildDirectSessionUrl(peer, "/events"),
+    token: peer.token,
+    body: {
+      event,
+    },
+  });
+}
+
+async function postIncomingOffer(peer: DiscoveryRecord, offer: IncomingTransferOffer) {
+  await postJsonWithTimeout({
+    url: buildDirectSessionUrl(peer, "/offers"),
+    token: peer.token,
+    body: {
+      offer,
+    },
+  });
+}
+
+async function fetchDownloadableManifest({
+  peer,
+  offer,
+  signal,
+}: {
+  peer: DirectPeerAccess;
+  offer: IncomingTransferOffer;
+  signal: AbortSignal;
+}) {
+  const response = await fetch(buildDirectSessionUrl(peer, "/manifest"), {
+    method: "GET",
+    headers: {
+      [DIRECT_TOKEN_HEADER]: peer.token,
+    },
+    signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(`Unable to load the sender manifest (${response.status}).`);
+  }
+
+  const payload = (await response.json()) as DownloadableTransferManifest;
   if (payload.kind !== "direct-http-transfer") {
     throw new Error("The sender did not provide a valid direct-transfer manifest.");
   }
@@ -898,27 +538,6 @@ function validateDownloadableManifest(offer: IncomingTransferOffer, payload: Dow
   }
 
   return payload;
-}
-
-async function fetchDownloadableManifest({
-  manifestUrl,
-  offer,
-  signal,
-}: {
-  manifestUrl: string;
-  offer: IncomingTransferOffer;
-  signal: AbortSignal;
-}) {
-  const response = await fetch(manifestUrl, {
-    method: "GET",
-    signal,
-  });
-
-  if (!response.ok) {
-    throw new Error(`Unable to load the sender manifest (${response.status}).`);
-  }
-
-  return validateDownloadableManifest(offer, (await response.json()) as DownloadableTransferManifest);
 }
 
 async function streamResponseToFile({
@@ -969,15 +588,239 @@ async function streamResponseToFile({
   }
 }
 
+function stopRelayPolling(runtime: SendRuntime) {
+  if (!runtime.relayPollTimer) {
+    return;
+  }
+
+  clearInterval(runtime.relayPollTimer);
+  runtime.relayPollTimer = undefined;
+}
+
+function isSendRuntimeSettled(runtime: SendRuntime) {
+  return ["completed", "failed", "canceled"].includes(runtime.session.status);
+}
+
+function failSendSession(runtime: SendRuntime, detail: string) {
+  stopRelayPolling(runtime);
+  withSendSessionUpdate(runtime, {
+    status: "failed",
+    awaitingReceiverResponse: false,
+    progress: {
+      ...runtime.session.progress,
+      phase: "failed",
+      detail,
+      updatedAt: nowIso(),
+    },
+  });
+}
+
+async function completeSendSession(runtime: SendRuntime, detail: string) {
+  stopRelayPolling(runtime);
+  withSendSessionUpdate(runtime, {
+    status: "completed",
+    awaitingReceiverResponse: false,
+    progress: {
+      phase: "completed",
+      totalBytes: runtime.session.manifest.totalBytes,
+      bytesTransferred: runtime.session.manifest.totalBytes,
+      currentFileName: null,
+      speedBytesPerSecond: 0,
+      detail,
+      updatedAt: nowIso(),
+    },
+  });
+}
+
+function takePendingRelayReady(runtime: ReceiveRuntime) {
+  if (!runtime.pendingRelayReady) {
+    return null;
+  }
+
+  const pending = runtime.pendingRelayReady;
+  clearTimeout(pending.timer);
+  runtime.pendingRelayReady = undefined;
+  return pending;
+}
+
+function rejectPendingRelayReady(runtime: ReceiveRuntime, error: Error) {
+  takePendingRelayReady(runtime)?.reject(error);
+}
+
+function resetReceiveToDiscoverable(runtime: ReceiveRuntime, detail = "Ready to receive files.") {
+  rejectPendingRelayReady(runtime, new Error("That transfer request is no longer available."));
+  runtime.activeDownloadAbortController?.abort();
+  runtime.activeDownloadAbortController = undefined;
+
+  withReceiveSessionUpdate(runtime, {
+    status: "discoverable",
+    incomingOffer: null,
+    peerDeviceName: null,
+    receivedFiles: [],
+    progress: {
+      phase: "discoverable",
+      totalBytes: 0,
+      bytesTransferred: 0,
+      currentFileName: null,
+      speedBytesPerSecond: 0,
+      detail,
+      updatedAt: nowIso(),
+    },
+  });
+}
+
+function failReceiveSession(runtime: ReceiveRuntime, detail: string) {
+  rejectPendingRelayReady(runtime, new Error(detail));
+  runtime.activeDownloadAbortController?.abort();
+  runtime.activeDownloadAbortController = undefined;
+
+  withReceiveSessionUpdate(runtime, {
+    status: "failed",
+    progress: {
+      phase: "failed",
+      totalBytes: runtime.session.incomingOffer?.totalBytes ?? runtime.session.progress.totalBytes,
+      bytesTransferred: runtime.session.progress.bytesTransferred,
+      currentFileName: null,
+      speedBytesPerSecond: 0,
+      detail,
+      updatedAt: nowIso(),
+    },
+  });
+}
+
+function isReceiveRuntimeBusy(runtime: ReceiveRuntime) {
+  return Boolean(
+    runtime.session.incomingOffer ||
+      runtime.session.status === "connecting" ||
+      runtime.session.status === "transferring",
+  );
+}
+
+function registerIncomingOffer(runtime: ReceiveRuntime, offer: IncomingTransferOffer) {
+  if (isReceiveRuntimeBusy(runtime)) {
+    return false;
+  }
+
+  withReceiveSessionUpdate(runtime, {
+    status: "waiting",
+    incomingOffer: offer,
+    peerDeviceName: offer.senderDeviceName,
+    receivedFiles: [],
+    progress: {
+      phase: "waiting",
+      totalBytes: offer.totalBytes,
+      bytesTransferred: 0,
+      currentFileName: null,
+      speedBytesPerSecond: 0,
+      detail: `${offer.senderDeviceName} wants to send ${offer.fileCount} file${offer.fileCount === 1 ? "" : "s"}.`,
+      updatedAt: nowIso(),
+    },
+  });
+
+  return true;
+}
+
+function createReceiveProgressReporter(runtime: ReceiveRuntime, mirrorToSender: boolean) {
+  let lastSentAt = 0;
+  let lastSentBytes = 0;
+
+  return (progress: TransferProgress, force = false) => {
+    withReceiveSessionUpdate(runtime, {
+      status: progress.phase === "transferring" ? "transferring" : "connecting",
+      progress,
+    });
+
+    if (!mirrorToSender) {
+      return;
+    }
+
+    const offer = runtime.session.incomingOffer;
+    if (!offer) {
+      return;
+    }
+
+    const now = Date.now();
+    const shouldSend =
+      force ||
+      progress.phase === "completed" ||
+      progress.phase === "failed" ||
+      progress.bytesTransferred === progress.totalBytes ||
+      progress.bytesTransferred - lastSentBytes >= PROGRESS_UPDATE_BYTES ||
+      now - lastSentAt >= PROGRESS_UPDATE_INTERVAL_MS;
+
+    if (!shouldSend) {
+      return;
+    }
+
+    lastSentAt = now;
+    lastSentBytes = progress.bytesTransferred;
+    void postDirectEvent(offer.sender.direct, {
+      kind: "progress",
+      progress,
+    }).catch(() => {});
+  };
+}
+
+function updateIncomingOfferRelay(runtime: ReceiveRuntime, relay: RelayAccess) {
+  const offer = runtime.session.incomingOffer;
+  if (!offer) {
+    return null;
+  }
+
+  const nextOffer = {
+    ...offer,
+    sender: {
+      ...offer.sender,
+      relay,
+    },
+  } satisfies IncomingTransferOffer;
+
+  withReceiveSessionUpdate(runtime, {
+    incomingOffer: nextOffer,
+  });
+
+  return nextOffer;
+}
+
+function waitForRelayReady(runtime: ReceiveRuntime) {
+  const offer = runtime.session.incomingOffer;
+  if (!offer) {
+    throw new Error("That transfer request is no longer available.");
+  }
+
+  if (offer.sender.relay) {
+    return Promise.resolve(offer);
+  }
+
+  if (runtime.pendingRelayReady) {
+    throw new Error("Receiver is already waiting for relay fallback.");
+  }
+
+  return new Promise<IncomingTransferOffer>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      if (runtime.pendingRelayReady?.timer !== timer) {
+        return;
+      }
+
+      runtime.pendingRelayReady = undefined;
+      reject(new Error("The sender could not prepare relay fallback."));
+    }, RELAY_FALLBACK_WAIT_TIMEOUT_MS);
+
+    runtime.pendingRelayReady = {
+      resolve,
+      reject,
+      timer,
+    };
+  });
+}
+
 async function receiveDirectHttpTransfer({
   runtime,
   offer,
-  manifestUrl,
   onProgress,
 }: {
   runtime: ReceiveRuntime;
   offer: IncomingTransferOffer;
-  manifestUrl: string;
   onProgress: (progress: TransferProgress, force?: boolean) => void;
 }) {
   const abortController = new AbortController();
@@ -1001,7 +844,7 @@ async function receiveDirectHttpTransfer({
     );
 
     const manifest = await fetchDownloadableManifest({
-      manifestUrl,
+      peer: offer.sender.direct,
       offer,
       signal: abortController.signal,
     });
@@ -1028,6 +871,9 @@ async function receiveDirectHttpTransfer({
 
       const response = await fetch(file.downloadUrl, {
         method: "GET",
+        headers: {
+          [DIRECT_TOKEN_HEADER]: offer.sender.direct.token,
+        },
         signal: abortController.signal,
       });
 
@@ -1099,58 +945,20 @@ async function receiveDirectHttpTransfer({
   }
 }
 
-function waitForHttpReady(runtime: ReceiveRuntime) {
-  if (runtime.pendingHttpReady) {
-    throw new Error("Receiver is already waiting for the sender.");
+async function ensureRelayReceiverAccepted({
+  offer,
+  receiverDeviceName,
+}: {
+  offer: IncomingTransferOffer;
+  receiverDeviceName: string;
+}) {
+  if (!offer.sender.relay) {
+    return;
   }
 
-  return new Promise<{ manifestUrl: string; shareUrl: string }>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      if (runtime.pendingHttpReady?.timer !== timer) {
-        return;
-      }
-
-      runtime.pendingHttpReady = undefined;
-      reject(new DirectTransferFallbackError("The sender did not provide local download access in time."));
-    }, HTTP_READY_TIMEOUT_MS);
-
-    runtime.pendingHttpReady = {
-      resolve,
-      reject,
-      timer,
-    };
-  });
-}
-
-function waitForRelayReady(runtime: ReceiveRuntime) {
-  const offer = runtime.session.incomingOffer;
-  if (!offer) {
-    throw new Error("That transfer request is no longer available.");
-  }
-
-  if (offer.sender.relay) {
-    return Promise.resolve(offer);
-  }
-
-  if (runtime.pendingRelayReady) {
-    throw new Error("Receiver is already waiting for relay fallback.");
-  }
-
-  return new Promise<IncomingTransferOffer>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      if (runtime.pendingRelayReady?.timer !== timer) {
-        return;
-      }
-
-      runtime.pendingRelayReady = undefined;
-      reject(new Error("The sender could not prepare relay fallback."));
-    }, RELAY_FALLBACK_WAIT_TIMEOUT_MS);
-
-    runtime.pendingRelayReady = {
-      resolve,
-      reject,
-      timer,
-    };
+  await acceptRelayTransferSession({
+    relay: offer.sender.relay,
+    receiverDeviceName,
   });
 }
 
@@ -1332,100 +1140,18 @@ async function receiveRelayFallbackTransfer({
   });
 }
 
-async function notifySenderAccepted(runtime: ReceiveRuntime, offer: IncomingTransferOffer) {
-  if (runtime.controlSocket) {
-    await writeControlMessage(runtime.controlSocket, {
-      kind: "accepted",
-      receiverDeviceName: runtime.session.discoveryRecord.deviceName,
-    });
-    return true;
-  }
-
-  const senderRuntime = activeSendRuntimes.get(offer.id);
-  if (!senderRuntime) {
-    return false;
-  }
-
-  withSendSessionUpdate(senderRuntime, {
-    status: "connecting",
-    peerDeviceName: runtime.session.discoveryRecord.deviceName,
-    awaitingReceiverResponse: false,
-    progress: {
-      phase: "connecting",
-      totalBytes: senderRuntime.session.manifest.totalBytes,
-      bytesTransferred: 0,
-      currentFileName: null,
-      speedBytesPerSecond: 0,
-      detail: `${runtime.session.discoveryRecord.deviceName} accepted. Preparing transfer.`,
-      updatedAt: nowIso(),
-    },
-  });
-
-  return true;
-}
-
-async function notifySenderRejected(runtime: ReceiveRuntime, offer: IncomingTransferOffer, detail: string) {
-  if (runtime.controlSocket) {
-    const socket = runtime.controlSocket;
-    runtime.controlSocket = undefined;
-
-    await writeControlMessage(socket, {
-      kind: "rejected",
-      message: detail,
-    }).catch(() => {});
-
-    socket.destroy();
-    return true;
-  }
-
-  const senderRuntime = activeSendRuntimes.get(offer.id);
-  if (!senderRuntime) {
-    return false;
-  }
-
-  failSendSession(senderRuntime, detail);
-  return true;
-}
-
-async function notifySenderCanceled(runtime: ReceiveRuntime, detail: string) {
-  if (!runtime.controlSocket) {
-    return;
-  }
-
-  await writeControlMessage(runtime.controlSocket, {
-    kind: "canceled",
-    message: detail,
-  }).catch(() => {});
-}
-
 async function runReceiveTransfer(runtime: ReceiveRuntime) {
   const offer = runtime.session.incomingOffer;
   if (!offer) {
     throw new Error("That transfer request is no longer available.");
   }
 
-  const canUsePreview = runtime.session.previewMode && activeSendRuntimes.has(offer.id);
-  const reportProgress = createReceiveProgressReporter(runtime);
+  await postDirectEvent(offer.sender.direct, {
+    kind: "accepted",
+    receiverDeviceName: runtime.session.discoveryRecord.deviceName,
+  });
 
-  if (canUsePreview) {
-    const didNotifySender = await notifySenderAccepted(runtime, offer);
-    if (!didNotifySender) {
-      throw new Error("Sender is no longer available.");
-    }
-
-    const senderRuntime = activeSendRuntimes.get(offer.id);
-    if (!senderRuntime) {
-      throw new Error("Sender is no longer available.");
-    }
-
-    return runPreviewTransfer(senderRuntime, runtime);
-  }
-
-  if (!runtime.controlSocket) {
-    throw new Error("Sender is no longer available.");
-  }
-
-  await notifySenderAccepted(runtime, offer);
+  const directProgressReporter = createReceiveProgressReporter(runtime, true);
 
   withReceiveSessionUpdate(runtime, {
     status: "connecting",
@@ -1436,33 +1162,31 @@ async function runReceiveTransfer(runtime: ReceiveRuntime) {
       bytesTransferred: 0,
       currentFileName: null,
       speedBytesPerSecond: 0,
-      detail: "Waiting for the sender to prepare local download access.",
+      detail: "Connecting to the sender over local WiFi.",
       updatedAt: nowIso(),
     },
   });
 
   try {
-    const { manifestUrl } = await waitForHttpReady(runtime);
     return await receiveDirectHttpTransfer({
       runtime,
       offer,
-      manifestUrl,
-      onProgress: reportProgress,
+      onProgress: directProgressReporter,
     });
   } catch (error) {
     if (!(error instanceof DirectTransferFallbackError)) {
       throw error;
     }
 
-    await writeControlMessage(runtime.controlSocket, {
+    await postDirectEvent(offer.sender.direct, {
       kind: "direct-http-failed",
       message: error.message,
-    }).catch(() => {});
+    });
 
     return receiveRelayFallbackTransfer({
       runtime,
       offer,
-      onProgress: reportProgress,
+      onProgress: createReceiveProgressReporter(runtime, false),
     });
   }
 }
@@ -1484,7 +1208,6 @@ async function uploadFilesToRelay(runtime: SendRuntime) {
   }
 
   runtime.relayUploadStarted = true;
-
   await activateKeepAwakeAsync(LOCAL_TRANSFER_KEEP_AWAKE_TAG).catch(() => {});
 
   let bytesTransferred = 0;
@@ -1539,12 +1262,10 @@ async function uploadFilesToRelay(runtime: SendRuntime) {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Relay upload failed.";
-    if (runtime.controlSocket) {
-      await writeControlMessage(runtime.controlSocket, {
-        kind: "failed",
-        message,
-      }).catch(() => {});
-    }
+    await postDirectEvent(buildPeerAccessFromDiscovery(runtime.target), {
+      kind: "failed",
+      message,
+    }).catch(() => {});
     failSendSession(runtime, message);
     throw error;
   } finally {
@@ -1597,20 +1318,17 @@ async function syncRelaySenderState(runtime: SendRuntime) {
   }
 }
 
+function getPeerName(value: string | undefined) {
+  return value?.trim() ? value.trim().slice(0, 40) : "Nearby device";
+}
+
 async function provisionRelayFallback(runtime: SendRuntime, receiverName: string) {
   if (runtime.session.relay) {
-    if (runtime.controlSocket) {
-      await writeControlMessage(runtime.controlSocket, {
-        kind: "relay-ready",
-        relay: toRelayAccess(runtime.session.relay)!,
-      }).catch(() => {});
-    }
+    await postDirectEvent(buildPeerAccessFromDiscovery(runtime.target), {
+      kind: "relay-ready",
+      relay: toRelayAccess(runtime.session.relay)!,
+    }).catch(() => {});
     return true;
-  }
-
-  if (!runtime.controlSocket) {
-    failSendSession(runtime, `${receiverName} is no longer available for relay fallback.`);
-    return false;
   }
 
   let relay: RelayCredentials;
@@ -1622,7 +1340,7 @@ async function provisionRelayFallback(runtime: SendRuntime, receiverName: string
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to prepare relay fallback.";
-    await writeControlMessage(runtime.controlSocket, {
+    await postDirectEvent(buildPeerAccessFromDiscovery(runtime.target), {
       kind: "relay-failed",
       message,
     }).catch(() => {});
@@ -1651,7 +1369,7 @@ async function provisionRelayFallback(runtime: SendRuntime, receiverName: string
   startRelayPolling(runtime);
 
   try {
-    await writeControlMessage(runtime.controlSocket, {
+    await postDirectEvent(buildPeerAccessFromDiscovery(runtime.target), {
       kind: "relay-ready",
       relay: toRelayAccess(relay)!,
     });
@@ -1670,75 +1388,13 @@ async function provisionRelayFallback(runtime: SendRuntime, receiverName: string
   }
 }
 
-async function handleSenderHttpSessionFinalized(runtime: SendRuntime, httpSession: LocalHttpSession) {
-  if (runtime.httpSessionId !== httpSession.id) {
-    return;
-  }
-
-  runtime.httpSessionId = null;
-
-  if (isSendRuntimeSettled(runtime) || runtime.stopping) {
-    return;
-  }
-
-  const detail = httpSession.detail ?? "Local transfer server stopped unexpectedly.";
-  if (runtime.controlSocket) {
-    await writeControlMessage(runtime.controlSocket, {
-      kind: "failed",
-      message: detail,
-    }).catch(() => {});
-  }
-  failSendSession(runtime, detail);
-}
-
-async function startSenderHostedHttpTransfer(runtime: SendRuntime, receiverName: string) {
-  if (isSendRuntimeSettled(runtime)) {
-    return;
-  }
-
-  withSendSessionUpdate(runtime, {
-    status: "connecting",
-    awaitingReceiverResponse: false,
-    peerDeviceName: receiverName,
-    progress: {
-      phase: "connecting",
-      totalBytes: runtime.session.manifest.totalBytes,
-      bytesTransferred: runtime.session.progress.bytesTransferred,
-      currentFileName: null,
-      speedBytesPerSecond: 0,
-      detail: `${receiverName} accepted. Preparing local download access.`,
-      updatedAt: nowIso(),
-    },
-  });
-
-  try {
-    const httpSession = await startLocalHttpSession({
-      sessionId: runtime.session.id,
-      files: runtime.files,
-      deviceName: runtime.session.manifest.deviceName,
-      mode: "direct",
-      keepAwakeTag: LOCAL_TRANSFER_KEEP_AWAKE_TAG,
-      onFinalized: (session) => {
-        void handleSenderHttpSessionFinalized(runtime, session);
-      },
-    });
-
-    runtime.httpSessionId = httpSession.id;
-
-    if (!runtime.controlSocket) {
-      await stopSenderHttpRuntime(runtime, "Receiver is no longer available.");
-      failSendSession(runtime, "Receiver is no longer available.");
-      return;
-    }
-
-    await writeControlMessage(runtime.controlSocket, {
-      kind: "http-ready",
-      manifestUrl: httpSession.manifestUrl,
-      shareUrl: httpSession.shareUrl,
-    });
-
+async function handleSenderEvent(runtime: SendRuntime, event: ReceiverToSenderEvent) {
+  if (event.kind === "accepted") {
+    const receiverName = getPeerName(event.receiverDeviceName ?? runtime.target.deviceName);
     withSendSessionUpdate(runtime, {
       status: "connecting",
+      peerDeviceName: receiverName,
+      awaitingReceiverResponse: false,
       progress: {
         phase: "connecting",
         totalBytes: runtime.session.manifest.totalBytes,
@@ -1749,187 +1405,85 @@ async function startSenderHostedHttpTransfer(runtime: SendRuntime, receiverName:
         updatedAt: nowIso(),
       },
     });
-  } catch {
-    await provisionRelayFallback(runtime, receiverName);
-  }
-}
-
-function handleSenderOfferRejected(runtime: SendRuntime, detail: string) {
-  failSendSession(runtime, detail);
-}
-
-async function handleSenderControlMessage(runtime: SendRuntime, message: ReceiverControlMessage) {
-  if (message.kind === "offer-received") {
     return;
   }
 
-  if (message.kind === "accepted") {
-    const receiverName = getPeerName(message.receiverDeviceName ?? runtime.target.deviceName);
-    await startSenderHostedHttpTransfer(runtime, receiverName);
-    return;
-  }
-
-  if (message.kind === "progress") {
+  if (event.kind === "progress") {
     withSendSessionUpdate(runtime, {
-      status: message.progress.phase === "transferring" ? "transferring" : "connecting",
+      status: event.progress.phase === "transferring" ? "transferring" : "connecting",
       awaitingReceiverResponse: false,
       progress: {
-        ...message.progress,
-        detail: message.progress.detail ?? runtime.session.progress.detail,
+        ...event.progress,
+        detail: event.progress.detail ?? runtime.session.progress.detail,
       },
     });
     return;
   }
 
-  if (message.kind === "completed") {
-    await completeSendSession(runtime, message.detail ?? "Transfer complete.");
+  if (event.kind === "completed") {
+    await completeSendSession(runtime, event.detail ?? "Transfer complete.");
     return;
   }
 
-  if (message.kind === "direct-http-failed") {
-    await stopSenderHttpRuntime(runtime, message.message || "Direct transfer unavailable.");
+  if (event.kind === "direct-http-failed") {
     await provisionRelayFallback(runtime, runtime.session.peerDeviceName ?? runtime.target.deviceName);
     return;
   }
 
-  if (message.kind === "rejected" || message.kind === "busy") {
-    handleSenderOfferRejected(runtime, message.message || "That receiver is busy right now.");
+  if (event.kind === "rejected") {
+    failSendSession(runtime, event.message || "Transfer declined.");
     return;
   }
 
-  if (message.kind === "failed" || message.kind === "canceled") {
-    await stopSenderHttpRuntime(runtime, message.message || "Transfer stopped.");
-    failSendSession(runtime, message.message || "Transfer stopped.");
-  }
+  failSendSession(runtime, event.message || "Transfer stopped.");
 }
 
-async function sendOfferOverControlSocket(
-  runtime: SendRuntime,
-  target: DiscoveryRecord,
-  offer: IncomingTransferOffer,
-  tcpSocket: TcpSocketLike,
-) {
-  const socket = tcpSocket.connectTLS({
-    host: target.host,
-    port: target.port,
-    ca: LOCAL_TRANSFER_CERTIFICATE_ASSET,
-    tlsCheckValidity: false,
-    interface: "wifi",
-  });
-
-  runtime.controlSocket = socket;
-  socket.setNoDelay?.(true);
-
-  let didReceiveInitialResponse = false;
-  const responseTimer = setTimeout(() => {
-    if (didReceiveInitialResponse || isSendRuntimeSettled(runtime) || runtime.stopping) {
-      return;
-    }
-
-    handleSenderOfferRejected(runtime, `Unable to reach ${target.deviceName}.`);
-    socket.destroy();
-  }, CONTROL_RESPONSE_TIMEOUT_MS);
-
-  const clearResponseTimer = () => {
-    clearTimeout(responseTimer);
-  };
-
-  const parser = createControlMessageParser((message) => {
-    if (!didReceiveInitialResponse) {
-      didReceiveInitialResponse = true;
-      clearResponseTimer();
-    }
-
-    void handleSenderControlMessage(runtime, message as ReceiverControlMessage);
-  });
-
-  socket.on("secureConnect", () => {
-    void writeControlMessage(socket, {
-      kind: "offer",
-      receiverSessionId: target.sessionId,
-      receiverToken: target.token,
-      offer,
-    }).catch((error) => {
-      clearResponseTimer();
-      handleSenderOfferRejected(runtime, error instanceof Error ? error.message : "Unable to reach that receiver.");
-    });
-  });
-
-  socket.on("data", (chunk) => {
-    try {
-      parser(chunk as Uint8Array | Buffer | string);
-    } catch (error) {
-      handleSenderOfferRejected(
-        runtime,
-        error instanceof Error ? error.message : "Unable to decode receiver response.",
-      );
-    }
-  });
-
-  socket.on("error", (error) => {
-    clearResponseTimer();
-    if (!isSendRuntimeSettled(runtime)) {
-      const message = error instanceof Error ? error.message : "Unable to reach that receiver.";
-      if (runtime.session.awaitingReceiverResponse) {
-        handleSenderOfferRejected(runtime, message);
-      } else {
-        failSendSession(runtime, message);
-      }
-    }
-  });
-
-  socket.on("close", () => {
-    clearResponseTimer();
-    if (runtime.controlSocket === socket) {
-      runtime.controlSocket = undefined;
-    }
-
-    if (!isSendRuntimeSettled(runtime) && !runtime.stopping) {
-      failSendSession(runtime, "That receiver is no longer available.");
-    }
-  });
-}
-
-function handleReceiveControlMessage(runtime: ReceiveRuntime, message: SenderControlMessage) {
-  if (message.kind === "http-ready") {
-    const pending = takePendingHttpReady(runtime);
-    if (pending) {
-      pending.resolve({
-        manifestUrl: message.manifestUrl,
-        shareUrl: message.shareUrl,
-      });
-    }
-    return;
-  }
-
-  if (message.kind === "relay-ready") {
-    const nextOffer = updateIncomingOfferRelay(runtime, message.relay);
-    rejectPendingHttpReady(
-      runtime,
-      new DirectTransferFallbackError("Direct transfer unavailable. Switching to relay."),
-    );
+async function handleReceiverEvent(runtime: ReceiveRuntime, event: SenderToReceiverEvent) {
+  if (event.kind === "relay-ready") {
+    const nextOffer = updateIncomingOfferRelay(runtime, event.relay);
     if (nextOffer) {
-      const pending = takePendingRelayReady(runtime);
-      if (pending) {
-        pending.resolve(nextOffer);
-      }
+      takePendingRelayReady(runtime)?.resolve(nextOffer);
     }
     return;
   }
 
-  if (message.kind === "relay-failed") {
-    const error = new Error(message.message || "Unable to prepare relay fallback.");
-    rejectPendingHttpReady(runtime, error);
-    rejectPendingRelayReady(runtime, error);
+  if (event.kind === "relay-failed") {
+    rejectPendingRelayReady(runtime, new Error(event.message || "Unable to prepare relay fallback."));
     return;
   }
 
-  if (message.kind === "failed" || message.kind === "canceled") {
-    const error = new Error(message.message || "Sender stopped the transfer.");
-    rejectPendingHttpReady(runtime, error);
-    rejectPendingRelayReady(runtime, error);
-    runtime.activeDownloadAbortController?.abort();
+  if (runtime.session.status === "waiting") {
+    resetReceiveToDiscoverable(runtime, event.message || "Sender stopped the transfer.");
+    return;
   }
+
+  rejectPendingRelayReady(runtime, new Error(event.message || "Sender stopped the transfer."));
+  runtime.activeDownloadAbortController?.abort();
+}
+
+async function startOffer(runtime: SendRuntime, offer: IncomingTransferOffer) {
+  try {
+    await postIncomingOffer(runtime.target, offer);
+    runtime.offerDelivered = true;
+  } catch (error) {
+    failSendSession(runtime, error instanceof Error ? error.message : "Unable to reach that receiver.");
+  }
+}
+
+async function handleSendRegistrationInterrupted(runtime: SendRuntime, detail: string) {
+  if (runtime.stopping || isSendRuntimeSettled(runtime)) {
+    return;
+  }
+
+  failSendSession(runtime, detail);
+}
+
+async function handleReceiveRegistrationInterrupted(runtime: ReceiveRuntime, detail: string) {
+  if (runtime.stopping) {
+    return;
+  }
+
+  failReceiveSession(runtime, detail);
 }
 
 function mapResolvedService(service: ZeroconfService) {
@@ -1950,7 +1504,6 @@ function mapResolvedService(service: ZeroconfService) {
     host,
     port: service.port ?? 0,
     token: receiverToken,
-    certificateFingerprint: service.txt?.certificateFingerprint ?? LOCAL_TRANSFER_CERT_FINGERPRINT,
     advertisedAt: nowIso(),
     serviceName: service.name,
   } satisfies DiscoveryRecord;
@@ -1970,11 +1523,17 @@ export async function startSendingTransfer({
   updateSession?: SendRuntimeUpdate;
 }) {
   const sessionId = Crypto.randomUUID();
-  const tcpSocket = await loadTcpSocket();
-  const previewTarget = target.method === "preview" && activeReceiveRuntimes.has(target.sessionId);
 
-  if (!tcpSocket && !previewTarget) {
-    throw new Error("Nearby transfer is unavailable on this build.");
+  if (target.port <= 0 || !target.token.trim()) {
+    throw new Error("That receiver is no longer available.");
+  }
+
+  if (!getUsableLanHost(target.host)) {
+    throw new Error(
+      target.method === "qr"
+        ? "That QR code does not contain a usable local WiFi address."
+        : "That receiver is not advertising a usable local WiFi address.",
+    );
   }
 
   const manifest = createTransferManifest({
@@ -1984,82 +1543,71 @@ export async function startSendingTransfer({
     isPremium,
   });
 
+  const direct = await registerDirectSendSession({
+    sessionId,
+    token: Crypto.randomUUID().replace(/-/g, ""),
+    deviceName,
+    startedAt: manifest.createdAt,
+    files,
+    onEvent: async (event) => {
+      const runtime = activeSendRuntimes.get(sessionId);
+      if (!runtime) {
+        return;
+      }
+
+      await handleSenderEvent(runtime, event as ReceiverToSenderEvent);
+    },
+    onInterrupted: async (detail) => {
+      const runtime = activeSendRuntimes.get(sessionId);
+      if (!runtime) {
+        return;
+      }
+
+      await handleSendRegistrationInterrupted(runtime, detail);
+    },
+  });
+
   const runtime: SendRuntime = {
-    session: createInitialSendSession(manifest, target, previewTarget, null),
+    session: createInitialSendSession(manifest, target, null),
     files,
     target,
+    direct,
     updateSession,
     relayUploadStarted: false,
-    httpSessionId: null,
+    offerDelivered: false,
     stopping: false,
   };
 
   activeSendRuntimes.set(sessionId, runtime);
   updateSession?.(runtime.session);
 
-  const offer = createIncomingTransferOffer(manifest, null);
+  const offer = createIncomingTransferOffer({
+    manifest,
+    direct,
+    relay: null,
+  });
 
-  if (previewTarget) {
-    const receiverRuntime = activeReceiveRuntimes.get(target.sessionId);
-    if (!receiverRuntime || !registerIncomingOffer(receiverRuntime, offer)) {
-      handleSenderOfferRejected(runtime, "That receiver is busy right now.");
-      return runtime.session;
-    }
-
-    return runtime.session;
-  }
-
-  if (!tcpSocket || target.port <= 0 || !target.token.trim()) {
-    failSendSession(runtime, "That receiver is no longer available.");
-    return runtime.session;
-  }
-
-  if (!getUsableLanHost(target.host)) {
-    failSendSession(
-      runtime,
-      target.method === "qr"
-        ? "That QR code does not contain a usable local WiFi address."
-        : "That receiver is not advertising a usable local WiFi address.",
-    );
-    return runtime.session;
-  }
-
-  void sendOfferOverControlSocket(runtime, target, offer, tcpSocket);
+  void startOffer(runtime, offer);
   return runtime.session;
 }
 
 export async function stopSendingTransfer(sessionId: string) {
   const runtime = activeSendRuntimes.get(sessionId);
-
   if (!runtime) {
     return;
   }
 
   runtime.stopping = true;
-
-  if (!isSendRuntimeSettled(runtime)) {
-    if (runtime.controlSocket) {
-      await writeControlMessage(runtime.controlSocket, {
-        kind: "canceled",
-        message: "Sender canceled the transfer.",
-      }).catch(() => {});
-    }
-  }
-
-  closeSendControlSocket(runtime);
   stopRelayPolling(runtime);
-  await stopSenderHttpRuntime(runtime, "Sender canceled the transfer.");
 
-  if (runtime.target.method === "preview") {
-    const receiverRuntime = activeReceiveRuntimes.get(runtime.target.sessionId);
-    if (
-      receiverRuntime &&
-      receiverRuntime.session.status === "waiting" &&
-      receiverRuntime.session.incomingOffer?.id === sessionId
-    ) {
-      resetReceiveToDiscoverable(receiverRuntime);
-    }
+  if (!isSendRuntimeSettled(runtime) && runtime.offerDelivered) {
+    await postDirectEvent(buildPeerAccessFromDiscovery(runtime.target), {
+      kind: "canceled",
+      message: "Sender canceled the transfer.",
+    }).catch(() => {});
   }
+
+  await unregisterDirectSendSession(runtime.session.id).catch(() => {});
 
   if (runtime.session.relay) {
     await deleteRelayTransferSession(runtime.session.relay).catch((error) => {
@@ -2079,137 +1627,67 @@ export async function startReceivingAvailability({
 }) {
   const sessionId = Crypto.randomUUID();
   const receiverToken = Crypto.randomUUID().replace(/-/g, "");
-  const deviceIp = getUsableLanHost(await Network.getIpAddressAsync().catch(() => null));
-  const tcpSocket = await loadTcpSocket();
-  const zeroconfModule = await loadZeroconf();
-  let resolvedPort = 0;
-  let server: TransferServer | null = null;
 
-  if (tcpSocket) {
-    server = tcpSocket.createTLSServer(
-      {
-        keystore: LOCAL_TRANSFER_KEYSTORE_ASSET,
-      },
-      (socket: TransferSocket) => {
-        let registeredOfferId: string | null = null;
-        const parser = createControlMessageParser((message) => {
-          const runtime = activeReceiveRuntimes.get(sessionId);
-          if (!runtime) {
-            socket.destroy();
-            return;
-          }
-
-          if (!registeredOfferId) {
-            const offerMessage = message as SenderControlMessage;
-            if (
-              offerMessage.kind !== "offer" ||
-              offerMessage.receiverSessionId !== sessionId ||
-              offerMessage.receiverToken !== receiverToken
-            ) {
-              void writeControlMessage(socket, {
-                kind: "failed",
-                message: "Unable to validate receiver.",
-              }).catch(() => {});
-              socket.destroy();
-              return;
-            }
-
-            if (!registerIncomingOffer(runtime, offerMessage.offer, socket)) {
-              void writeControlMessage(socket, {
-                kind: "busy",
-                message: "That receiver is busy right now.",
-              }).catch(() => {});
-              socket.destroy();
-              return;
-            }
-
-            registeredOfferId = offerMessage.offer.id;
-            void writeControlMessage(socket, {
-              kind: "offer-received",
-            }).catch(() => {});
-            return;
-          }
-
-          handleReceiveControlMessage(runtime, message as SenderControlMessage);
-        });
-
-        const handleData = (chunk: unknown) => {
-          try {
-            parser(chunk as Uint8Array | Buffer | string);
-          } catch (error) {
-            console.warn("Unable to decode sender control message", error);
-            socket.destroy();
-          }
-        };
-
-        const handleSocketEnded = () => {
-          const runtime = activeReceiveRuntimes.get(sessionId);
-          if (!runtime) {
-            return;
-          }
-
-          if (runtime.controlSocket === socket) {
-            runtime.controlSocket = undefined;
-            rejectPendingReceiveWaits(runtime, new Error("Sender is no longer available."));
-            runtime.activeDownloadAbortController?.abort();
-          }
-
-          if (runtime.session.status === "waiting" && runtime.session.incomingOffer?.id === registeredOfferId) {
-            resetReceiveToDiscoverable(runtime);
-          }
-        };
-
-        socket.on("data", handleData);
-        socket.on("error", handleSocketEnded);
-        socket.on("close", handleSocketEnded);
-      },
-    );
-
-    const controlServer = server;
-    await new Promise<void>((resolve, reject) => {
-      const handleError = (error: Error) => {
-        reject(error);
-      };
-
-      controlServer.once("error", handleError);
-      controlServer.listen({ port: 0, host: "0.0.0.0", reuseAddress: true }, () => {
-        controlServer.off("error", handleError);
-        resolve();
-      });
-    }).catch((error) => {
-      console.error("Failed to start receiver control server", error);
-    });
-
-    resolvedPort = controlServer.address()?.port ?? 0;
-  }
-
-  let serviceName: string | null = null;
-  let record = createReceiverDiscoveryRecord({
+  const direct = await registerDirectReceiveSession({
     sessionId,
-    method: "preview",
-    deviceName,
-    host: deviceIp ?? "0.0.0.0",
-    port: resolvedPort,
     token: receiverToken,
-    serviceName: null,
+    deviceName,
+    onOffer: async (offer) => {
+      const runtime = activeReceiveRuntimes.get(sessionId);
+      if (!runtime) {
+        return {
+          accepted: false,
+          statusCode: 404,
+          message: "That receiver is no longer available.",
+        };
+      }
+
+      return registerIncomingOffer(runtime, offer)
+        ? { accepted: true }
+        : {
+            accepted: false,
+            statusCode: 409,
+            message: "That receiver is busy right now.",
+          };
+    },
+    onEvent: async (event) => {
+      const runtime = activeReceiveRuntimes.get(sessionId);
+      if (!runtime) {
+        return;
+      }
+
+      await handleReceiverEvent(runtime, event as SenderToReceiverEvent);
+    },
+    onInterrupted: async (detail) => {
+      const runtime = activeReceiveRuntimes.get(sessionId);
+      if (!runtime) {
+        return;
+      }
+
+      await handleReceiveRegistrationInterrupted(runtime, detail);
+    },
   });
 
+  const zeroconfModule = await loadZeroconf();
+  let serviceName: string | null = null;
+
   const runtime: ReceiveRuntime = {
-    session: createInitialReceiveSession(record, !resolvedPort),
+    session: createInitialReceiveSession(
+      createReceiverDiscoveryRecord({
+        sessionId,
+        method: zeroconfModule ? "nearby" : "qr",
+        deviceName,
+        host: direct.host,
+        port: direct.port,
+        token: direct.token,
+        serviceName: null,
+      }),
+    ),
     updateSession,
-    ...(resolvedPort && server
-      ? {
-          server: {
-            close() {
-              server?.close();
-            },
-          },
-        }
-      : {}),
     stopping: false,
   };
 
-  if (resolvedPort && zeroconfModule) {
+  if (zeroconfModule) {
     serviceName = createServiceName(deviceName, sessionId);
     const publishedServiceName = serviceName;
     const zeroconf = new zeroconfModule.Zeroconf();
@@ -2218,12 +1696,11 @@ export async function startReceivingAvailability({
       LOCAL_TRANSFER_SERVICE_PROTOCOL,
       LOCAL_TRANSFER_SERVICE_DOMAIN,
       publishedServiceName,
-      resolvedPort,
+      direct.port,
       {
         sessionId,
         receiverToken,
         deviceName,
-        certificateFingerprint: LOCAL_TRANSFER_CERT_FINGERPRINT,
       },
       zeroconfModule.ImplType.DNSSD,
     );
@@ -2236,19 +1713,20 @@ export async function startReceivingAvailability({
         },
       },
     };
+
+    runtime.session = createInitialReceiveSession(
+      createReceiverDiscoveryRecord({
+        sessionId,
+        method: "nearby",
+        deviceName,
+        host: direct.host,
+        port: direct.port,
+        token: direct.token,
+        serviceName,
+      }),
+    );
   }
 
-  record = createReceiverDiscoveryRecord({
-    sessionId,
-    method: resolvedPort ? (zeroconfModule ? "nearby" : "qr") : "preview",
-    deviceName,
-    host: deviceIp ?? "0.0.0.0",
-    port: resolvedPort,
-    token: receiverToken,
-    serviceName,
-  });
-
-  runtime.session = createInitialReceiveSession(record, !resolvedPort);
   activeReceiveRuntimes.set(sessionId, runtime);
   updateSession?.(runtime.session);
   return runtime.session;
@@ -2256,13 +1734,12 @@ export async function startReceivingAvailability({
 
 export async function stopReceivingAvailability(sessionId: string) {
   const runtime = activeReceiveRuntimes.get(sessionId);
-
   if (!runtime) {
     return;
   }
 
   runtime.stopping = true;
-  rejectPendingReceiveWaits(runtime, new Error("Receiver is no longer available."));
+  rejectPendingRelayReady(runtime, new Error("Receiver is no longer available."));
   runtime.activeDownloadAbortController?.abort();
 
   if (runtime.session.incomingOffer) {
@@ -2270,17 +1747,20 @@ export async function stopReceivingAvailability(sessionId: string) {
       if (runtime.session.incomingOffer.sender.relay) {
         await declineRelayTransferSession(runtime.session.incomingOffer.sender.relay).catch(() => {});
       }
-      await notifySenderRejected(runtime, runtime.session.incomingOffer, "Receiver is no longer available.").catch(
-        () => {},
-      );
+      await postDirectEvent(runtime.session.incomingOffer.sender.direct, {
+        kind: "rejected",
+        message: "Receiver is no longer available.",
+      }).catch(() => {});
     } else if (runtime.session.status === "connecting" || runtime.session.status === "transferring") {
-      await notifySenderCanceled(runtime, "Receiver canceled the transfer.").catch(() => {});
+      await postDirectEvent(runtime.session.incomingOffer.sender.direct, {
+        kind: "canceled",
+        message: "Receiver canceled the transfer.",
+      }).catch(() => {});
     }
   }
 
-  closeReceiveControlSocket(runtime);
   runtime.zeroconf?.publisher.stop();
-  runtime.server?.close();
+  await unregisterDirectReceiveSession(sessionId).catch(() => {});
   activeReceiveRuntimes.delete(sessionId);
 }
 
@@ -2293,20 +1773,17 @@ export async function acceptIncomingTransferOffer(sessionId: string) {
   try {
     const result = await runReceiveTransfer(runtime);
 
-    if (runtime.controlSocket) {
-      const detail = result.detail;
-      await writeControlMessage(runtime.controlSocket, {
-        kind: "completed",
-        detail,
-      }).catch(() => {});
-    }
+    await postDirectEvent(runtime.session.incomingOffer.sender.direct, {
+      kind: "completed",
+      detail: result.detail,
+    }).catch(() => {});
 
     withReceiveSessionUpdate(runtime, {
       status: "completed",
       receivedFiles: result.receivedFiles,
       progress: {
         phase: "completed",
-        totalBytes: runtime.session.incomingOffer?.totalBytes ?? result.bytesTransferred,
+        totalBytes: runtime.session.incomingOffer.totalBytes,
         bytesTransferred: result.bytesTransferred,
         currentFileName: null,
         speedBytesPerSecond: 0,
@@ -2316,25 +1793,16 @@ export async function acceptIncomingTransferOffer(sessionId: string) {
     });
     return true;
   } catch (error) {
-    if (runtime.controlSocket && !(error instanceof DirectTransferFallbackError)) {
-      await writeControlMessage(runtime.controlSocket, {
+    const detail = error instanceof Error ? error.message : "The transfer could not be completed.";
+
+    if (!runtime.stopping && runtime.session.incomingOffer) {
+      await postDirectEvent(runtime.session.incomingOffer.sender.direct, {
         kind: "failed",
-        message: error instanceof Error ? error.message : "The transfer could not be completed.",
+        message: detail,
       }).catch(() => {});
     }
 
-    withReceiveSessionUpdate(runtime, {
-      status: "failed",
-      progress: {
-        phase: "failed",
-        totalBytes: runtime.session.incomingOffer?.totalBytes ?? 0,
-        bytesTransferred: runtime.session.progress.bytesTransferred,
-        currentFileName: null,
-        speedBytesPerSecond: 0,
-        detail: error instanceof Error ? error.message : "The transfer could not be completed.",
-        updatedAt: nowIso(),
-      },
-    });
+    failReceiveSession(runtime, detail);
     return false;
   }
 }
@@ -2346,12 +1814,14 @@ export async function declineIncomingTransferOffer(sessionId: string) {
   }
 
   const offer = runtime.session.incomingOffer;
-
   if (offer.sender.relay) {
     await declineRelayTransferSession(offer.sender.relay).catch(() => {});
   }
 
-  await notifySenderRejected(runtime, offer, "Transfer declined.").catch(() => {});
+  await postDirectEvent(offer.sender.direct, {
+    kind: "rejected",
+    message: "Transfer declined.",
+  }).catch(() => {});
   resetReceiveToDiscoverable(runtime);
   return true;
 }
@@ -2366,18 +1836,10 @@ export async function startNearbyScan({
   const currentRecords = new Map<string, DiscoveryRecord>();
 
   function emitCurrentRecords() {
-    for (const runtime of activeReceiveRuntimes.values()) {
-      if (runtime.session.discoveryRecord.method === "preview") {
-        currentRecords.set(runtime.session.id, runtime.session.discoveryRecord);
-      }
-    }
-
     onUpdate(
       Array.from(currentRecords.values()).sort((left, right) => right.advertisedAt.localeCompare(left.advertisedAt)),
     );
   }
-
-  emitCurrentRecords();
 
   const zeroconfModule = await loadZeroconf();
   if (!zeroconfModule) {
@@ -2387,30 +1849,22 @@ export async function startNearbyScan({
   }
 
   const zeroconf = new zeroconfModule.Zeroconf();
-  const handleResolved = (service: ZeroconfService) => {
-    const nextRecord = mapResolvedService(service);
+  zeroconf.on("resolved", (service) => {
+    const nextRecord = mapResolvedService(service as ZeroconfService);
     if (!nextRecord) {
       return;
     }
 
     currentRecords.set(nextRecord.sessionId, nextRecord);
     emitCurrentRecords();
-  };
-
-  const handleRemove = (serviceName: string) => {
+  });
+  zeroconf.on("remove", (serviceName) => {
     for (const [sessionId, record] of currentRecords) {
       if (record.serviceName === serviceName && record.method === "nearby") {
         currentRecords.delete(sessionId);
       }
     }
     emitCurrentRecords();
-  };
-
-  zeroconf.on("resolved", (service) => {
-    handleResolved(service as ZeroconfService);
-  });
-  zeroconf.on("remove", (serviceName) => {
-    handleRemove(serviceName as string);
   });
   zeroconf.on("error", (error) => {
     onError?.(error instanceof Error ? error : new Error("Nearby scanning failed."));
@@ -2436,7 +1890,6 @@ export function parseDiscoveryQrPayload(value: string) {
     port: number;
     token: string;
     deviceName: string;
-    certificateFingerprint: string;
     advertisedAt: string;
   };
 
@@ -2447,7 +1900,6 @@ export function parseDiscoveryQrPayload(value: string) {
     host: parsed.host,
     port: parsed.port,
     token: parsed.token,
-    certificateFingerprint: parsed.certificateFingerprint,
     advertisedAt: parsed.advertisedAt,
     serviceName: null,
   } satisfies DiscoveryRecord;
