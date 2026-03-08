@@ -39,13 +39,9 @@ export interface DiscoveryRecord {
   host: string;
   port: number;
   token: string;
-  fileCount: number;
-  totalBytes: number;
   certificateFingerprint: string;
   advertisedAt: string;
-  isPremiumSender: boolean;
   serviceName: string | null;
-  relay: RelayAccess | null;
 }
 
 export interface TransferProgress {
@@ -63,12 +59,40 @@ export interface TransferSession {
   direction: TransferDirection;
   status: TransferStatus;
   manifest: TransferManifest;
-  discoveryRecord?: DiscoveryRecord;
-  qrPayload: string;
   previewMode: boolean;
   peerDeviceName: string | null;
-  awaitingApproval: boolean;
+  awaitingReceiverResponse: boolean;
   relay: RelayCredentials | null;
+  progress: TransferProgress;
+}
+
+export interface SenderTransferAccess {
+  sessionId: string;
+  host: string;
+  port: number;
+  token: string;
+  certificateFingerprint: string;
+  relay: RelayAccess | null;
+}
+
+export interface IncomingTransferOffer {
+  id: string;
+  senderDeviceName: string;
+  fileCount: number;
+  totalBytes: number;
+  sender: SenderTransferAccess;
+  createdAt: string;
+}
+
+export interface ReceiveSession {
+  id: string;
+  status: TransferStatus;
+  discoveryRecord: DiscoveryRecord;
+  qrPayload: string;
+  previewMode: boolean;
+  incomingOffer: IncomingTransferOffer | null;
+  peerDeviceName: string | null;
+  receivedFiles: ReceivedFileRecord[];
   progress: TransferProgress;
 }
 

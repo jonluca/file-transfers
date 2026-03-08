@@ -11,15 +11,14 @@ import { hostedFile, subscriptionMembership } from "./db/schema";
 import { serverEnv } from "./env";
 import { createDownloadLink, readLocalStoredFile, storeUploadedFile } from "./storage/hosted-storage";
 import {
-  approveRelaySession,
+  acceptRelaySession,
   completeRelaySession,
   createRelaySession,
   deleteRelaySession,
+  declineRelaySession,
   getRelayDownloadPath,
   getRelayReceiverState,
   getRelaySenderState,
-  joinRelaySession,
-  rejectRelaySession,
   storeRelayFile,
 } from "./storage/relay-sessions";
 import { verifyHostedFilePasscode } from "./trpc/routers/hosted-files";
@@ -197,7 +196,7 @@ app.get("/relay/sessions/:sessionId/receiver", async (c) => {
   return c.json(state);
 });
 
-app.post("/relay/sessions/:sessionId/join", async (c) => {
+app.post("/relay/sessions/:sessionId/accept", async (c) => {
   const receiverToken = c.req.header("x-relay-token");
   if (!receiverToken) {
     return c.json({ error: "Missing relay token." }, 401);
@@ -207,7 +206,7 @@ app.post("/relay/sessions/:sessionId/join", async (c) => {
     receiverDeviceName?: string;
   };
 
-  const state = await joinRelaySession({
+  const state = await acceptRelaySession({
     sessionId: c.req.param("sessionId"),
     receiverToken,
     receiverDeviceName: payload.receiverDeviceName ?? "Nearby device",
@@ -219,32 +218,15 @@ app.post("/relay/sessions/:sessionId/join", async (c) => {
   return c.json(state);
 });
 
-app.post("/relay/sessions/:sessionId/approve", async (c) => {
-  const senderToken = c.req.header("x-relay-token");
-  if (!senderToken) {
+app.post("/relay/sessions/:sessionId/decline", async (c) => {
+  const receiverToken = c.req.header("x-relay-token");
+  if (!receiverToken) {
     return c.json({ error: "Missing relay token." }, 401);
   }
 
-  const state = await approveRelaySession({
+  const state = await declineRelaySession({
     sessionId: c.req.param("sessionId"),
-    senderToken,
-  });
-  if (!state) {
-    return c.json({ error: "Relay session not found." }, 404);
-  }
-
-  return c.json(state);
-});
-
-app.post("/relay/sessions/:sessionId/reject", async (c) => {
-  const senderToken = c.req.header("x-relay-token");
-  if (!senderToken) {
-    return c.json({ error: "Missing relay token." }, 401);
-  }
-
-  const state = await rejectRelaySession({
-    sessionId: c.req.param("sessionId"),
-    senderToken,
+    receiverToken,
   });
   if (!state) {
     return c.json({ error: "Relay session not found." }, 404);

@@ -5,15 +5,7 @@ import type { RelayAccess, RelayCredentials, SelectedTransferFile } from "./type
 export interface RelaySessionState {
   id: string;
   receiverDeviceName: string | null;
-  status:
-    | "waiting_receiver"
-    | "waiting_approval"
-    | "approved"
-    | "uploading"
-    | "ready"
-    | "rejected"
-    | "completed"
-    | "expired";
+  status: "waiting_receiver" | "accepted" | "uploading" | "ready" | "rejected" | "completed" | "expired";
   fileCount: number;
   totalBytes: number;
   files: Array<{
@@ -103,14 +95,14 @@ export async function getRelayReceiverState(relay: RelayAccess) {
   return parseRelayResponse<RelaySessionState>(response);
 }
 
-export async function joinRelayTransferSession({
+export async function acceptRelayTransferSession({
   relay,
   receiverDeviceName,
 }: {
   relay: RelayAccess;
   receiverDeviceName: string;
 }) {
-  const response = await fetch(getRelayUrl(`/relay/sessions/${relay.sessionId}/join`), {
+  const response = await fetch(getRelayUrl(`/relay/sessions/${relay.sessionId}/accept`), {
     method: "POST",
     headers: relayHeaders(relay.receiverToken),
     body: JSON.stringify({
@@ -121,22 +113,11 @@ export async function joinRelayTransferSession({
   return parseRelayResponse<RelaySessionState>(response);
 }
 
-export async function approveRelayTransferSession(relay: RelayCredentials) {
-  const response = await fetch(getRelayUrl(`/relay/sessions/${relay.sessionId}/approve`), {
+export async function declineRelayTransferSession(relay: RelayAccess) {
+  const response = await fetch(getRelayUrl(`/relay/sessions/${relay.sessionId}/decline`), {
     method: "POST",
     headers: {
-      "x-relay-token": relay.senderToken,
-    },
-  });
-
-  return parseRelayResponse<RelaySessionState>(response);
-}
-
-export async function rejectRelayTransferSession(relay: RelayCredentials) {
-  const response = await fetch(getRelayUrl(`/relay/sessions/${relay.sessionId}/reject`), {
-    method: "POST",
-    headers: {
-      "x-relay-token": relay.senderToken,
+      "x-relay-token": relay.receiverToken,
     },
   });
 

@@ -7,16 +7,18 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useEntitlements } from "@/hooks/queries";
 import { designFonts, designTheme } from "@/lib/design/theme";
 import {
-  approveTransferRequest,
+  acceptIncomingTransferOffer,
+  declineIncomingTransferOffer,
   formatBytes,
   parseDiscoveryQrPayload,
   pickTransferFiles,
-  receiveTransfer,
-  rejectTransferRequest,
-  startHostingTransfer,
+  startReceivingAvailability,
+  startSendingTransfer,
   startNearbyScan,
-  stopHostingTransfer,
+  stopReceivingAvailability,
+  stopSendingTransfer,
   type DiscoveryRecord,
+  type ReceiveSession,
   type SelectedTransferFile,
   type TransferHistoryEntry,
   type TransferProgress,
@@ -66,31 +68,21 @@ function createHistoryEntryFromSendSession(session: TransferSession): TransferHi
   };
 }
 
-function createHistoryEntryFromReceive({
-  record,
-  progress,
-  receivedFiles,
-  status,
-  detail,
-}: {
-  record: DiscoveryRecord;
-  progress: TransferProgress;
-  receivedFiles: TransferHistoryEntry["files"];
-  status: TransferHistoryEntry["status"];
-  detail: string | null;
-}): TransferHistoryEntry {
+function createHistoryEntryFromReceiveSession(session: ReceiveSession): TransferHistoryEntry {
+  const offer = session.incomingOffer;
+
   return {
-    id: record.sessionId,
+    id: session.id,
     direction: "receive",
-    status,
-    deviceName: record.deviceName,
-    fileCount: record.fileCount,
-    totalBytes: record.totalBytes,
-    bytesTransferred: progress.bytesTransferred,
-    files: receivedFiles,
-    createdAt: record.advertisedAt,
-    updatedAt: new Date().toISOString(),
-    detail,
+    status: session.status === "idle" ? "failed" : session.status,
+    deviceName: offer?.senderDeviceName ?? session.peerDeviceName ?? "Nearby device",
+    fileCount: offer?.fileCount ?? 0,
+    totalBytes: offer?.totalBytes ?? 0,
+    bytesTransferred: session.progress.bytesTransferred,
+    files: session.receivedFiles,
+    createdAt: offer?.createdAt ?? session.progress.updatedAt,
+    updatedAt: session.progress.updatedAt,
+    detail: session.progress.detail,
   };
 }
 
@@ -201,11 +193,9 @@ function NearbyDeviceRow({ record, onPress }: { record: DiscoveryRecord; onPress
       </View>
       <View style={styles.deviceCopy}>
         <Text style={styles.deviceName}>{record.deviceName}</Text>
-        <Text style={styles.deviceMeta}>
-          {record.fileCount} file{record.fileCount === 1 ? "" : "s"} · {formatBytes(record.totalBytes)}
-        </Text>
+        <Text style={styles.deviceMeta}>Ready to receive files</Text>
       </View>
-      <ArrowDown color={designTheme.primary} size={20} strokeWidth={2} />
+      <ArrowUp color={designTheme.primary} size={20} strokeWidth={2} />
     </Pressable>
   );
 }
@@ -274,14 +264,15 @@ export default function TransferScreen() {
   const [mode, setMode] = useState<TransferMode>("idle");
   const [stagedFiles, setStagedFiles] = useState<SelectedTransferFile[]>([]);
   const [activeSendSession, setActiveSendSession] = useState<TransferSession | null>(null);
+  const [activeReceiveSession, setActiveReceiveSession] = useState<ReceiveSession | null>(null);
   const [nearbyRecords, setNearbyRecords] = useState<DiscoveryRecord[]>([]);
-  const [activeReceiveRecord, setActiveReceiveRecord] = useState<DiscoveryRecord | null>(null);
   const [transferProgress, setTransferProgress] = useState<TransferProgress | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [showQrScanner, setShowQrScanner] = useState(false);
   const [showQrCode, setShowQrCode] = useState(false);
   const completionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const handledFinalizedSessionIds = useRef(new Set<string>());
+  const handledFinalizedSendSessionIds = useRef(new Set<string>());
+  const handledFinalizedReceiveSessionIds = useRef(new Set<string>());
   const scannedQrRef = useRef(false);
 
   useEffect(() => {
@@ -294,7 +285,7 @@ export default function TransferScreen() {
           return;
         }
 
-        setNearbyRecords(records.filter((record) => record.sessionId !== activeSendSession?.id));
+        setNearbyRecords(records.filter((record) => record.sessionId !== activeReceiveSession?.id));
       },
       onError(error) {
         if (!cancelled) {
@@ -309,7 +300,7 @@ export default function TransferScreen() {
       cancelled = true;
       cleanup?.();
     };
-  }, [activeSendSession?.id]);
+  }, [activeReceiveSession?.id]);
 
   useEffect(() => {
     return () => {
@@ -320,6 +311,92 @@ export default function TransferScreen() {
   }, []);
 
   const totalStagedBytes = useMemo(() => stagedFiles.reduce((sum, file) => sum + file.sizeBytes, 0), [stagedFiles]);
+  const isPremiumUser = Boolean(entitlementsQuery.data?.isPremium);
+
+  function handleSendSessionUpdate(nextSession: TransferSession) {
+    setActiveSendSession({ ...nextSession });
+    setTransferProgress(nextSession.progress);
+
+    if (["waiting", "connecting"].includes(nextSession.status)) {
+      setMode("waiting");
+      return;
+    }
+
+    if (nextSession.status === "transferring") {
+      setMode("transferring");
+      return;
+    }
+
+    if (
+      ["completed", "failed", "canceled"].includes(nextSession.status) &&
+      !handledFinalizedSendSessionIds.current.has(nextSession.id)
+    ) {
+      handledFinalizedSendSessionIds.current.add(nextSession.id);
+      upsertRecentTransfer(createHistoryEntryFromSendSession(nextSession));
+    }
+
+    void stopSendingTransfer(nextSession.id);
+
+    if (nextSession.status === "completed") {
+      setNotice(getTransferDetail(nextSession.progress.detail, "Transfer complete."));
+      setMode("transferring");
+      scheduleReset({ clearFiles: true, nextMode: "idle" });
+      return;
+    }
+
+    if (nextSession.status === "failed") {
+      setNotice(getTransferDetail(nextSession.progress.detail, "The transfer could not be completed."));
+      setActiveSendSession(null);
+      setTransferProgress(null);
+      setMode("sending");
+      return;
+    }
+
+    setActiveSendSession(null);
+    setTransferProgress(null);
+    setMode(stagedFiles.length > 0 ? "sending" : "idle");
+  }
+
+  function handleReceiveSessionUpdate(nextSession: ReceiveSession) {
+    setActiveReceiveSession({ ...nextSession });
+    setTransferProgress(nextSession.progress);
+
+    if (nextSession.status === "discoverable" || nextSession.status === "waiting") {
+      setMode("receiving");
+      return;
+    }
+
+    if (nextSession.status === "connecting" || nextSession.status === "transferring") {
+      setMode("transferring");
+      return;
+    }
+
+    if (
+      ["completed", "failed", "canceled"].includes(nextSession.status) &&
+      !handledFinalizedReceiveSessionIds.current.has(nextSession.id)
+    ) {
+      handledFinalizedReceiveSessionIds.current.add(nextSession.id);
+      upsertRecentTransfer(createHistoryEntryFromReceiveSession(nextSession));
+    }
+
+    if (nextSession.status === "completed") {
+      void stopReceivingAvailability(nextSession.id);
+      setNotice(getTransferDetail(nextSession.progress.detail, "Transfer complete."));
+      setMode("transferring");
+      scheduleReset({ clearFiles: false, nextMode: "idle" });
+      return;
+    }
+
+    if (nextSession.status === "failed") {
+      void stopReceivingAvailability(nextSession.id);
+      setActiveReceiveSession(null);
+      setTransferProgress(null);
+      setNotice(getTransferDetail(nextSession.progress.detail, "The transfer could not be completed."));
+      setMode("receiving");
+      void beginReceivingAvailability({ preserveNotice: true }).catch(() => {});
+      return;
+    }
+  }
 
   function scheduleReset({ clearFiles, nextMode }: { clearFiles: boolean; nextMode: TransferMode }) {
     if (completionTimeoutRef.current) {
@@ -328,9 +405,10 @@ export default function TransferScreen() {
 
     completionTimeoutRef.current = setTimeout(() => {
       setActiveSendSession(null);
-      setActiveReceiveRecord(null);
+      setActiveReceiveSession(null);
       setTransferProgress(null);
       setNotice(null);
+      setShowQrScanner(false);
       setShowQrCode(false);
       if (clearFiles) {
         setStagedFiles([]);
@@ -371,11 +449,15 @@ export default function TransferScreen() {
     }
 
     if (activeSendSession) {
-      await stopHostingTransfer(activeSendSession.id);
+      await stopSendingTransfer(activeSendSession.id);
+    }
+
+    if (activeReceiveSession) {
+      await stopReceivingAvailability(activeReceiveSession.id);
     }
 
     setActiveSendSession(null);
-    setActiveReceiveRecord(null);
+    setActiveReceiveSession(null);
     setTransferProgress(null);
     setNotice(null);
     setShowQrScanner(false);
@@ -383,173 +465,85 @@ export default function TransferScreen() {
     setMode(stagedFiles.length > 0 ? "sending" : "idle");
   }
 
-  async function handleStartWaiting() {
+  async function beginReceivingAvailability({ preserveNotice = false }: { preserveNotice?: boolean } = {}) {
+    if (!preserveNotice) {
+      setNotice(null);
+    }
+    setTransferProgress(null);
+    setShowQrScanner(false);
+    setShowQrCode(false);
+    setMode("receiving");
+
+    if (activeReceiveSession) {
+      await stopReceivingAvailability(activeReceiveSession.id);
+    }
+
+    const session = await startReceivingAvailability({
+      deviceName,
+      updateSession: handleReceiveSessionUpdate,
+    });
+
+    setActiveReceiveSession(session);
+    setTransferProgress(session.progress);
+
+    if (session.previewMode && !preserveNotice) {
+      setNotice("Nearby discovery is unavailable here. QR sharing still works when local sockets are available.");
+    }
+  }
+
+  async function handleStartReceiving() {
+    try {
+      await beginReceivingAvailability();
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Unable to get ready to receive.");
+      setMode("idle");
+    }
+  }
+
+  async function handleSendToReceiver(record: DiscoveryRecord) {
     if (stagedFiles.length === 0) {
       return;
     }
 
     setNotice(null);
     setTransferProgress(null);
+    setShowQrScanner(false);
     setMode("waiting");
 
-    const session = await startHostingTransfer({
-      files: stagedFiles,
-      deviceName,
-      isPremium: Boolean(entitlementsQuery.data?.isPremium),
-      updateSession: (nextSession) => {
-        setActiveSendSession({ ...nextSession });
-        setTransferProgress(nextSession.progress);
-
-        if (
-          nextSession.status === "discoverable" ||
-          nextSession.status === "waiting" ||
-          nextSession.status === "connecting"
-        ) {
-          setMode("waiting");
-          return;
-        }
-
-        if (nextSession.status === "transferring") {
-          setMode("transferring");
-          return;
-        }
-
-        if (
-          ["completed", "failed", "canceled"].includes(nextSession.status) &&
-          !handledFinalizedSessionIds.current.has(nextSession.id)
-        ) {
-          handledFinalizedSessionIds.current.add(nextSession.id);
-          upsertRecentTransfer(createHistoryEntryFromSendSession(nextSession));
-        }
-
-        void stopHostingTransfer(nextSession.id);
-
-        if (nextSession.status === "completed") {
-          setNotice(nextSession.progress.detail ?? "Transfer complete.");
-          setMode("transferring");
-          scheduleReset({ clearFiles: true, nextMode: "idle" });
-          return;
-        }
-
-        if (nextSession.status === "failed") {
-          setNotice(nextSession.progress.detail ?? "The transfer could not be completed.");
-          setActiveSendSession(null);
-          setTransferProgress(null);
-          setMode("sending");
-          return;
-        }
-
-        setActiveSendSession(null);
-        setTransferProgress(null);
-        setMode("idle");
-      },
-    });
-
-    setActiveSendSession(session);
-
-    if (session.previewMode && session.relay) {
-      setNotice("Nearby WiFi discovery is unavailable here. Use the QR code to connect through relay.");
-      return;
-    }
-
-    if (session.previewMode) {
-      setNotice("Nearby transfer is unavailable on this build.");
-    }
-  }
-
-  async function handleApproveTransfer() {
-    if (!activeSendSession) {
-      return;
-    }
-
-    const didApprove = await approveTransferRequest(activeSendSession.id);
-    if (!didApprove) {
-      setNotice("That receiver is no longer waiting.");
-    }
-  }
-
-  async function handleRejectTransfer() {
-    if (!activeSendSession) {
-      return;
-    }
-
-    await rejectTransferRequest(activeSendSession.id);
-    setNotice(null);
-  }
-
-  async function beginReceiveTransfer(record: DiscoveryRecord) {
-    setNotice(null);
-    setShowQrScanner(false);
-    setActiveReceiveRecord(record);
-    setMode("transferring");
-
-    const initialProgress: TransferProgress = {
-      phase: "connecting",
-      totalBytes: record.totalBytes,
-      bytesTransferred: 0,
-      currentFileName: null,
-      speedBytesPerSecond: 0,
-      detail: "Connecting to the sender.",
-      updatedAt: new Date().toISOString(),
-    };
-
-    setTransferProgress(initialProgress);
-
     try {
-      const result = await receiveTransfer({
-        record,
+      const session = await startSendingTransfer({
+        files: stagedFiles,
+        target: record,
         deviceName,
-        onProgress: setTransferProgress,
+        isPremium: isPremiumUser,
+        updateSession: handleSendSessionUpdate,
       });
 
-      const finalProgress: TransferProgress = {
-        phase: "completed",
-        totalBytes: record.totalBytes,
-        bytesTransferred: result.bytesTransferred,
-        currentFileName: null,
-        speedBytesPerSecond: 0,
-        detail: result.detail,
-        updatedAt: new Date().toISOString(),
-      };
-
-      setTransferProgress(finalProgress);
-      setNotice(getTransferDetail(result.detail, "Transfer complete."));
-      upsertRecentTransfer(
-        createHistoryEntryFromReceive({
-          record,
-          progress: finalProgress,
-          receivedFiles: result.receivedFiles,
-          status: "completed",
-          detail: result.detail,
-        }),
-      );
-      scheduleReset({ clearFiles: false, nextMode: "idle" });
+      setActiveSendSession(session);
+      setTransferProgress(session.progress);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "The transfer could not be completed.";
-      const failedProgress: TransferProgress = {
-        phase: "failed",
-        totalBytes: record.totalBytes,
-        bytesTransferred: transferProgress?.bytesTransferred ?? 0,
-        currentFileName: null,
-        speedBytesPerSecond: 0,
-        detail: message,
-        updatedAt: new Date().toISOString(),
-      };
-
+      setActiveSendSession(null);
       setTransferProgress(null);
-      setActiveReceiveRecord(null);
-      setMode("receiving");
-      setNotice(message);
-      upsertRecentTransfer(
-        createHistoryEntryFromReceive({
-          record,
-          progress: failedProgress,
-          receivedFiles: [],
-          status: "failed",
-          detail: message,
-        }),
-      );
+      setMode("sending");
+      setNotice(error instanceof Error ? error.message : "Unable to start this transfer.");
     }
+  }
+
+  async function handleAcceptIncomingOffer() {
+    if (!activeReceiveSession) {
+      return;
+    }
+
+    await acceptIncomingTransferOffer(activeReceiveSession.id);
+  }
+
+  async function handleDeclineIncomingOffer() {
+    if (!activeReceiveSession) {
+      return;
+    }
+
+    await declineIncomingTransferOffer(activeReceiveSession.id);
+    setNotice(null);
   }
 
   async function handleScanQrPress() {
@@ -576,25 +570,28 @@ export default function TransferScreen() {
 
     try {
       const record = parseDiscoveryQrPayload(value);
-      void beginReceiveTransfer(record);
+      void handleSendToReceiver(record);
     } catch {
-      setNotice("That QR code does not contain a valid transfer.");
+      setNotice("That QR code does not contain a valid receiver.");
       scannedQrRef.current = false;
     }
   }
 
-  const currentProgress = transferProgress ?? activeSendSession?.progress ?? null;
+  const currentProgress = transferProgress ?? activeSendSession?.progress ?? activeReceiveSession?.progress ?? null;
   const progressPercent =
     currentProgress && currentProgress.totalBytes > 0
       ? Math.round((currentProgress.bytesTransferred / currentProgress.totalBytes) * 100)
       : 0;
-  const canShowTransferQr = Boolean(
-    activeSendSession?.qrPayload && (!activeSendSession.previewMode || activeSendSession.relay),
-  );
-  const currentTransferName = activeReceiveRecord?.deviceName ?? activeSendSession?.peerDeviceName ?? "Nearby device";
+  const canShowReceiverQr = Boolean(activeReceiveSession?.qrPayload);
+  const incomingOffer = activeReceiveSession?.incomingOffer;
+  const currentTransferName =
+    activeSendSession?.peerDeviceName ??
+    activeReceiveSession?.peerDeviceName ??
+    activeReceiveSession?.incomingOffer?.senderDeviceName ??
+    "Nearby device";
   const transferTitle =
     currentProgress?.phase === "waiting"
-      ? "Waiting for approval"
+      ? "Waiting for response"
       : progressPercent >= 100
         ? "Complete!"
         : "Transferring...";
@@ -604,7 +601,7 @@ export default function TransferScreen() {
       <View style={[styles.root, { paddingTop: insets.top, paddingBottom: compactBottomPadding }]}>
         <View style={styles.idleWrap}>
           <LargeActionCard
-            icon={<ArrowUp color={designTheme.primaryForeground} size={64} strokeWidth={1.5} />}
+            icon={<ArrowUp color={designTheme.primaryForeground} size={56} strokeWidth={1.5} />}
             label={"Send files"}
             primary
             onPress={() => {
@@ -612,12 +609,10 @@ export default function TransferScreen() {
             }}
           />
           <LargeActionCard
-            icon={<ArrowDown color={designTheme.foreground} size={64} strokeWidth={1.5} />}
+            icon={<ArrowDown color={designTheme.foreground} size={56} strokeWidth={1.5} />}
             label={"Receive files"}
             onPress={() => {
-              setNotice(null);
-              setShowQrScanner(false);
-              setMode("receiving");
+              void handleStartReceiving();
             }}
           />
           {notice ? <Text style={styles.centerNotice}>{notice}</Text> : null}
@@ -656,13 +651,54 @@ export default function TransferScreen() {
           >
             <Text style={styles.addFilesLabel}>Add more files</Text>
           </Pressable>
+
+          <View style={styles.discoverySection}>
+            <Text style={styles.discoveryTitle}>Choose a receiver</Text>
+            <Text style={styles.discoveryHint}>Pick a nearby device or scan its QR code.</Text>
+          </View>
+
+          {nearbyRecords.length > 0 ? (
+            <View style={styles.stack}>
+              {nearbyRecords.map((record) => (
+                <NearbyDeviceRow
+                  key={`${record.sessionId}-${record.method}`}
+                  record={record}
+                  onPress={() => void handleSendToReceiver(record)}
+                />
+              ))}
+            </View>
+          ) : (
+            <View style={styles.emptySearchState}>
+              <View style={styles.emptySearchIcon}>
+                <ArrowUp color={designTheme.mutedForeground} size={32} strokeWidth={1.8} />
+              </View>
+              <Text style={styles.emptySearchLabel}>Looking for receivers...</Text>
+            </View>
+          )}
+
+          {showQrScanner ? (
+            <View style={styles.scannerCard}>
+              <Text style={styles.scannerTitle}>Scan a receiver QR code</Text>
+              <View style={styles.cameraWrap}>
+                <CameraView
+                  style={styles.camera}
+                  barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
+                  onBarcodeScanned={({ data }) => handleQrCodeValue(data)}
+                />
+              </View>
+              <Text style={styles.scannerHint}>Point the camera at the receiver&apos;s QR code.</Text>
+            </View>
+          ) : null}
         </ScrollView>
 
         <View style={[styles.footerArea, { paddingBottom: footerBottomPadding }]}>
           <Text style={styles.footerMeta}>
             {stagedFiles.length} file{stagedFiles.length === 1 ? "" : "s"} · {formatBytes(totalStagedBytes)}
           </Text>
-          <PrimaryButton label={"Continue"} onPress={() => void handleStartWaiting()} />
+          <OutlineButton
+            label={showQrScanner ? "Hide QR scanner" : "Scan receiver QR code"}
+            onPress={() => void handleScanQrPress()}
+          />
           {notice ? <Text style={styles.footerNotice}>{notice}</Text> : null}
         </View>
       </View>
@@ -670,48 +706,18 @@ export default function TransferScreen() {
   }
 
   if (mode === "waiting") {
-    if (activeSendSession?.awaitingApproval && activeSendSession.peerDeviceName) {
-      return (
-        <View style={[styles.root, { paddingTop: insets.top, paddingBottom: regularBottomPadding }]}>
-          <View style={styles.centerWrap}>
-            <View style={styles.transferAvatar}>
-              <Text style={styles.transferAvatarLabel}>{activeSendSession.peerDeviceName.charAt(0).toUpperCase()}</Text>
-            </View>
-
-            <Text style={styles.centerTitle}>{activeSendSession.peerDeviceName}</Text>
-            <Text style={styles.centerSubtitle}>wants to receive your files</Text>
-
-            <View style={styles.approvalActions}>
-              <View style={styles.approvalAction}>
-                <OutlineButton
-                  label={"Decline"}
-                  icon={<X color={designTheme.foreground} size={18} strokeWidth={2} />}
-                  onPress={() => {
-                    void handleRejectTransfer();
-                  }}
-                />
-              </View>
-              <View style={styles.approvalAction}>
-                <PrimaryButton
-                  label={"Send"}
-                  icon={<ArrowUp color={designTheme.primaryForeground} size={18} strokeWidth={2} />}
-                  onPress={() => {
-                    void handleApproveTransfer();
-                  }}
-                />
-              </View>
-            </View>
-          </View>
-        </View>
-      );
-    }
-
     return (
       <View style={[styles.root, { paddingTop: insets.top, paddingBottom: regularBottomPadding }]}>
         <View style={styles.centerWrap}>
           <WaitingPulse />
-          <Text style={styles.centerTitle}>Waiting for receiver</Text>
-          <Text style={styles.centerSubtitle}>Ask someone nearby to tap Receive</Text>
+          <Text style={styles.centerTitle}>
+            {activeSendSession?.awaitingReceiverResponse ? "Waiting for receiver" : "Preparing transfer"}
+          </Text>
+          <Text style={styles.centerSubtitle}>
+            {activeSendSession?.awaitingReceiverResponse
+              ? `${activeSendSession.peerDeviceName ?? "Nearby device"} needs to accept this transfer.`
+              : (currentProgress?.detail ?? "Connecting to the receiver.")}
+          </Text>
           <Text style={styles.centerMeta}>
             {stagedFiles.length} file{stagedFiles.length === 1 ? "" : "s"} · {formatBytes(totalStagedBytes)}
           </Text>
@@ -721,21 +727,6 @@ export default function TransferScreen() {
               void handleCancel();
             }}
           />
-          {canShowTransferQr ? (
-            <>
-              <Pressable
-                onPress={() => setShowQrCode((current) => !current)}
-                style={({ pressed }) => [styles.textButton, pressed ? styles.pressed : null]}
-              >
-                <Text style={styles.textButtonLabel}>{showQrCode ? "Hide QR code" : "Show QR code"}</Text>
-              </Pressable>
-              {showQrCode ? (
-                <View style={styles.qrCard}>
-                  <QRCode value={activeSendSession?.qrPayload ?? ""} size={172} color={designTheme.foreground} />
-                </View>
-              ) : null}
-            </>
-          ) : null}
           {notice ? <Text style={styles.centerNotice}>{notice}</Text> : null}
         </View>
       </View>
@@ -743,10 +734,51 @@ export default function TransferScreen() {
   }
 
   if (mode === "receiving") {
+    if (incomingOffer && activeReceiveSession?.status === "waiting") {
+      return (
+        <View style={[styles.root, { paddingTop: insets.top, paddingBottom: regularBottomPadding }]}>
+          <View style={styles.centerWrap}>
+            <View style={styles.transferAvatar}>
+              <Text style={styles.transferAvatarLabel}>{incomingOffer.senderDeviceName.charAt(0).toUpperCase()}</Text>
+            </View>
+
+            <Text style={styles.centerTitle}>{incomingOffer.senderDeviceName}</Text>
+            <Text style={styles.centerSubtitle}>wants to send files to this device</Text>
+            <Text style={styles.centerMeta}>
+              {incomingOffer.fileCount} file{incomingOffer.fileCount === 1 ? "" : "s"} ·{" "}
+              {formatBytes(incomingOffer.totalBytes)}
+            </Text>
+
+            <View style={styles.approvalActions}>
+              <View style={styles.approvalAction}>
+                <OutlineButton
+                  label={"Decline"}
+                  icon={<X color={designTheme.foreground} size={18} strokeWidth={2} />}
+                  onPress={() => {
+                    void handleDeclineIncomingOffer();
+                  }}
+                />
+              </View>
+              <View style={styles.approvalAction}>
+                <PrimaryButton
+                  label={"Accept"}
+                  icon={<ArrowDown color={designTheme.primaryForeground} size={18} strokeWidth={2} />}
+                  onPress={() => {
+                    void handleAcceptIncomingOffer();
+                  }}
+                />
+              </View>
+            </View>
+            {notice ? <Text style={styles.centerNotice}>{notice}</Text> : null}
+          </View>
+        </View>
+      );
+    }
+
     return (
       <View style={[styles.root, { paddingTop: insets.top + 16 }]}>
         <View style={styles.topBar}>
-          <Text style={styles.sectionTitle}>Nearby devices</Text>
+          <Text style={styles.sectionTitle}>Ready to receive</Text>
           <HeaderButton
             onPress={() => {
               void handleCancel();
@@ -759,54 +791,37 @@ export default function TransferScreen() {
           contentContainerStyle={{ paddingBottom: 24 }}
           style={styles.flex}
         >
-          {nearbyRecords.length > 0 ? (
-            <View style={styles.stack}>
-              {nearbyRecords.map((record) => (
-                <NearbyDeviceRow
-                  key={`${record.sessionId}-${record.method}`}
-                  record={record}
-                  onPress={() => void beginReceiveTransfer(record)}
-                />
-              ))}
-            </View>
-          ) : (
-            <View style={styles.emptySearchState}>
-              <View style={styles.emptySearchIcon}>
-                <ArrowDown color={designTheme.mutedForeground} size={32} strokeWidth={1.8} />
-              </View>
-              <Text style={styles.emptySearchLabel}>Looking for devices...</Text>
-            </View>
-          )}
+          <View style={styles.discoverySection}>
+            <Text style={styles.discoveryTitle}>{deviceName}</Text>
+            <Text style={styles.discoveryHint}>Senders can choose this device from nearby discovery or with QR.</Text>
+          </View>
 
-          {showQrScanner ? (
-            <View style={styles.scannerCard}>
-              <Text style={styles.scannerTitle}>Scan a transfer QR code</Text>
-              <View style={styles.cameraWrap}>
-                <CameraView
-                  style={styles.camera}
-                  barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
-                  onBarcodeScanned={({ data }) => handleQrCodeValue(data)}
-                />
-              </View>
-              <Text style={styles.scannerHint}>Point the camera at the sender&apos;s QR code.</Text>
+          <View style={styles.emptySearchState}>
+            <View style={styles.emptySearchIcon}>
+              <ArrowDown color={designTheme.primary} size={32} strokeWidth={1.8} />
             </View>
+            <Text style={styles.emptySearchLabel}>Listening for incoming transfers...</Text>
+          </View>
+
+          {canShowReceiverQr ? (
+            <>
+              <Pressable
+                onPress={() => setShowQrCode((current) => !current)}
+                style={({ pressed }) => [styles.textButton, pressed ? styles.pressed : null]}
+              >
+                <Text style={styles.textButtonLabel}>{showQrCode ? "Hide QR code" : "Show QR code"}</Text>
+              </Pressable>
+              {showQrCode ? (
+                <View style={styles.qrCard}>
+                  <QRCode value={activeReceiveSession?.qrPayload ?? ""} size={172} color={designTheme.foreground} />
+                </View>
+              ) : null}
+            </>
           ) : null}
 
           {notice ? <Text style={styles.receivingNotice}>{notice}</Text> : null}
         </ScrollView>
-
-        <Pressable
-          onPress={() => void handleScanQrPress()}
-          style={({ pressed }) => [
-            styles.bottomLink,
-            { paddingBottom: bottomLinkPadding },
-            pressed ? styles.pressed : null,
-          ]}
-        >
-          <Text style={styles.bottomLinkLabel}>
-            {showQrScanner ? "Hide QR scanner" : "Can't find device? Scan QR code"}
-          </Text>
-        </Pressable>
+        <View style={{ paddingBottom: bottomLinkPadding }} />
       </View>
     );
   }
@@ -866,16 +881,18 @@ const styles = StyleSheet.create({
   idleWrap: {
     alignItems: "center",
     flex: 1,
-    gap: 24,
+    gap: 18,
     justifyContent: "center",
   },
   actionCard: {
     alignItems: "center",
-    aspectRatio: 1,
     borderRadius: 24,
-    gap: 16,
+    gap: 12,
     justifyContent: "center",
-    maxWidth: 320,
+    maxWidth: 280,
+    minHeight: 220,
+    paddingHorizontal: 24,
+    paddingVertical: 28,
     width: "100%",
   },
   primaryActionCard: {
@@ -894,7 +911,7 @@ const styles = StyleSheet.create({
   actionCardLabel: {
     color: designTheme.foreground,
     fontFamily: designFonts.medium,
-    fontSize: 30,
+    fontSize: 26,
   },
   primaryActionLabel: {
     color: designTheme.primaryForeground,
@@ -983,6 +1000,22 @@ const styles = StyleSheet.create({
     fontSize: 13,
     lineHeight: 18,
     textAlign: "center",
+  },
+  discoverySection: {
+    gap: 6,
+    marginBottom: 20,
+    marginTop: 28,
+  },
+  discoveryTitle: {
+    color: designTheme.foreground,
+    fontFamily: designFonts.semibold,
+    fontSize: 20,
+  },
+  discoveryHint: {
+    color: designTheme.mutedForeground,
+    fontFamily: designFonts.regular,
+    fontSize: 14,
+    lineHeight: 20,
   },
   primaryButton: {
     alignItems: "center",

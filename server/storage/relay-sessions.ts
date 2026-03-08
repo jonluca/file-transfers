@@ -7,8 +7,7 @@ const RELAY_SESSION_TTL_MS = 1000 * 60 * 30;
 
 type RelaySessionStatus =
   | "waiting_receiver"
-  | "waiting_approval"
-  | "approved"
+  | "accepted"
   | "uploading"
   | "ready"
   | "rejected"
@@ -170,7 +169,7 @@ export async function getRelayReceiverState(sessionId: string, receiverToken: st
   return relaySessionPublicState(record);
 }
 
-export async function joinRelaySession({
+export async function acceptRelaySession({
   sessionId,
   receiverToken,
   receiverDeviceName,
@@ -186,7 +185,7 @@ export async function joinRelaySession({
 
   const nextStatus =
     record.status === "waiting_receiver" || record.status === "rejected"
-      ? "waiting_approval"
+      ? "accepted"
       : record.status === "expired"
         ? "expired"
         : record.status;
@@ -200,30 +199,16 @@ export async function joinRelaySession({
   return relaySessionPublicState(updatedRecord);
 }
 
-export async function approveRelaySession({ sessionId, senderToken }: { sessionId: string; senderToken: string }) {
+export async function declineRelaySession({ sessionId, receiverToken }: { sessionId: string; receiverToken: string }) {
   const record = await readRelaySession(sessionId);
-  if (!record || record.senderToken !== senderToken) {
-    return null;
-  }
-
-  const updatedRecord: RelaySessionRecord = {
-    ...record,
-    status: record.status === "ready" ? "ready" : record.status === "uploading" ? "uploading" : "approved",
-  };
-
-  await writeRelayRecord(updatedRecord);
-  return relaySessionPublicState(updatedRecord);
-}
-
-export async function rejectRelaySession({ sessionId, senderToken }: { sessionId: string; senderToken: string }) {
-  const record = await readRelaySession(sessionId);
-  if (!record || record.senderToken !== senderToken) {
+  if (!record || record.receiverToken !== receiverToken) {
     return null;
   }
 
   const updatedRecord: RelaySessionRecord = {
     ...record,
     status: "rejected",
+    receiverDeviceName: null,
   };
 
   await writeRelayRecord(updatedRecord);
@@ -243,6 +228,10 @@ export async function storeRelayFile({
 }) {
   const record = await readRelaySession(sessionId);
   if (!record || record.senderToken !== senderToken) {
+    return null;
+  }
+
+  if (!["accepted", "uploading", "ready"].includes(record.status)) {
     return null;
   }
 
