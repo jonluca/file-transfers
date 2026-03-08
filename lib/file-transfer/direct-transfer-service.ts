@@ -10,7 +10,7 @@ import {
   createRelayTransferSession,
   declineRelayTransferSession,
   deleteRelayTransferSession,
-  downloadRelayTransferFile,
+  fetchRelayTransferFile,
   getRelayReceiverState,
   getRelaySenderState,
   uploadRelayTransferFile,
@@ -18,18 +18,17 @@ import {
 import {
   LOCAL_TRANSFER_CERT_FINGERPRINT,
   LOCAL_TRANSFER_CERTIFICATE_ASSET,
-  LOCAL_TRANSFER_CHUNK_SIZE_BYTES,
   LOCAL_TRANSFER_KEEP_AWAKE_TAG,
   LOCAL_TRANSFER_KEYSTORE_ASSET,
   LOCAL_TRANSFER_SERVICE_DOMAIN,
   LOCAL_TRANSFER_SERVICE_PROTOCOL,
   LOCAL_TRANSFER_SERVICE_TYPE,
-  LOCAL_TRANSFER_SPEED_LIMIT_BYTES_PER_SECOND,
 } from "./constants";
-import { getReceivedFilesDirectory } from "./files";
-import { createFrameParser, decodeJsonFrame, encodeChunkFrame, encodeJsonFrame } from "./protocol";
+import { createReceivedFileRecord, getReceivedFilesDirectory } from "./files";
+import { startLocalHttpSession, stopLocalHttpSession, type LocalHttpSession } from "./local-http-runtime";
 import type {
   DiscoveryRecord,
+  DownloadableTransferManifest,
   IncomingTransferOffer,
   ReceiveSession,
   ReceivedFileRecord,
@@ -38,6 +37,7 @@ import type {
   SelectedTransferFile,
   SenderTransferAccess,
   TransferManifest,
+  TransferManifestFile,
   TransferProgress,
   TransferSession,
 } from "./types";
@@ -45,35 +45,105 @@ import type {
 type SendRuntimeUpdate = (session: TransferSession) => void;
 type ReceiveRuntimeUpdate = (session: ReceiveSession) => void;
 
+type SenderControlMessage =
+  | {
+      kind: "offer";
+      receiverSessionId: string;
+      receiverToken: string;
+      offer: IncomingTransferOffer;
+    }
+  | {
+      kind: "http-ready";
+      manifestUrl: string;
+      shareUrl: string;
+    }
+  | {
+      kind: "relay-ready";
+      relay: RelayAccess;
+    }
+  | {
+      kind: "relay-failed";
+      message: string;
+    }
+  | {
+      kind: "failed";
+      message: string;
+    }
+  | {
+      kind: "canceled";
+      message: string;
+    };
+
+type ReceiverControlMessage =
+  | {
+      kind: "offer-received";
+    }
+  | {
+      kind: "accepted";
+      receiverDeviceName: string;
+    }
+  | {
+      kind: "rejected";
+      message: string;
+    }
+  | {
+      kind: "busy";
+      message: string;
+    }
+  | {
+      kind: "progress";
+      progress: TransferProgress;
+    }
+  | {
+      kind: "completed";
+      detail: string | null;
+    }
+  | {
+      kind: "direct-http-failed";
+      message: string;
+    }
+  | {
+      kind: "failed";
+      message: string;
+    }
+  | {
+      kind: "canceled";
+      message: string;
+    };
+
+type ControlMessage = SenderControlMessage | ReceiverControlMessage;
+
 interface SendRuntime {
   session: TransferSession;
   files: SelectedTransferFile[];
   target: DiscoveryRecord;
   updateSession?: SendRuntimeUpdate;
   controlSocket?: TransferSocket;
-  pushSocket?: TransferSocket;
   relayPollTimer?: ReturnType<typeof setInterval>;
   relayUploadStarted: boolean;
-  didConnectDirectly: boolean;
+  httpSessionId: string | null;
+  stopping: boolean;
+}
+
+interface PendingHttpReadyRequest {
+  resolve: (value: { manifestUrl: string; shareUrl: string }) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+interface PendingRelayReadyRequest {
+  resolve: (value: IncomingTransferOffer) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
 }
 
 interface ReceiveRuntime {
   session: ReceiveSession;
   updateSession?: ReceiveRuntimeUpdate;
-  pendingOfferSocket?: TransferSocket;
-  pendingDirectTransferRequest?: {
-    offerId: string;
-    pushToken: string;
-    onProgress?: (progress: TransferProgress) => void;
-    resolve: (result: TransferResult) => void;
-    reject: (error: Error) => void;
-    timer: ReturnType<typeof setTimeout>;
-  };
-  pendingRelayOfferRequest?: {
-    resolve: (offer: IncomingTransferOffer) => void;
-    reject: (error: Error) => void;
-    timer: ReturnType<typeof setTimeout>;
-  };
+  controlSocket?: TransferSocket;
+  pendingHttpReady?: PendingHttpReadyRequest;
+  pendingRelayReady?: PendingRelayReadyRequest;
+  activeDownloadAbortController?: AbortController;
   zeroconf?: {
     publisher: {
       stop(): void;
@@ -82,6 +152,7 @@ interface ReceiveRuntime {
   server?: {
     close(): void;
   };
+  stopping: boolean;
 }
 
 interface TransferSocket {
@@ -90,6 +161,7 @@ interface TransferSocket {
   off?(event: string, handler: (...args: unknown[]) => void): void;
   removeAllListeners?(event?: string): void;
   remoteAddress?: string;
+  setNoDelay?(noDelay?: boolean): void;
   write(buffer: Uint8Array | Buffer | string, cb?: (error?: Error) => void): boolean;
 }
 
@@ -144,8 +216,12 @@ interface TransferResult {
 const activeSendRuntimes = new Map<string, SendRuntime>();
 const activeReceiveRuntimes = new Map<string, ReceiveRuntime>();
 const RELAY_POLL_INTERVAL_MS = 1500;
-const DIRECT_CONNECT_TIMEOUT_MS = 8000;
-const RELAY_FALLBACK_WAIT_TIMEOUT_MS = DIRECT_CONNECT_TIMEOUT_MS + 3000;
+const CONTROL_RESPONSE_TIMEOUT_MS = 8000;
+const HTTP_READY_TIMEOUT_MS = 15000;
+const RELAY_FALLBACK_WAIT_TIMEOUT_MS = 12000;
+const CONTROL_MESSAGE_BUFFER_LIMIT = 64 * 1024;
+const PROGRESS_UPDATE_INTERVAL_MS = 250;
+const PROGRESS_UPDATE_BYTES = 128 * 1024;
 
 class DirectTransferFallbackError extends Error {}
 
@@ -215,12 +291,45 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-function safeDeviceIp(value: string | null | undefined) {
-  if (!value || value === "0.0.0.0" || value === "::1" || value === "127.0.0.1") {
-    return "127.0.0.1";
+function normalizeIpv4Address(value: string | null | undefined) {
+  if (!value) {
+    return null;
   }
 
-  return value;
+  const normalized =
+    value
+      .trim()
+      .replace(/^\[|\]$/g, "")
+      .replace(/^::ffff:/i, "")
+      .split("%")[0] ?? "";
+
+  return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(normalized) ? normalized : null;
+}
+
+function isPrivateIpv4Address(value: string) {
+  return (
+    /^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(value) ||
+    /^192\.168\.\d{1,3}\.\d{1,3}$/.test(value) ||
+    /^172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}$/.test(value)
+  );
+}
+
+function getUsableLanHost(value: string | null | undefined) {
+  const normalized = normalizeIpv4Address(value);
+  if (!normalized) {
+    return null;
+  }
+
+  return isPrivateIpv4Address(normalized) ? normalized : null;
+}
+
+function toTransferManifestFile(file: SelectedTransferFile): TransferManifestFile {
+  return {
+    id: file.id,
+    name: file.name,
+    mimeType: file.mimeType,
+    sizeBytes: file.sizeBytes,
+  };
 }
 
 function createTransferManifest({
@@ -234,13 +343,14 @@ function createTransferManifest({
   sessionId: string;
   isPremium: boolean;
 }): TransferManifest {
-  const totalBytes = files.reduce((sum, file) => sum + file.sizeBytes, 0);
+  const manifestFiles = files.map(toTransferManifestFile);
+  const totalBytes = manifestFiles.reduce((sum, file) => sum + file.sizeBytes, 0);
 
   return {
     sessionId,
     deviceName,
-    files,
-    fileCount: files.length,
+    files: manifestFiles,
+    fileCount: manifestFiles.length,
     totalBytes,
     isPremiumSender: isPremium,
     createdAt: nowIso(),
@@ -266,7 +376,10 @@ function createSenderTransferAccess(manifest: TransferManifest, relay: RelayCred
   };
 }
 
-function createIncomingTransferOffer(manifest: TransferManifest, relay: RelayCredentials | null): IncomingTransferOffer {
+function createIncomingTransferOffer(
+  manifest: TransferManifest,
+  relay: RelayCredentials | null,
+): IncomingTransferOffer {
   return {
     id: manifest.sessionId,
     senderDeviceName: manifest.deviceName,
@@ -308,10 +421,15 @@ function createReceiverDiscoveryRecord({
 }
 
 function buildQrPayload(record: DiscoveryRecord) {
+  const host = getUsableLanHost(record.host);
+  if (!host || record.port <= 0) {
+    return null;
+  }
+
   return JSON.stringify({
     version: 1,
     sessionId: record.sessionId,
-    host: record.host,
+    host,
     port: record.port,
     token: record.token,
     deviceName: record.deviceName,
@@ -360,13 +478,12 @@ function createInitialReceiveSession(record: DiscoveryRecord, previewMode: boole
 function createTransferOutputFile(directory: Directory, fileName: string, mimeType: string) {
   const safeName = fileName.replace(/[^\w.\-() ]+/g, "_");
   const targetName = `${Date.now()}-${safeName}`;
-  return directory.createFile(targetName, mimeType);
-}
-
-function createTransferOutputReference(directory: Directory, fileName: string) {
-  const safeName = fileName.replace(/[^\w.\-() ]+/g, "_");
-  const targetName = `${Date.now()}-${safeName}`;
-  return new File(directory, targetName);
+  const outputFile = new File(directory, targetName);
+  outputFile.create({ overwrite: true, intermediates: true });
+  return {
+    file: outputFile,
+    mimeType,
+  };
 }
 
 async function sleep(milliseconds: number) {
@@ -386,10 +503,36 @@ async function writeSocket(socket: Pick<TransferSocket, "write">, payload: Uint8
   });
 }
 
-function releaseKeepAwakeSoon() {
-  setTimeout(() => {
-    void deactivateKeepAwake(LOCAL_TRANSFER_KEEP_AWAKE_TAG).catch(() => {});
-  }, 0);
+async function writeControlMessage(socket: Pick<TransferSocket, "write">, message: ControlMessage) {
+  await writeSocket(socket, `${JSON.stringify(message)}\n`);
+}
+
+function createControlMessageParser(onMessage: (message: ControlMessage) => void) {
+  let buffer = "";
+
+  return (chunk: Uint8Array | Buffer | string) => {
+    buffer += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+    if (buffer.length > CONTROL_MESSAGE_BUFFER_LIMIT) {
+      throw new Error("Control connection exceeded the supported message size.");
+    }
+
+    while (true) {
+      const newLineIndex = buffer.indexOf("\n");
+      if (newLineIndex === -1) {
+        return;
+      }
+
+      const rawLine = buffer.slice(0, newLineIndex);
+      buffer = buffer.slice(newLineIndex + 1);
+
+      const line = rawLine.trim();
+      if (!line) {
+        continue;
+      }
+
+      onMessage(JSON.parse(line) as ControlMessage);
+    }
+  };
 }
 
 function getPeerName(value: string | undefined) {
@@ -405,58 +548,71 @@ function stopRelayPolling(runtime: SendRuntime) {
   runtime.relayPollTimer = undefined;
 }
 
-function destroySenderControlSocket(runtime: SendRuntime, activeSocket?: TransferSocket) {
-  if (runtime.controlSocket && runtime.controlSocket !== activeSocket) {
+function closeSendControlSocket(runtime: SendRuntime, activeSocket?: TransferSocket) {
+  if (!runtime.controlSocket) {
+    return;
+  }
+
+  if (!activeSocket || runtime.controlSocket !== activeSocket) {
     runtime.controlSocket.destroy();
   }
 
-  runtime.controlSocket = undefined;
+  if (!activeSocket || runtime.controlSocket === activeSocket) {
+    runtime.controlSocket = undefined;
+  }
 }
 
-function destroySenderPushSocket(runtime: SendRuntime, activeSocket?: TransferSocket) {
-  if (runtime.pushSocket && runtime.pushSocket !== activeSocket) {
-    runtime.pushSocket.destroy();
+function closeReceiveControlSocket(runtime: ReceiveRuntime, activeSocket?: TransferSocket) {
+  if (!runtime.controlSocket) {
+    return;
   }
 
-  runtime.pushSocket = undefined;
+  if (!activeSocket || runtime.controlSocket !== activeSocket) {
+    runtime.controlSocket.destroy();
+  }
+
+  if (!activeSocket || runtime.controlSocket === activeSocket) {
+    runtime.controlSocket = undefined;
+  }
 }
 
 function isSendRuntimeSettled(runtime: SendRuntime) {
-  return runtime.didConnectDirectly || runtime.session.status === "completed" || runtime.session.status === "failed";
+  return ["completed", "failed", "canceled"].includes(runtime.session.status);
 }
 
-function takePendingDirectTransferRequest(runtime: ReceiveRuntime) {
-  if (!runtime.pendingDirectTransferRequest) {
+function takePendingHttpReady(runtime: ReceiveRuntime) {
+  if (!runtime.pendingHttpReady) {
     return null;
   }
 
-  const pendingRequest = runtime.pendingDirectTransferRequest;
-  clearTimeout(pendingRequest.timer);
-  runtime.pendingDirectTransferRequest = undefined;
-  return pendingRequest;
+  const pending = runtime.pendingHttpReady;
+  clearTimeout(pending.timer);
+  runtime.pendingHttpReady = undefined;
+  return pending;
 }
 
-function rejectPendingDirectTransferRequest(runtime: ReceiveRuntime, error: Error) {
-  takePendingDirectTransferRequest(runtime)?.reject(error);
+function rejectPendingHttpReady(runtime: ReceiveRuntime, error: Error) {
+  takePendingHttpReady(runtime)?.reject(error);
 }
 
-function takePendingRelayOfferRequest(runtime: ReceiveRuntime) {
-  if (!runtime.pendingRelayOfferRequest) {
+function takePendingRelayReady(runtime: ReceiveRuntime) {
+  if (!runtime.pendingRelayReady) {
     return null;
   }
 
-  const pendingRequest = runtime.pendingRelayOfferRequest;
-  clearTimeout(pendingRequest.timer);
-  runtime.pendingRelayOfferRequest = undefined;
-  return pendingRequest;
+  const pending = runtime.pendingRelayReady;
+  clearTimeout(pending.timer);
+  runtime.pendingRelayReady = undefined;
+  return pending;
 }
 
-function resolvePendingRelayOfferRequest(runtime: ReceiveRuntime, offer: IncomingTransferOffer) {
-  takePendingRelayOfferRequest(runtime)?.resolve(offer);
+function rejectPendingRelayReady(runtime: ReceiveRuntime, error: Error) {
+  takePendingRelayReady(runtime)?.reject(error);
 }
 
-function rejectPendingRelayOfferRequest(runtime: ReceiveRuntime, error: Error) {
-  takePendingRelayOfferRequest(runtime)?.reject(error);
+function rejectPendingReceiveWaits(runtime: ReceiveRuntime, error: Error) {
+  rejectPendingHttpReady(runtime, error);
+  rejectPendingRelayReady(runtime, error);
 }
 
 function updateIncomingOfferRelay(runtime: ReceiveRuntime, relay: RelayAccess) {
@@ -480,42 +636,34 @@ function updateIncomingOfferRelay(runtime: ReceiveRuntime, relay: RelayAccess) {
   return nextOffer;
 }
 
-function hasDirectSendPath(runtime: SendRuntime) {
-  return Boolean(runtime.target.port > 0 && runtime.target.host !== "0.0.0.0" && runtime.target.token.trim());
-}
-
 async function ensureRelayReceiverAccepted({
   offer,
   receiverDeviceName,
-  allowFailure = false,
 }: {
   offer: IncomingTransferOffer;
   receiverDeviceName: string;
-  allowFailure?: boolean;
 }) {
   if (!offer.sender.relay) {
-    return false;
+    return;
   }
 
-  try {
-    await acceptRelayTransferSession({
-      relay: offer.sender.relay,
-      receiverDeviceName,
-    });
-    return true;
-  } catch (error) {
-    if (!allowFailure) {
-      throw error;
-    }
+  await acceptRelayTransferSession({
+    relay: offer.sender.relay,
+    receiverDeviceName,
+  });
+}
 
-    console.warn("Unable to prime relay fallback for direct transfer", error);
-    return false;
+async function stopSenderHttpRuntime(runtime: SendRuntime, detail: string) {
+  if (!runtime.httpSessionId) {
+    return;
   }
+
+  const sessionId = runtime.httpSessionId;
+  runtime.httpSessionId = null;
+  await stopLocalHttpSession(sessionId, detail).catch(() => {});
 }
 
 function failSendSession(runtime: SendRuntime, detail: string) {
-  destroySenderControlSocket(runtime);
-  destroySenderPushSocket(runtime);
   stopRelayPolling(runtime);
   withSendSessionUpdate(runtime, {
     status: "failed",
@@ -529,10 +677,31 @@ function failSendSession(runtime: SendRuntime, detail: string) {
   });
 }
 
+async function completeSendSession(runtime: SendRuntime, detail: string) {
+  stopRelayPolling(runtime);
+  await stopSenderHttpRuntime(runtime, detail);
+
+  withSendSessionUpdate(runtime, {
+    status: "completed",
+    awaitingReceiverResponse: false,
+    progress: {
+      phase: "completed",
+      totalBytes: runtime.session.manifest.totalBytes,
+      bytesTransferred: runtime.session.manifest.totalBytes,
+      currentFileName: null,
+      speedBytesPerSecond: 0,
+      detail,
+      updatedAt: nowIso(),
+    },
+  });
+}
+
 function resetReceiveToDiscoverable(runtime: ReceiveRuntime, detail = "Ready to receive files.") {
-  runtime.pendingOfferSocket = undefined;
-  rejectPendingDirectTransferRequest(runtime, new Error("That transfer request is no longer available."));
-  rejectPendingRelayOfferRequest(runtime, new Error("That transfer request is no longer available."));
+  closeReceiveControlSocket(runtime);
+  rejectPendingReceiveWaits(runtime, new Error("That transfer request is no longer available."));
+  runtime.activeDownloadAbortController?.abort();
+  runtime.activeDownloadAbortController = undefined;
+
   withReceiveSessionUpdate(runtime, {
     status: "discoverable",
     incomingOffer: null,
@@ -550,441 +719,6 @@ function resetReceiveToDiscoverable(runtime: ReceiveRuntime, detail = "Ready to 
   });
 }
 
-async function streamFilesToSocket(runtime: SendRuntime, socket: TransferSocket) {
-  const speedLimit = runtime.session.manifest.isPremiumSender ? null : LOCAL_TRANSFER_SPEED_LIMIT_BYTES_PER_SECOND;
-  let bytesTransferred = 0;
-  let windowBytesTransferred = 0;
-  let windowStartedAt = Date.now();
-
-  destroySenderPushSocket(runtime, socket);
-  destroySenderControlSocket(runtime, socket);
-  stopRelayPolling(runtime);
-
-  await activateKeepAwakeAsync(LOCAL_TRANSFER_KEEP_AWAKE_TAG).catch(() => {});
-
-  try {
-    withSendSessionUpdate(runtime, {
-      status: "transferring",
-      awaitingReceiverResponse: false,
-      progress: {
-        ...runtime.session.progress,
-        phase: "transferring",
-        detail: "Sending files over local WiFi.",
-        updatedAt: nowIso(),
-      },
-    });
-
-    await writeSocket(socket, encodeJsonFrame({ kind: "manifest", manifest: runtime.session.manifest }));
-
-    for (const file of runtime.files) {
-      await writeSocket(
-        socket,
-        encodeJsonFrame({
-          kind: "file-start",
-          fileId: file.id,
-          fileName: file.name,
-          mimeType: file.mimeType,
-          sizeBytes: file.sizeBytes,
-        }),
-      );
-
-      const inputFile = new File(file.uri);
-      const handle = inputFile.open();
-
-      try {
-        while (handle.offset !== null && handle.offset < (handle.size ?? file.sizeBytes)) {
-          const nextChunk = handle.readBytes(LOCAL_TRANSFER_CHUNK_SIZE_BYTES);
-          if (nextChunk.byteLength === 0) {
-            break;
-          }
-
-          await writeSocket(socket, encodeChunkFrame(nextChunk));
-          bytesTransferred += nextChunk.byteLength;
-          windowBytesTransferred += nextChunk.byteLength;
-
-          const now = Date.now();
-          const elapsedMilliseconds = now - windowStartedAt;
-          const speedBytesPerSecond =
-            elapsedMilliseconds > 0 ? Math.round((windowBytesTransferred / elapsedMilliseconds) * 1000) : 0;
-
-          withSendSessionUpdate(runtime, {
-            progress: {
-              phase: "transferring",
-              totalBytes: runtime.session.manifest.totalBytes,
-              bytesTransferred,
-              currentFileName: file.name,
-              speedBytesPerSecond,
-              detail: "Sending files over local WiFi.",
-              updatedAt: nowIso(),
-            },
-          });
-
-          if (speedLimit && windowBytesTransferred >= speedLimit) {
-            const waitFor = Math.max(0, 1000 - elapsedMilliseconds);
-            if (waitFor > 0) {
-              await sleep(waitFor);
-            }
-
-            windowStartedAt = Date.now();
-            windowBytesTransferred = 0;
-          } else if (elapsedMilliseconds >= 1000) {
-            windowStartedAt = now;
-            windowBytesTransferred = 0;
-          }
-        }
-      } finally {
-        handle.close();
-      }
-
-      await writeSocket(
-        socket,
-        encodeJsonFrame({
-          kind: "file-end",
-          fileId: file.id,
-        }),
-      );
-    }
-
-    await writeSocket(socket, encodeJsonFrame({ kind: "complete" }));
-
-    withSendSessionUpdate(runtime, {
-      status: "completed",
-      progress: {
-        phase: "completed",
-        totalBytes: runtime.session.manifest.totalBytes,
-        bytesTransferred: runtime.session.manifest.totalBytes,
-        currentFileName: null,
-        speedBytesPerSecond: 0,
-        detail: "Transfer complete.",
-        updatedAt: nowIso(),
-      },
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Transfer failed.";
-
-    await writeSocket(
-      socket,
-      encodeJsonFrame({
-        kind: "error",
-        message,
-      }),
-    ).catch(() => {});
-
-    failSendSession(runtime, message);
-  } finally {
-    await deactivateKeepAwake(LOCAL_TRANSFER_KEEP_AWAKE_TAG).catch(() => {});
-    destroySenderPushSocket(runtime, socket);
-    socket.destroy();
-  }
-}
-
-async function uploadFilesToRelay(runtime: SendRuntime) {
-  if (!runtime.session.relay || runtime.relayUploadStarted) {
-    return;
-  }
-
-  runtime.relayUploadStarted = true;
-  destroySenderControlSocket(runtime);
-  destroySenderPushSocket(runtime);
-
-  await activateKeepAwakeAsync(LOCAL_TRANSFER_KEEP_AWAKE_TAG).catch(() => {});
-
-  let bytesTransferred = 0;
-
-  try {
-    withSendSessionUpdate(runtime, {
-      status: "transferring",
-      awaitingReceiverResponse: false,
-      progress: {
-        ...runtime.session.progress,
-        phase: "transferring",
-        detail: "Uploading files through relay.",
-        updatedAt: nowIso(),
-      },
-    });
-
-    for (const file of runtime.files) {
-      const startedAt = Date.now();
-      await uploadRelayTransferFile({
-        relay: runtime.session.relay,
-        file,
-      });
-
-      bytesTransferred += file.sizeBytes;
-      const elapsedMilliseconds = Math.max(Date.now() - startedAt, 1);
-      const speedBytesPerSecond = Math.round((file.sizeBytes / elapsedMilliseconds) * 1000);
-
-      withSendSessionUpdate(runtime, {
-        progress: {
-          phase: "transferring",
-          totalBytes: runtime.session.manifest.totalBytes,
-          bytesTransferred,
-          currentFileName: file.name,
-          speedBytesPerSecond,
-          detail: "Uploading files through relay.",
-          updatedAt: nowIso(),
-        },
-      });
-    }
-
-    withSendSessionUpdate(runtime, {
-      status: "completed",
-      progress: {
-        phase: "completed",
-        totalBytes: runtime.session.manifest.totalBytes,
-        bytesTransferred: runtime.session.manifest.totalBytes,
-        currentFileName: null,
-        speedBytesPerSecond: 0,
-        detail: "Transfer complete through relay.",
-        updatedAt: nowIso(),
-      },
-    });
-    stopRelayPolling(runtime);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Relay upload failed.";
-    failSendSession(runtime, message);
-    throw error;
-  } finally {
-    await deactivateKeepAwake(LOCAL_TRANSFER_KEEP_AWAKE_TAG).catch(() => {});
-  }
-}
-
-async function provisionRelayFallback(runtime: SendRuntime, receiverName: string) {
-  if (runtime.session.relay) {
-    return true;
-  }
-
-  if (isSendRuntimeSettled(runtime)) {
-    return false;
-  }
-
-  if (!runtime.controlSocket) {
-    failSendSession(runtime, `${receiverName} is no longer available for relay fallback.`);
-    return false;
-  }
-
-  let relay: RelayCredentials;
-
-  try {
-    relay = await createRelayTransferSession({
-      senderDeviceName: runtime.session.manifest.deviceName,
-      files: runtime.files,
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unable to prepare relay fallback.";
-
-    if (runtime.controlSocket) {
-      await writeSocket(
-        runtime.controlSocket,
-        encodeJsonFrame({
-          kind: "relay-failed",
-          message,
-        }),
-      ).catch(() => {});
-    }
-
-    failSendSession(runtime, message);
-    return false;
-  }
-
-  if (isSendRuntimeSettled(runtime)) {
-    await deleteRelayTransferSession(relay).catch(() => {});
-    return false;
-  }
-
-  withSendSessionUpdate(runtime, {
-    relay,
-    progress: {
-      ...runtime.session.progress,
-      phase: "connecting",
-      detail: `${receiverName} could not connect over local WiFi. Preparing relay transfer.`,
-      updatedAt: nowIso(),
-    },
-  });
-  startRelayPolling(runtime);
-
-  try {
-    if (runtime.controlSocket) {
-      await writeSocket(
-        runtime.controlSocket,
-        encodeJsonFrame({
-          kind: "relay-ready",
-          relay: toRelayAccess(relay),
-        }),
-      );
-    }
-  } catch (error) {
-    stopRelayPolling(runtime);
-    withSendSessionUpdate(runtime, {
-      relay: null,
-    });
-    await deleteRelayTransferSession(relay).catch(() => {});
-
-    const message = error instanceof Error ? error.message : "Unable to notify the receiver about relay fallback.";
-    failSendSession(runtime, message);
-    return false;
-  }
-
-  return true;
-}
-
-function handleSenderOfferAccepted(
-  runtime: SendRuntime,
-  receiverName: string,
-) {
-  if (runtime.session.status === "completed" || runtime.session.status === "failed") {
-    return;
-  }
-
-  withSendSessionUpdate(runtime, {
-    status: "connecting",
-    peerDeviceName: receiverName,
-    awaitingReceiverResponse: false,
-    progress: {
-      ...runtime.session.progress,
-      phase: "connecting",
-      detail:
-        runtime.session.previewMode && runtime.target.method === "preview"
-          ? `${receiverName} accepted. Preparing transfer.`
-          : hasDirectSendPath(runtime)
-            ? `${receiverName} accepted. Starting transfer.`
-            : runtime.session.relay
-              ? `${receiverName} accepted. Preparing relay transfer.`
-              : "Receiver accepted the transfer.",
-      updatedAt: nowIso(),
-    },
-  });
-
-  if (runtime.session.previewMode && runtime.target.method === "preview") {
-    return;
-  }
-
-  if (!hasDirectSendPath(runtime)) {
-    if (runtime.session.relay) {
-      void uploadFilesToRelay(runtime).catch(() => {});
-      return;
-    }
-
-    failSendSession(runtime, "Unable to prepare this transfer.");
-  }
-}
-
-function handleSenderOfferRejected(runtime: SendRuntime, detail: string) {
-  failSendSession(runtime, detail);
-}
-
-async function syncRelaySenderState(runtime: SendRuntime) {
-  if (!runtime.session.relay) {
-    return;
-  }
-
-  try {
-    const state = await getRelaySenderState(runtime.session.relay);
-    const receiverName = getPeerName(state.receiverDeviceName ?? runtime.session.peerDeviceName ?? undefined);
-
-    if (state.status === "accepted" && runtime.session.awaitingReceiverResponse) {
-      handleSenderOfferAccepted(runtime, receiverName);
-      return;
-    }
-
-    if (
-      state.status === "accepted" &&
-      !runtime.session.awaitingReceiverResponse &&
-      runtime.session.status === "connecting" &&
-      !runtime.relayUploadStarted
-    ) {
-      void uploadFilesToRelay(runtime).catch(() => {});
-      return;
-    }
-
-    if (state.status === "rejected" && runtime.session.awaitingReceiverResponse) {
-      handleSenderOfferRejected(runtime, "Transfer declined.");
-      return;
-    }
-
-    if (
-      state.status === "rejected" &&
-      !runtime.session.awaitingReceiverResponse &&
-      runtime.session.status === "connecting"
-    ) {
-      handleSenderOfferRejected(runtime, "Relay transfer declined.");
-      return;
-    }
-
-    if (state.status === "expired" && runtime.session.status !== "completed" && runtime.session.status !== "failed") {
-      failSendSession(runtime, "This relay transfer expired.");
-    }
-  } catch (error) {
-    console.warn("Unable to refresh relay sender state", error);
-  }
-}
-
-function startRelayPolling(runtime: SendRuntime) {
-  if (!runtime.session.relay || runtime.relayPollTimer) {
-    return;
-  }
-
-  void syncRelaySenderState(runtime);
-  runtime.relayPollTimer = setInterval(() => {
-    void syncRelaySenderState(runtime);
-  }, RELAY_POLL_INTERVAL_MS);
-}
-
-async function notifySenderAccepted(runtime: ReceiveRuntime, offer: IncomingTransferOffer, pushToken?: string) {
-  if (runtime.pendingOfferSocket) {
-    const socket = runtime.pendingOfferSocket;
-    try {
-      await writeSocket(
-        socket,
-        encodeJsonFrame({
-          kind: "accepted",
-          receiverDeviceName: runtime.session.discoveryRecord.deviceName,
-          ...(pushToken ? { pushToken } : {}),
-        }),
-      );
-      return true;
-    } catch {
-      runtime.pendingOfferSocket = undefined;
-      socket.destroy();
-      return false;
-    }
-  }
-
-  const senderRuntime = activeSendRuntimes.get(offer.id);
-  if (!senderRuntime) {
-    return false;
-  }
-
-  handleSenderOfferAccepted(senderRuntime, runtime.session.discoveryRecord.deviceName);
-  return true;
-}
-
-async function notifySenderRejected(runtime: ReceiveRuntime, offer: IncomingTransferOffer, detail: string) {
-  if (runtime.pendingOfferSocket) {
-    const socket = runtime.pendingOfferSocket;
-    runtime.pendingOfferSocket = undefined;
-
-    await writeSocket(
-      socket,
-      encodeJsonFrame({
-        kind: "rejected",
-        message: detail,
-      }),
-    ).catch(() => {});
-
-    socket.destroy();
-    return true;
-  }
-
-  const senderRuntime = activeSendRuntimes.get(offer.id);
-  if (!senderRuntime) {
-    return false;
-  }
-
-  handleSenderOfferRejected(senderRuntime, detail);
-  return true;
-}
-
 function isReceiveRuntimeBusy(runtime: ReceiveRuntime) {
   return Boolean(
     runtime.session.incomingOffer ||
@@ -998,7 +732,7 @@ function registerIncomingOffer(runtime: ReceiveRuntime, offer: IncomingTransferO
     return false;
   }
 
-  runtime.pendingOfferSocket = socket;
+  runtime.controlSocket = socket;
 
   withReceiveSessionUpdate(runtime, {
     status: "waiting",
@@ -1054,20 +788,16 @@ async function runPreviewTransfer(senderRuntime: SendRuntime, receiverRuntime: R
     });
 
     for (const file of senderRuntime.files) {
-      const outputFile = createTransferOutputFile(getReceivedFilesDirectory(), file.name, file.mimeType);
-      const sourceFile = new File(file.uri);
-      sourceFile.copy(outputFile);
-
-      bytesTransferred += file.sizeBytes;
-      receivedFiles.push({
-        id: Crypto.randomUUID(),
+      const record = createReceivedFileRecord({
         transferId: offer.id,
-        name: file.name,
-        uri: outputFile.uri,
+        sourceFileUri: file.uri,
+        fileName: file.name,
         mimeType: file.mimeType,
         sizeBytes: file.sizeBytes,
-        receivedAt: nowIso(),
       });
+
+      bytesTransferred += file.sizeBytes;
+      receivedFiles.push(record);
 
       withSendSessionUpdate(senderRuntime, {
         progress: {
@@ -1122,31 +852,269 @@ async function runPreviewTransfer(senderRuntime: SendRuntime, receiverRuntime: R
   }
 }
 
-function waitForSenderDirectTransfer({
+function createReceiveProgressReporter(runtime: ReceiveRuntime) {
+  let lastSentAt = 0;
+  let lastSentBytes = 0;
+
+  return (progress: TransferProgress, force = false) => {
+    withReceiveSessionUpdate(runtime, {
+      status: progress.phase === "transferring" ? "transferring" : "connecting",
+      progress,
+    });
+
+    if (!runtime.controlSocket) {
+      return;
+    }
+
+    const now = Date.now();
+    const shouldSend =
+      force ||
+      progress.phase === "completed" ||
+      progress.phase === "failed" ||
+      progress.bytesTransferred === progress.totalBytes ||
+      progress.bytesTransferred - lastSentBytes >= PROGRESS_UPDATE_BYTES ||
+      now - lastSentAt >= PROGRESS_UPDATE_INTERVAL_MS;
+
+    if (!shouldSend) {
+      return;
+    }
+
+    lastSentAt = now;
+    lastSentBytes = progress.bytesTransferred;
+    void writeControlMessage(runtime.controlSocket, {
+      kind: "progress",
+      progress,
+    }).catch(() => {});
+  };
+}
+
+function validateDownloadableManifest(offer: IncomingTransferOffer, payload: DownloadableTransferManifest) {
+  if (payload.kind !== "direct-http-transfer") {
+    throw new Error("The sender did not provide a valid direct-transfer manifest.");
+  }
+
+  if (payload.sessionId !== offer.id) {
+    throw new Error("The sender provided a manifest for a different transfer.");
+  }
+
+  return payload;
+}
+
+async function fetchDownloadableManifest({
+  manifestUrl,
+  offer,
+  signal,
+}: {
+  manifestUrl: string;
+  offer: IncomingTransferOffer;
+  signal: AbortSignal;
+}) {
+  const response = await fetch(manifestUrl, {
+    method: "GET",
+    signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(`Unable to load the sender manifest (${response.status}).`);
+  }
+
+  return validateDownloadableManifest(offer, (await response.json()) as DownloadableTransferManifest);
+}
+
+async function streamResponseToFile({
+  response,
+  destination,
+  signal,
+  onBytes,
+}: {
+  response: Response;
+  destination: File;
+  signal: AbortSignal;
+  onBytes: (value: number) => void;
+}) {
+  destination.create({ overwrite: true, intermediates: true });
+  const handle = destination.open();
+
+  try {
+    if (!response.body) {
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      if (signal.aborted) {
+        throw new Error("Download canceled.");
+      }
+      handle.writeBytes(bytes);
+      onBytes(bytes.byteLength);
+      return;
+    }
+
+    const reader = response.body.getReader();
+    while (true) {
+      if (signal.aborted) {
+        throw new Error("Download canceled.");
+      }
+
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+
+      if (!value?.byteLength) {
+        continue;
+      }
+
+      handle.writeBytes(value);
+      onBytes(value.byteLength);
+    }
+  } finally {
+    handle.close();
+  }
+}
+
+async function receiveDirectHttpTransfer({
   runtime,
   offer,
-  pushToken,
+  manifestUrl,
   onProgress,
 }: {
   runtime: ReceiveRuntime;
   offer: IncomingTransferOffer;
-  pushToken: string;
-  onProgress?: (progress: TransferProgress) => void;
+  manifestUrl: string;
+  onProgress: (progress: TransferProgress, force?: boolean) => void;
 }) {
-  return new Promise<TransferResult>((resolve, reject) => {
+  const abortController = new AbortController();
+  runtime.activeDownloadAbortController = abortController;
+  const createdFiles: File[] = [];
+
+  await activateKeepAwakeAsync(LOCAL_TRANSFER_KEEP_AWAKE_TAG).catch(() => {});
+
+  try {
+    onProgress(
+      {
+        phase: "connecting",
+        totalBytes: offer.totalBytes,
+        bytesTransferred: 0,
+        currentFileName: null,
+        speedBytesPerSecond: 0,
+        detail: "Connecting to the sender over local WiFi.",
+        updatedAt: nowIso(),
+      },
+      true,
+    );
+
+    const manifest = await fetchDownloadableManifest({
+      manifestUrl,
+      offer,
+      signal: abortController.signal,
+    });
+
+    const receivedFiles: ReceivedFileRecord[] = [];
+    let bytesTransferred = 0;
+
+    for (const file of manifest.files) {
+      const output = createTransferOutputFile(getReceivedFilesDirectory(), file.name, file.mimeType);
+      createdFiles.push(output.file);
+
+      const startedAt = Date.now();
+      let fileBytesTransferred = 0;
+
+      onProgress({
+        phase: "transferring",
+        totalBytes: offer.totalBytes,
+        bytesTransferred,
+        currentFileName: file.name,
+        speedBytesPerSecond: 0,
+        detail: "Downloading files over local WiFi.",
+        updatedAt: nowIso(),
+      });
+
+      const response = await fetch(file.downloadUrl, {
+        method: "GET",
+        signal: abortController.signal,
+      });
+
+      if (!response.ok) {
+        throw new Error(`Unable to download "${file.name}" (${response.status}).`);
+      }
+
+      await streamResponseToFile({
+        response,
+        destination: output.file,
+        signal: abortController.signal,
+        onBytes: (chunkBytes) => {
+          fileBytesTransferred += chunkBytes;
+          bytesTransferred += chunkBytes;
+          const elapsedMilliseconds = Math.max(Date.now() - startedAt, 1);
+          const speedBytesPerSecond = Math.round((fileBytesTransferred / elapsedMilliseconds) * 1000);
+
+          onProgress({
+            phase: "transferring",
+            totalBytes: offer.totalBytes,
+            bytesTransferred,
+            currentFileName: file.name,
+            speedBytesPerSecond,
+            detail: "Downloading files over local WiFi.",
+            updatedAt: nowIso(),
+          });
+        },
+      });
+
+      receivedFiles.push({
+        id: Crypto.randomUUID(),
+        transferId: offer.id,
+        name: file.name,
+        uri: output.file.uri,
+        mimeType: file.mimeType,
+        sizeBytes: file.sizeBytes,
+        receivedAt: nowIso(),
+      });
+    }
+
+    return {
+      receivedFiles,
+      bytesTransferred,
+      detail: "Transfer complete.",
+    } satisfies TransferResult;
+  } catch (error) {
+    for (const file of createdFiles) {
+      try {
+        if (file.exists) {
+          file.delete();
+        }
+      } catch {
+        // Best-effort cleanup for partially downloaded files.
+      }
+    }
+
+    if (error instanceof Error && error.message === "Download canceled.") {
+      throw new Error("Transfer canceled.", {
+        cause: error,
+      });
+    }
+
+    throw error instanceof Error
+      ? new DirectTransferFallbackError(error.message)
+      : new DirectTransferFallbackError("Unable to download files over local WiFi.");
+  } finally {
+    runtime.activeDownloadAbortController = undefined;
+    await deactivateKeepAwake(LOCAL_TRANSFER_KEEP_AWAKE_TAG).catch(() => {});
+  }
+}
+
+function waitForHttpReady(runtime: ReceiveRuntime) {
+  if (runtime.pendingHttpReady) {
+    throw new Error("Receiver is already waiting for the sender.");
+  }
+
+  return new Promise<{ manifestUrl: string; shareUrl: string }>((resolve, reject) => {
     const timer = setTimeout(() => {
-      if (runtime.pendingDirectTransferRequest?.timer !== timer) {
+      if (runtime.pendingHttpReady?.timer !== timer) {
         return;
       }
 
-      runtime.pendingDirectTransferRequest = undefined;
-      reject(new DirectTransferFallbackError("Unable to connect over local WiFi."));
-    }, DIRECT_CONNECT_TIMEOUT_MS);
+      runtime.pendingHttpReady = undefined;
+      reject(new DirectTransferFallbackError("The sender did not provide local download access in time."));
+    }, HTTP_READY_TIMEOUT_MS);
 
-    runtime.pendingDirectTransferRequest = {
-      offerId: offer.id,
-      pushToken,
-      onProgress,
+    runtime.pendingHttpReady = {
       resolve,
       reject,
       timer,
@@ -1154,36 +1122,181 @@ function waitForSenderDirectTransfer({
   });
 }
 
-async function waitForSenderRelayFallbackOffer(runtime: ReceiveRuntime) {
-  const currentOffer = runtime.session.incomingOffer;
-  if (!currentOffer) {
+function waitForRelayReady(runtime: ReceiveRuntime) {
+  const offer = runtime.session.incomingOffer;
+  if (!offer) {
     throw new Error("That transfer request is no longer available.");
   }
 
-  if (currentOffer.sender.relay) {
-    return currentOffer;
+  if (offer.sender.relay) {
+    return Promise.resolve(offer);
   }
 
-  if (!runtime.pendingOfferSocket) {
-    throw new Error("Direct transfer is unavailable and relay fallback is not available.");
+  if (runtime.pendingRelayReady) {
+    throw new Error("Receiver is already waiting for relay fallback.");
   }
 
   return new Promise<IncomingTransferOffer>((resolve, reject) => {
     const timer = setTimeout(() => {
-      if (runtime.pendingRelayOfferRequest?.timer !== timer) {
+      if (runtime.pendingRelayReady?.timer !== timer) {
         return;
       }
 
-      runtime.pendingRelayOfferRequest = undefined;
+      runtime.pendingRelayReady = undefined;
       reject(new Error("The sender could not prepare relay fallback."));
     }, RELAY_FALLBACK_WAIT_TIMEOUT_MS);
 
-    runtime.pendingRelayOfferRequest = {
+    runtime.pendingRelayReady = {
       resolve,
       reject,
       timer,
     };
   });
+}
+
+async function receiveRelayTransfer({
+  runtime,
+  offer,
+  receiverDeviceName,
+  onProgress,
+}: {
+  runtime: ReceiveRuntime;
+  offer: IncomingTransferOffer;
+  receiverDeviceName: string;
+  onProgress: (progress: TransferProgress, force?: boolean) => void;
+}) {
+  if (!offer.sender.relay) {
+    throw new Error("Relay access is not available for this transfer.");
+  }
+
+  const abortController = new AbortController();
+  runtime.activeDownloadAbortController = abortController;
+  const createdFiles: File[] = [];
+
+  await activateKeepAwakeAsync(LOCAL_TRANSFER_KEEP_AWAKE_TAG).catch(() => {});
+
+  try {
+    await ensureRelayReceiverAccepted({
+      offer,
+      receiverDeviceName,
+    });
+
+    let state = await getRelayReceiverState(offer.sender.relay);
+
+    while (!["ready", "completed"].includes(state.status)) {
+      if (abortController.signal.aborted) {
+        throw new Error("Transfer canceled.");
+      }
+
+      if (state.status === "rejected") {
+        throw new Error("Transfer declined.");
+      }
+
+      if (state.status === "expired") {
+        throw new Error("This relay transfer expired before it could start.");
+      }
+
+      onProgress(
+        {
+          phase: "connecting",
+          totalBytes: offer.totalBytes,
+          bytesTransferred: 0,
+          currentFileName: null,
+          speedBytesPerSecond: 0,
+          detail:
+            state.status === "accepted"
+              ? "Waiting for the sender to prepare relay transfer."
+              : "Connecting through relay.",
+          updatedAt: nowIso(),
+        },
+        true,
+      );
+
+      await sleep(RELAY_POLL_INTERVAL_MS);
+      state = await getRelayReceiverState(offer.sender.relay);
+    }
+
+    const receivedFiles: ReceivedFileRecord[] = [];
+    let bytesTransferred = 0;
+
+    for (const file of state.files) {
+      const output = createTransferOutputFile(getReceivedFilesDirectory(), file.name, file.mimeType);
+      createdFiles.push(output.file);
+      const startedAt = Date.now();
+      let fileBytesTransferred = 0;
+
+      onProgress({
+        phase: "transferring",
+        totalBytes: offer.totalBytes,
+        bytesTransferred,
+        currentFileName: file.name,
+        speedBytesPerSecond: 0,
+        detail: "Downloading files through relay.",
+        updatedAt: nowIso(),
+      });
+
+      const response = await fetchRelayTransferFile({
+        relay: offer.sender.relay,
+        fileId: file.id,
+        signal: abortController.signal,
+      });
+
+      await streamResponseToFile({
+        response,
+        destination: output.file,
+        signal: abortController.signal,
+        onBytes: (chunkBytes) => {
+          fileBytesTransferred += chunkBytes;
+          bytesTransferred += chunkBytes;
+          const elapsedMilliseconds = Math.max(Date.now() - startedAt, 1);
+          const speedBytesPerSecond = Math.round((fileBytesTransferred / elapsedMilliseconds) * 1000);
+
+          onProgress({
+            phase: "transferring",
+            totalBytes: offer.totalBytes,
+            bytesTransferred,
+            currentFileName: file.name,
+            speedBytesPerSecond,
+            detail: "Downloading files through relay.",
+            updatedAt: nowIso(),
+          });
+        },
+      });
+
+      receivedFiles.push({
+        id: Crypto.randomUUID(),
+        transferId: offer.id,
+        name: file.name,
+        uri: output.file.uri,
+        mimeType: file.mimeType,
+        sizeBytes: file.sizeBytes,
+        receivedAt: nowIso(),
+      });
+    }
+
+    await completeRelayTransferSession(offer.sender.relay).catch(() => {});
+
+    return {
+      receivedFiles,
+      bytesTransferred,
+      detail: "Transfer complete through relay.",
+    } satisfies TransferResult;
+  } catch (error) {
+    for (const file of createdFiles) {
+      try {
+        if (file.exists) {
+          file.delete();
+        }
+      } catch {
+        // Best-effort cleanup for partially downloaded relay files.
+      }
+    }
+
+    throw error instanceof Error ? error : new Error("Unable to receive files through relay.");
+  } finally {
+    runtime.activeDownloadAbortController = undefined;
+    await deactivateKeepAwake(LOCAL_TRANSFER_KEEP_AWAKE_TAG).catch(() => {});
+  }
 }
 
 async function receiveRelayFallbackTransfer({
@@ -1193,9 +1306,9 @@ async function receiveRelayFallbackTransfer({
 }: {
   runtime: ReceiveRuntime;
   offer: IncomingTransferOffer;
-  onProgress?: (progress: TransferProgress) => void;
+  onProgress: (progress: TransferProgress, force?: boolean) => void;
 }) {
-  const relayOffer = offer.sender.relay ? offer : await waitForSenderRelayFallbackOffer(runtime);
+  const relayOffer = offer.sender.relay ? offer : await waitForRelayReady(runtime);
 
   withReceiveSessionUpdate(runtime, {
     status: "connecting",
@@ -1212,328 +1325,77 @@ async function receiveRelayFallbackTransfer({
   });
 
   return receiveRelayTransfer({
+    runtime,
     offer: relayOffer,
     receiverDeviceName: runtime.session.discoveryRecord.deviceName,
     onProgress,
   });
 }
 
-async function receiveRelayTransfer({
-  offer,
-  receiverDeviceName,
-  onProgress,
-}: {
-  offer: IncomingTransferOffer;
-  receiverDeviceName: string;
-  onProgress?: (progress: TransferProgress) => void;
-}) {
-  if (!offer.sender.relay) {
-    throw new Error("Relay access is not available for this transfer.");
-  }
-
-  await activateKeepAwakeAsync(LOCAL_TRANSFER_KEEP_AWAKE_TAG).catch(() => {});
-
-  try {
-    await ensureRelayReceiverAccepted({
-      offer,
-      receiverDeviceName,
+async function notifySenderAccepted(runtime: ReceiveRuntime, offer: IncomingTransferOffer) {
+  if (runtime.controlSocket) {
+    await writeControlMessage(runtime.controlSocket, {
+      kind: "accepted",
+      receiverDeviceName: runtime.session.discoveryRecord.deviceName,
     });
-
-    let state = await getRelayReceiverState(offer.sender.relay);
-
-    while (!["ready", "completed"].includes(state.status)) {
-      if (state.status === "rejected") {
-        throw new Error("Transfer declined.");
-      }
-
-      if (state.status === "expired") {
-        throw new Error("This relay transfer expired before it could start.");
-      }
-
-      onProgress?.({
-        phase: "connecting",
-        totalBytes: offer.totalBytes,
-        bytesTransferred: 0,
-        currentFileName: null,
-        speedBytesPerSecond: 0,
-        detail:
-          state.status === "accepted"
-            ? "Waiting for the sender to prepare relay transfer."
-            : "Connecting through relay.",
-        updatedAt: nowIso(),
-      });
-
-      await sleep(RELAY_POLL_INTERVAL_MS);
-      state = await getRelayReceiverState(offer.sender.relay);
-    }
-
-    const receivedFiles: ReceivedFileRecord[] = [];
-    let bytesTransferred = 0;
-
-    for (const file of state.files) {
-      const outputFile = createTransferOutputReference(getReceivedFilesDirectory(), file.name);
-      const startedAt = Date.now();
-
-      onProgress?.({
-        phase: "transferring",
-        totalBytes: offer.totalBytes,
-        bytesTransferred,
-        currentFileName: file.name,
-        speedBytesPerSecond: 0,
-        detail: "Downloading files through relay.",
-        updatedAt: nowIso(),
-      });
-
-      await downloadRelayTransferFile({
-        relay: offer.sender.relay,
-        fileId: file.id,
-        destination: outputFile,
-      });
-
-      bytesTransferred += file.sizeBytes;
-      const elapsedMilliseconds = Math.max(Date.now() - startedAt, 1);
-      const speedBytesPerSecond = Math.round((file.sizeBytes / elapsedMilliseconds) * 1000);
-
-      receivedFiles.push({
-        id: Crypto.randomUUID(),
-        transferId: offer.id,
-        name: file.name,
-        uri: outputFile.uri,
-        mimeType: file.mimeType,
-        sizeBytes: file.sizeBytes,
-        receivedAt: nowIso(),
-      });
-
-      onProgress?.({
-        phase: "transferring",
-        totalBytes: offer.totalBytes,
-        bytesTransferred,
-        currentFileName: file.name,
-        speedBytesPerSecond,
-        detail: "Downloading files through relay.",
-        updatedAt: nowIso(),
-      });
-    }
-
-    await completeRelayTransferSession(offer.sender.relay).catch(() => {});
-
-    return {
-      receivedFiles,
-      bytesTransferred,
-      detail: "Transfer complete through relay.",
-    } satisfies TransferResult;
-  } finally {
-    await deactivateKeepAwake(LOCAL_TRANSFER_KEEP_AWAKE_TAG).catch(() => {});
+    return true;
   }
+
+  const senderRuntime = activeSendRuntimes.get(offer.id);
+  if (!senderRuntime) {
+    return false;
+  }
+
+  withSendSessionUpdate(senderRuntime, {
+    status: "connecting",
+    peerDeviceName: runtime.session.discoveryRecord.deviceName,
+    awaitingReceiverResponse: false,
+    progress: {
+      phase: "connecting",
+      totalBytes: senderRuntime.session.manifest.totalBytes,
+      bytesTransferred: 0,
+      currentFileName: null,
+      speedBytesPerSecond: 0,
+      detail: `${runtime.session.discoveryRecord.deviceName} accepted. Preparing transfer.`,
+      updatedAt: nowIso(),
+    },
+  });
+
+  return true;
 }
 
-async function receiveTransferFromSocket({
-  offer,
-  socket,
-  onProgress,
-  directTarget,
-  start,
-}: {
-  offer: IncomingTransferOffer;
-  socket: TransferSocket;
-  onProgress?: (progress: TransferProgress) => void;
-  directTarget: string;
-  start?: () => Promise<void>;
-}) {
-  await activateKeepAwakeAsync(LOCAL_TRANSFER_KEEP_AWAKE_TAG).catch(() => {});
+async function notifySenderRejected(runtime: ReceiveRuntime, offer: IncomingTransferOffer, detail: string) {
+  if (runtime.controlSocket) {
+    const socket = runtime.controlSocket;
+    runtime.controlSocket = undefined;
 
-  return await new Promise<TransferResult>((resolve, reject) => {
-    const directory = getReceivedFilesDirectory();
-    const receivedFiles: ReceivedFileRecord[] = [];
-    let outputHandle: ReturnType<File["open"]> | null = null;
-    let outputFile: File | null = null;
-    let currentFileMetadata: { fileId: string; fileName: string; mimeType: string; sizeBytes: number } | null = null;
-    let bytesTransferred = 0;
-    let windowStartedAt = Date.now();
-    let windowBytesTransferred = 0;
-    let didResolve = false;
-    let didReceiveDirectFrame = false;
-    let handshakeTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
-      fail(new DirectTransferFallbackError(`Unable to connect over local WiFi at ${directTarget}.`));
-    }, DIRECT_CONNECT_TIMEOUT_MS);
+    await writeControlMessage(socket, {
+      kind: "rejected",
+      message: detail,
+    }).catch(() => {});
 
-    function clearHandshakeTimer() {
-      if (!handshakeTimer) {
-        return;
-      }
+    socket.destroy();
+    return true;
+  }
 
-      clearTimeout(handshakeTimer);
-      handshakeTimer = null;
-    }
+  const senderRuntime = activeSendRuntimes.get(offer.id);
+  if (!senderRuntime) {
+    return false;
+  }
 
-    function finish(result: TransferResult) {
-      if (didResolve) {
-        return;
-      }
+  failSendSession(senderRuntime, detail);
+  return true;
+}
 
-      didResolve = true;
-      clearHandshakeTimer();
-      outputHandle?.close();
-      outputHandle = null;
-      socket.destroy();
-      releaseKeepAwakeSoon();
-      resolve(result);
-    }
+async function notifySenderCanceled(runtime: ReceiveRuntime, detail: string) {
+  if (!runtime.controlSocket) {
+    return;
+  }
 
-    function fail(error: Error) {
-      if (didResolve) {
-        return;
-      }
-
-      didResolve = true;
-      clearHandshakeTimer();
-      outputHandle?.close();
-      outputHandle = null;
-      socket.destroy();
-      releaseKeepAwakeSoon();
-      reject(error);
-    }
-
-    const parser = createFrameParser((frame) => {
-      try {
-        if (frame.type === "json") {
-          didReceiveDirectFrame = true;
-          clearHandshakeTimer();
-
-          const message = decodeJsonFrame<
-            | { kind: "manifest"; manifest: TransferManifest }
-            | { kind: "file-start"; fileId: string; fileName: string; mimeType: string; sizeBytes: number }
-            | { kind: "file-end"; fileId: string }
-            | { kind: "complete" }
-            | { kind: "error"; message: string }
-          >(frame.payload);
-
-          if (message.kind === "manifest") {
-            onProgress?.({
-              phase: "transferring",
-              totalBytes: message.manifest.totalBytes,
-              bytesTransferred,
-              currentFileName: null,
-              speedBytesPerSecond: 0,
-              detail: "Connected. Preparing files.",
-              updatedAt: nowIso(),
-            });
-            return;
-          }
-
-          if (message.kind === "file-start") {
-            currentFileMetadata = message;
-            outputFile = createTransferOutputFile(directory, message.fileName, message.mimeType);
-            outputHandle = outputFile.open();
-            onProgress?.({
-              phase: "transferring",
-              totalBytes: offer.totalBytes,
-              bytesTransferred,
-              currentFileName: message.fileName,
-              speedBytesPerSecond: 0,
-              detail: "Receiving file data.",
-              updatedAt: nowIso(),
-            });
-            return;
-          }
-
-          if (message.kind === "file-end" && outputFile && currentFileMetadata) {
-            outputHandle?.close();
-            outputHandle = null;
-            receivedFiles.push({
-              id: Crypto.randomUUID(),
-              transferId: offer.id,
-              name: currentFileMetadata.fileName,
-              uri: outputFile.uri,
-              mimeType: currentFileMetadata.mimeType,
-              sizeBytes: currentFileMetadata.sizeBytes,
-              receivedAt: nowIso(),
-            });
-            currentFileMetadata = null;
-            outputFile = null;
-            return;
-          }
-
-          if (message.kind === "complete") {
-            finish({
-              receivedFiles,
-              bytesTransferred,
-              detail: "Transfer complete.",
-            });
-            return;
-          }
-
-          if (message.kind === "error") {
-            fail(new Error(message.message));
-          }
-
-          return;
-        }
-
-        if (!outputHandle || !currentFileMetadata) {
-          return;
-        }
-
-        const chunkBytes = Buffer.from(frame.payload);
-        outputHandle.writeBytes(chunkBytes);
-        bytesTransferred += chunkBytes.byteLength;
-        windowBytesTransferred += chunkBytes.byteLength;
-
-        const elapsedMilliseconds = Date.now() - windowStartedAt;
-        const speedBytesPerSecond =
-          elapsedMilliseconds > 0 ? Math.round((windowBytesTransferred / elapsedMilliseconds) * 1000) : 0;
-
-        if (elapsedMilliseconds >= 1000) {
-          windowStartedAt = Date.now();
-          windowBytesTransferred = 0;
-        }
-
-        onProgress?.({
-          phase: "transferring",
-          totalBytes: offer.totalBytes,
-          bytesTransferred,
-          currentFileName: currentFileMetadata.fileName,
-          speedBytesPerSecond,
-          detail: "Receiving file data.",
-          updatedAt: nowIso(),
-        });
-      } catch (error) {
-        fail(error instanceof Error ? error : new Error("Unable to decode transfer payload."));
-      }
-    });
-
-    if (start) {
-      void start().catch((error) => {
-        fail(
-          error instanceof Error
-            ? new DirectTransferFallbackError(error.message)
-            : new DirectTransferFallbackError("Unable to start transfer session."),
-        );
-      });
-    }
-    socket.on("data", (chunk) => {
-      parser(chunk as Uint8Array | Buffer | string);
-    });
-    socket.on("error", (error) => {
-      console.warn("Direct receive socket error", {
-        directTarget,
-        message: error instanceof Error ? error.message : String(error),
-      });
-      const baseError = error instanceof Error ? error : new Error("Transfer connection failed.");
-      fail(
-        didReceiveDirectFrame ? baseError : new DirectTransferFallbackError(`${baseError.message} (${directTarget})`),
-      );
-    });
-    socket.on("close", () => {
-      if (!didResolve) {
-        fail(
-          didReceiveDirectFrame
-            ? new Error("The transfer ended before all files finished downloading.")
-            : new DirectTransferFallbackError(`Unable to reach the sender over local WiFi at ${directTarget}.`),
-        );
-      }
-    });
-  });
+  await writeControlMessage(runtime.controlSocket, {
+    kind: "canceled",
+    message: detail,
+  }).catch(() => {});
 }
 
 async function runReceiveTransfer(runtime: ReceiveRuntime) {
@@ -1543,12 +1405,7 @@ async function runReceiveTransfer(runtime: ReceiveRuntime) {
   }
 
   const canUsePreview = runtime.session.previewMode && activeSendRuntimes.has(offer.id);
-  const updateProgress = (progress: TransferProgress) => {
-    withReceiveSessionUpdate(runtime, {
-      status: progress.phase === "transferring" ? "transferring" : "connecting",
-      progress,
-    });
-  };
+  const reportProgress = createReceiveProgressReporter(runtime);
 
   if (canUsePreview) {
     const didNotifySender = await notifySenderAccepted(runtime, offer);
@@ -1564,14 +1421,11 @@ async function runReceiveTransfer(runtime: ReceiveRuntime) {
     return runPreviewTransfer(senderRuntime, runtime);
   }
 
-  const pushToken = Crypto.randomUUID().replace(/-/g, "");
-  const didNotifySender = await notifySenderAccepted(runtime, offer, pushToken);
-  if (!didNotifySender) {
-    if (offer.sender.relay) {
-      await declineRelayTransferSession(offer.sender.relay).catch(() => {});
-    }
+  if (!runtime.controlSocket) {
     throw new Error("Sender is no longer available.");
   }
+
+  await notifySenderAccepted(runtime, offer);
 
   withReceiveSessionUpdate(runtime, {
     status: "connecting",
@@ -1582,180 +1436,370 @@ async function runReceiveTransfer(runtime: ReceiveRuntime) {
       bytesTransferred: 0,
       currentFileName: null,
       speedBytesPerSecond: 0,
-      detail: "Waiting for the sender to connect.",
+      detail: "Waiting for the sender to prepare local download access.",
       updatedAt: nowIso(),
     },
   });
 
   try {
-    return await waitForSenderDirectTransfer({
+    const { manifestUrl } = await waitForHttpReady(runtime);
+    return await receiveDirectHttpTransfer({
       runtime,
       offer,
-      pushToken,
-      onProgress: updateProgress,
+      manifestUrl,
+      onProgress: reportProgress,
     });
   } catch (error) {
-    if (error instanceof DirectTransferFallbackError) {
-      return receiveRelayFallbackTransfer({
-        runtime,
-        offer,
-        onProgress: updateProgress,
-      });
+    if (!(error instanceof DirectTransferFallbackError)) {
+      throw error;
     }
 
-    throw error;
-  }
-}
+    await writeControlMessage(runtime.controlSocket, {
+      kind: "direct-http-failed",
+      message: error.message,
+    }).catch(() => {});
 
-function mapResolvedService(service: ZeroconfService) {
-  const sessionId = service.txt?.sessionId;
-  const receiverToken = service.txt?.receiverToken;
-  const host = service.addresses?.find((address) => address.includes(".")) ?? service.host ?? "0.0.0.0";
-
-  if (!sessionId || !receiverToken) {
-    return null;
-  }
-
-  return {
-    sessionId,
-    method: "nearby",
-    deviceName: service.txt?.deviceName ?? service.name,
-    host,
-    port: service.port ?? 0,
-    token: receiverToken,
-    certificateFingerprint: service.txt?.certificateFingerprint ?? LOCAL_TRANSFER_CERT_FINGERPRINT,
-    advertisedAt: nowIso(),
-    serviceName: service.name,
-  } satisfies DiscoveryRecord;
-}
-
-async function startDirectPushTransfer({
-  runtime,
-  pushToken,
-  tcpSocket,
-}: {
-  runtime: SendRuntime;
-  pushToken: string;
-  tcpSocket: TcpSocketLike;
-}) {
-  const directTarget = `${runtime.target.host}:${runtime.target.port}`;
-  const socket = tcpSocket.connectTLS({
-    host: runtime.target.host,
-    port: runtime.target.port,
-    ca: LOCAL_TRANSFER_CERTIFICATE_ASSET,
-    tlsCheckValidity: false,
-    interface: "wifi",
-  });
-
-  runtime.pushSocket = socket;
-
-  return await new Promise<void>((resolve, reject) => {
-    let settled = false;
-    let didReceiveReady = false;
-    const handshakeTimer = setTimeout(() => {
-      fail(new DirectTransferFallbackError(`Unable to connect over local WiFi at ${directTarget}.`));
-    }, DIRECT_CONNECT_TIMEOUT_MS);
-
-    function cleanup() {
-      clearTimeout(handshakeTimer);
-    }
-
-    function fail(error: Error) {
-      if (settled) {
-        return;
-      }
-
-      settled = true;
-      cleanup();
-      destroySenderPushSocket(runtime, socket);
-      socket.destroy();
-      reject(error);
-    }
-
-    const parser = createFrameParser((frame) => {
-      if (frame.type !== "json") {
-        return;
-      }
-
-      const message = decodeJsonFrame<{ kind: "push-ready" } | { kind: "error"; message: string }>(frame.payload);
-      if (message.kind === "push-ready") {
-        if (settled) {
-          return;
-        }
-
-        settled = true;
-        didReceiveReady = true;
-        cleanup();
-        runtime.didConnectDirectly = true;
-        void streamFilesToSocket(runtime, socket);
-        resolve();
-        return;
-      }
-
-      fail(new DirectTransferFallbackError(message.message));
-    });
-
-    socket.on("secureConnect", () => {
-      void writeSocket(
-        socket,
-        encodeJsonFrame({
-          kind: "push-hello",
-          receiverSessionId: runtime.target.sessionId,
-          offerId: runtime.session.id,
-          pushToken,
-        }),
-      ).catch((error) => {
-        fail(
-          error instanceof Error
-            ? new DirectTransferFallbackError(error.message)
-            : new DirectTransferFallbackError("Unable to start transfer session."),
-        );
-      });
-    });
-    socket.on("data", (chunk) => {
-      parser(chunk as Uint8Array | Buffer | string);
-    });
-    socket.on("error", (error) => {
-      if (didReceiveReady) {
-        return;
-      }
-
-      const baseError = error instanceof Error ? error : new Error("Transfer connection failed.");
-      fail(new DirectTransferFallbackError(`${baseError.message} (${directTarget})`));
-    });
-    socket.on("close", () => {
-      if (didReceiveReady || settled) {
-        return;
-      }
-
-      fail(new DirectTransferFallbackError(`Unable to reach the receiver over local WiFi at ${directTarget}.`));
-    });
-  });
-}
-
-async function beginDirectPushTransfer(
-  runtime: SendRuntime,
-  receiverName: string,
-  pushToken: string,
-  tcpSocket: TcpSocketLike,
-) {
-  try {
-    await startDirectPushTransfer({
+    return receiveRelayFallbackTransfer({
       runtime,
-      pushToken,
-      tcpSocket,
+      offer,
+      onProgress: reportProgress,
+    });
+  }
+}
+
+function startRelayPolling(runtime: SendRuntime) {
+  if (!runtime.session.relay || runtime.relayPollTimer) {
+    return;
+  }
+
+  void syncRelaySenderState(runtime);
+  runtime.relayPollTimer = setInterval(() => {
+    void syncRelaySenderState(runtime);
+  }, RELAY_POLL_INTERVAL_MS);
+}
+
+async function uploadFilesToRelay(runtime: SendRuntime) {
+  if (!runtime.session.relay || runtime.relayUploadStarted || isSendRuntimeSettled(runtime)) {
+    return;
+  }
+
+  runtime.relayUploadStarted = true;
+
+  await activateKeepAwakeAsync(LOCAL_TRANSFER_KEEP_AWAKE_TAG).catch(() => {});
+
+  let bytesTransferred = 0;
+
+  try {
+    withSendSessionUpdate(runtime, {
+      status: "transferring",
+      awaitingReceiverResponse: false,
+      progress: {
+        ...runtime.session.progress,
+        phase: "transferring",
+        detail: "Uploading files through relay.",
+        updatedAt: nowIso(),
+      },
+    });
+
+    for (const file of runtime.files) {
+      const startedAt = Date.now();
+      await uploadRelayTransferFile({
+        relay: runtime.session.relay,
+        file,
+      });
+
+      bytesTransferred += file.sizeBytes;
+      const elapsedMilliseconds = Math.max(Date.now() - startedAt, 1);
+      const speedBytesPerSecond = Math.round((file.sizeBytes / elapsedMilliseconds) * 1000);
+
+      withSendSessionUpdate(runtime, {
+        progress: {
+          phase: "transferring",
+          totalBytes: runtime.session.manifest.totalBytes,
+          bytesTransferred,
+          currentFileName: file.name,
+          speedBytesPerSecond,
+          detail: "Uploading files through relay.",
+          updatedAt: nowIso(),
+        },
+      });
+    }
+
+    withSendSessionUpdate(runtime, {
+      status: "transferring",
+      progress: {
+        phase: "transferring",
+        totalBytes: runtime.session.manifest.totalBytes,
+        bytesTransferred,
+        currentFileName: null,
+        speedBytesPerSecond: 0,
+        detail: "Waiting for the receiver to finish relay download.",
+        updatedAt: nowIso(),
+      },
     });
   } catch (error) {
-    if (error instanceof DirectTransferFallbackError) {
-      try {
-        await provisionRelayFallback(runtime, receiverName);
-      } catch {
-        // The provisioning path already updates session state on failure.
-      }
+    const message = error instanceof Error ? error.message : "Relay upload failed.";
+    if (runtime.controlSocket) {
+      await writeControlMessage(runtime.controlSocket, {
+        kind: "failed",
+        message,
+      }).catch(() => {});
+    }
+    failSendSession(runtime, message);
+    throw error;
+  } finally {
+    await deactivateKeepAwake(LOCAL_TRANSFER_KEEP_AWAKE_TAG).catch(() => {});
+  }
+}
+
+async function syncRelaySenderState(runtime: SendRuntime) {
+  if (!runtime.session.relay || isSendRuntimeSettled(runtime)) {
+    return;
+  }
+
+  try {
+    const state = await getRelaySenderState(runtime.session.relay);
+    const receiverName = getPeerName(state.receiverDeviceName ?? runtime.session.peerDeviceName ?? undefined);
+
+    if (state.status === "accepted" && !runtime.relayUploadStarted) {
+      withSendSessionUpdate(runtime, {
+        peerDeviceName: receiverName,
+        status: "connecting",
+        progress: {
+          phase: "connecting",
+          totalBytes: runtime.session.manifest.totalBytes,
+          bytesTransferred: runtime.session.progress.bytesTransferred,
+          currentFileName: null,
+          speedBytesPerSecond: 0,
+          detail: `${receiverName} accepted relay fallback. Uploading files.`,
+          updatedAt: nowIso(),
+        },
+      });
+      void uploadFilesToRelay(runtime).catch(() => {});
       return;
     }
 
-    failSendSession(runtime, error instanceof Error ? error.message : "Unable to start transfer.");
+    if (state.status === "rejected") {
+      failSendSession(runtime, "Relay transfer declined.");
+      return;
+    }
+
+    if (state.status === "completed") {
+      await completeSendSession(runtime, "Transfer complete through relay.");
+      return;
+    }
+
+    if (state.status === "expired") {
+      failSendSession(runtime, "This relay transfer expired.");
+    }
+  } catch (error) {
+    console.warn("Unable to refresh relay sender state", error);
+  }
+}
+
+async function provisionRelayFallback(runtime: SendRuntime, receiverName: string) {
+  if (runtime.session.relay) {
+    if (runtime.controlSocket) {
+      await writeControlMessage(runtime.controlSocket, {
+        kind: "relay-ready",
+        relay: toRelayAccess(runtime.session.relay)!,
+      }).catch(() => {});
+    }
+    return true;
+  }
+
+  if (!runtime.controlSocket) {
+    failSendSession(runtime, `${receiverName} is no longer available for relay fallback.`);
+    return false;
+  }
+
+  let relay: RelayCredentials;
+
+  try {
+    relay = await createRelayTransferSession({
+      senderDeviceName: runtime.session.manifest.deviceName,
+      files: runtime.files,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unable to prepare relay fallback.";
+    await writeControlMessage(runtime.controlSocket, {
+      kind: "relay-failed",
+      message,
+    }).catch(() => {});
+    failSendSession(runtime, message);
+    return false;
+  }
+
+  if (isSendRuntimeSettled(runtime)) {
+    await deleteRelayTransferSession(relay).catch(() => {});
+    return false;
+  }
+
+  withSendSessionUpdate(runtime, {
+    relay,
+    progress: {
+      phase: "connecting",
+      totalBytes: runtime.session.manifest.totalBytes,
+      bytesTransferred: runtime.session.progress.bytesTransferred,
+      currentFileName: null,
+      speedBytesPerSecond: 0,
+      detail: `${receiverName} could not connect over local WiFi. Preparing relay transfer.`,
+      updatedAt: nowIso(),
+    },
+  });
+
+  startRelayPolling(runtime);
+
+  try {
+    await writeControlMessage(runtime.controlSocket, {
+      kind: "relay-ready",
+      relay: toRelayAccess(relay)!,
+    });
+    return true;
+  } catch (error) {
+    stopRelayPolling(runtime);
+    withSendSessionUpdate(runtime, {
+      relay: null,
+    });
+    await deleteRelayTransferSession(relay).catch(() => {});
+    failSendSession(
+      runtime,
+      error instanceof Error ? error.message : "Unable to notify the receiver about relay fallback.",
+    );
+    return false;
+  }
+}
+
+async function handleSenderHttpSessionFinalized(runtime: SendRuntime, httpSession: LocalHttpSession) {
+  if (runtime.httpSessionId !== httpSession.id) {
+    return;
+  }
+
+  runtime.httpSessionId = null;
+
+  if (isSendRuntimeSettled(runtime) || runtime.stopping) {
+    return;
+  }
+
+  const detail = httpSession.detail ?? "Local transfer server stopped unexpectedly.";
+  if (runtime.controlSocket) {
+    await writeControlMessage(runtime.controlSocket, {
+      kind: "failed",
+      message: detail,
+    }).catch(() => {});
+  }
+  failSendSession(runtime, detail);
+}
+
+async function startSenderHostedHttpTransfer(runtime: SendRuntime, receiverName: string) {
+  if (isSendRuntimeSettled(runtime)) {
+    return;
+  }
+
+  withSendSessionUpdate(runtime, {
+    status: "connecting",
+    awaitingReceiverResponse: false,
+    peerDeviceName: receiverName,
+    progress: {
+      phase: "connecting",
+      totalBytes: runtime.session.manifest.totalBytes,
+      bytesTransferred: runtime.session.progress.bytesTransferred,
+      currentFileName: null,
+      speedBytesPerSecond: 0,
+      detail: `${receiverName} accepted. Preparing local download access.`,
+      updatedAt: nowIso(),
+    },
+  });
+
+  try {
+    const httpSession = await startLocalHttpSession({
+      sessionId: runtime.session.id,
+      files: runtime.files,
+      deviceName: runtime.session.manifest.deviceName,
+      mode: "direct",
+      keepAwakeTag: LOCAL_TRANSFER_KEEP_AWAKE_TAG,
+      onFinalized: (session) => {
+        void handleSenderHttpSessionFinalized(runtime, session);
+      },
+    });
+
+    runtime.httpSessionId = httpSession.id;
+
+    if (!runtime.controlSocket) {
+      await stopSenderHttpRuntime(runtime, "Receiver is no longer available.");
+      failSendSession(runtime, "Receiver is no longer available.");
+      return;
+    }
+
+    await writeControlMessage(runtime.controlSocket, {
+      kind: "http-ready",
+      manifestUrl: httpSession.manifestUrl,
+      shareUrl: httpSession.shareUrl,
+    });
+
+    withSendSessionUpdate(runtime, {
+      status: "connecting",
+      progress: {
+        phase: "connecting",
+        totalBytes: runtime.session.manifest.totalBytes,
+        bytesTransferred: runtime.session.progress.bytesTransferred,
+        currentFileName: null,
+        speedBytesPerSecond: 0,
+        detail: `Waiting for ${receiverName} to download files over local WiFi.`,
+        updatedAt: nowIso(),
+      },
+    });
+  } catch {
+    await provisionRelayFallback(runtime, receiverName);
+  }
+}
+
+function handleSenderOfferRejected(runtime: SendRuntime, detail: string) {
+  failSendSession(runtime, detail);
+}
+
+async function handleSenderControlMessage(runtime: SendRuntime, message: ReceiverControlMessage) {
+  if (message.kind === "offer-received") {
+    return;
+  }
+
+  if (message.kind === "accepted") {
+    const receiverName = getPeerName(message.receiverDeviceName ?? runtime.target.deviceName);
+    await startSenderHostedHttpTransfer(runtime, receiverName);
+    return;
+  }
+
+  if (message.kind === "progress") {
+    withSendSessionUpdate(runtime, {
+      status: message.progress.phase === "transferring" ? "transferring" : "connecting",
+      awaitingReceiverResponse: false,
+      progress: {
+        ...message.progress,
+        detail: message.progress.detail ?? runtime.session.progress.detail,
+      },
+    });
+    return;
+  }
+
+  if (message.kind === "completed") {
+    await completeSendSession(runtime, message.detail ?? "Transfer complete.");
+    return;
+  }
+
+  if (message.kind === "direct-http-failed") {
+    await stopSenderHttpRuntime(runtime, message.message || "Direct transfer unavailable.");
+    await provisionRelayFallback(runtime, runtime.session.peerDeviceName ?? runtime.target.deviceName);
+    return;
+  }
+
+  if (message.kind === "rejected" || message.kind === "busy") {
+    handleSenderOfferRejected(runtime, message.message || "That receiver is busy right now.");
+    return;
+  }
+
+  if (message.kind === "failed" || message.kind === "canceled") {
+    await stopSenderHttpRuntime(runtime, message.message || "Transfer stopped.");
+    failSendSession(runtime, message.message || "Transfer stopped.");
   }
 }
 
@@ -1774,73 +1818,142 @@ async function sendOfferOverControlSocket(
   });
 
   runtime.controlSocket = socket;
+  socket.setNoDelay?.(true);
 
-  const parser = createFrameParser((frame) => {
-    if (frame.type !== "json") {
+  let didReceiveInitialResponse = false;
+  const responseTimer = setTimeout(() => {
+    if (didReceiveInitialResponse || isSendRuntimeSettled(runtime) || runtime.stopping) {
       return;
     }
 
-    const message = decodeJsonFrame<
-      | { kind: "offer-received" }
-      | { kind: "accepted"; receiverDeviceName?: string; pushToken?: string }
-      | { kind: "rejected"; message: string }
-      | { kind: "busy"; message: string }
-      | { kind: "error"; message: string }
-    >(frame.payload);
+    handleSenderOfferRejected(runtime, `Unable to reach ${target.deviceName}.`);
+    socket.destroy();
+  }, CONTROL_RESPONSE_TIMEOUT_MS);
 
-    if (message.kind === "offer-received") {
-      return;
+  const clearResponseTimer = () => {
+    clearTimeout(responseTimer);
+  };
+
+  const parser = createControlMessageParser((message) => {
+    if (!didReceiveInitialResponse) {
+      didReceiveInitialResponse = true;
+      clearResponseTimer();
     }
 
-    if (message.kind === "accepted") {
-      const receiverName = getPeerName(message.receiverDeviceName ?? target.deviceName);
-      const pushToken = message.pushToken?.trim();
-      if (!pushToken) {
-        handleSenderOfferRejected(runtime, "Receiver did not provide direct transfer access.");
-        return;
-      }
-
-      handleSenderOfferAccepted(runtime, receiverName);
-      void beginDirectPushTransfer(runtime, receiverName, pushToken, tcpSocket);
-      return;
-    }
-
-    handleSenderOfferRejected(
-      runtime,
-      message.kind === "busy" ? message.message || "That receiver is busy right now." : message.message,
-    );
+    void handleSenderControlMessage(runtime, message as ReceiverControlMessage);
   });
 
   socket.on("secureConnect", () => {
-    void writeSocket(
-      socket,
-      encodeJsonFrame({
-        kind: "offer",
-        receiverSessionId: target.sessionId,
-        receiverToken: target.token,
-        offer,
-      }),
-    ).catch((error) => {
+    void writeControlMessage(socket, {
+      kind: "offer",
+      receiverSessionId: target.sessionId,
+      receiverToken: target.token,
+      offer,
+    }).catch((error) => {
+      clearResponseTimer();
       handleSenderOfferRejected(runtime, error instanceof Error ? error.message : "Unable to reach that receiver.");
     });
   });
+
   socket.on("data", (chunk) => {
-    parser(chunk as Uint8Array | Buffer | string);
-  });
-  socket.on("error", (error) => {
-    if (runtime.session.awaitingReceiverResponse) {
-      handleSenderOfferRejected(runtime, error instanceof Error ? error.message : "Unable to reach that receiver.");
+    try {
+      parser(chunk as Uint8Array | Buffer | string);
+    } catch (error) {
+      handleSenderOfferRejected(
+        runtime,
+        error instanceof Error ? error.message : "Unable to decode receiver response.",
+      );
     }
   });
+
+  socket.on("error", (error) => {
+    clearResponseTimer();
+    if (!isSendRuntimeSettled(runtime)) {
+      const message = error instanceof Error ? error.message : "Unable to reach that receiver.";
+      if (runtime.session.awaitingReceiverResponse) {
+        handleSenderOfferRejected(runtime, message);
+      } else {
+        failSendSession(runtime, message);
+      }
+    }
+  });
+
   socket.on("close", () => {
+    clearResponseTimer();
     if (runtime.controlSocket === socket) {
       runtime.controlSocket = undefined;
     }
 
-    if (runtime.session.awaitingReceiverResponse) {
-      handleSenderOfferRejected(runtime, "That receiver is no longer available.");
+    if (!isSendRuntimeSettled(runtime) && !runtime.stopping) {
+      failSendSession(runtime, "That receiver is no longer available.");
     }
   });
+}
+
+function handleReceiveControlMessage(runtime: ReceiveRuntime, message: SenderControlMessage) {
+  if (message.kind === "http-ready") {
+    const pending = takePendingHttpReady(runtime);
+    if (pending) {
+      pending.resolve({
+        manifestUrl: message.manifestUrl,
+        shareUrl: message.shareUrl,
+      });
+    }
+    return;
+  }
+
+  if (message.kind === "relay-ready") {
+    const nextOffer = updateIncomingOfferRelay(runtime, message.relay);
+    rejectPendingHttpReady(
+      runtime,
+      new DirectTransferFallbackError("Direct transfer unavailable. Switching to relay."),
+    );
+    if (nextOffer) {
+      const pending = takePendingRelayReady(runtime);
+      if (pending) {
+        pending.resolve(nextOffer);
+      }
+    }
+    return;
+  }
+
+  if (message.kind === "relay-failed") {
+    const error = new Error(message.message || "Unable to prepare relay fallback.");
+    rejectPendingHttpReady(runtime, error);
+    rejectPendingRelayReady(runtime, error);
+    return;
+  }
+
+  if (message.kind === "failed" || message.kind === "canceled") {
+    const error = new Error(message.message || "Sender stopped the transfer.");
+    rejectPendingHttpReady(runtime, error);
+    rejectPendingRelayReady(runtime, error);
+    runtime.activeDownloadAbortController?.abort();
+  }
+}
+
+function mapResolvedService(service: ZeroconfService) {
+  const sessionId = service.txt?.sessionId;
+  const receiverToken = service.txt?.receiverToken;
+  const host =
+    service.addresses?.map((address) => getUsableLanHost(address)).find((address) => Boolean(address)) ??
+    getUsableLanHost(service.host);
+
+  if (!sessionId || !receiverToken || !host) {
+    return null;
+  }
+
+  return {
+    sessionId,
+    method: "nearby",
+    deviceName: service.txt?.deviceName ?? service.name,
+    host,
+    port: service.port ?? 0,
+    token: receiverToken,
+    certificateFingerprint: service.txt?.certificateFingerprint ?? LOCAL_TRANSFER_CERT_FINGERPRINT,
+    advertisedAt: nowIso(),
+    serviceName: service.name,
+  } satisfies DiscoveryRecord;
 }
 
 export async function startSendingTransfer({
@@ -1877,7 +1990,8 @@ export async function startSendingTransfer({
     target,
     updateSession,
     relayUploadStarted: false,
-    didConnectDirectly: false,
+    httpSessionId: null,
+    stopping: false,
   };
 
   activeSendRuntimes.set(sessionId, runtime);
@@ -1895,8 +2009,18 @@ export async function startSendingTransfer({
     return runtime.session;
   }
 
-  if (!tcpSocket || !hasDirectSendPath(runtime)) {
+  if (!tcpSocket || target.port <= 0 || !target.token.trim()) {
     failSendSession(runtime, "That receiver is no longer available.");
+    return runtime.session;
+  }
+
+  if (!getUsableLanHost(target.host)) {
+    failSendSession(
+      runtime,
+      target.method === "qr"
+        ? "That QR code does not contain a usable local WiFi address."
+        : "That receiver is not advertising a usable local WiFi address.",
+    );
     return runtime.session;
   }
 
@@ -1911,10 +2035,20 @@ export async function stopSendingTransfer(sessionId: string) {
     return;
   }
 
-  runtime.controlSocket?.destroy();
-  runtime.pushSocket?.destroy();
+  runtime.stopping = true;
+
+  if (!isSendRuntimeSettled(runtime)) {
+    if (runtime.controlSocket) {
+      await writeControlMessage(runtime.controlSocket, {
+        kind: "canceled",
+        message: "Sender canceled the transfer.",
+      }).catch(() => {});
+    }
+  }
+
+  closeSendControlSocket(runtime);
   stopRelayPolling(runtime);
-  activeSendRuntimes.delete(sessionId);
+  await stopSenderHttpRuntime(runtime, "Sender canceled the transfer.");
 
   if (runtime.target.method === "preview") {
     const receiverRuntime = activeReceiveRuntimes.get(runtime.target.sessionId);
@@ -1927,14 +2061,13 @@ export async function stopSendingTransfer(sessionId: string) {
     }
   }
 
-  if (
-    runtime.session.relay &&
-    (runtime.session.status !== "completed" || runtime.session.progress.detail !== "Transfer complete through relay.")
-  ) {
+  if (runtime.session.relay) {
     await deleteRelayTransferSession(runtime.session.relay).catch((error) => {
       console.warn("Unable to delete relay transfer session", error);
     });
   }
+
+  activeSendRuntimes.delete(sessionId);
 }
 
 export async function startReceivingAvailability({
@@ -1946,7 +2079,7 @@ export async function startReceivingAvailability({
 }) {
   const sessionId = Crypto.randomUUID();
   const receiverToken = Crypto.randomUUID().replace(/-/g, "");
-  const deviceIp = safeDeviceIp(await Network.getIpAddressAsync().catch(() => null));
+  const deviceIp = getUsableLanHost(await Network.getIpAddressAsync().catch(() => null));
   const tcpSocket = await loadTcpSocket();
   const zeroconfModule = await loadZeroconf();
   let resolvedPort = 0;
@@ -1959,170 +2092,76 @@ export async function startReceivingAvailability({
       },
       (socket: TransferSocket) => {
         let registeredOfferId: string | null = null;
-        const detachClassifier = () => {
-          socket.off?.("data", handleData);
-          socket.off?.("error", handleError);
-          socket.off?.("close", handleClose);
-        };
-        const parser = createFrameParser((frame) => {
-          if (frame.type !== "json") {
-            return;
-          }
-
+        const parser = createControlMessageParser((message) => {
           const runtime = activeReceiveRuntimes.get(sessionId);
-          if (registeredOfferId) {
-            if (runtime && runtime.pendingOfferSocket === socket && runtime.session.incomingOffer?.id === registeredOfferId) {
-              const message = decodeJsonFrame<
-                { kind: "relay-ready"; relay: RelayAccess } | { kind: "relay-failed"; message: string }
-              >(frame.payload);
-
-              if (message.kind === "relay-ready") {
-                const nextOffer = updateIncomingOfferRelay(runtime, message.relay);
-                if (nextOffer) {
-                  rejectPendingDirectTransferRequest(
-                    runtime,
-                    new DirectTransferFallbackError("Direct transfer unavailable. Switching to relay."),
-                  );
-                  resolvePendingRelayOfferRequest(runtime, nextOffer);
-                }
-              } else {
-                const error = new Error(message.message || "Unable to prepare relay fallback.");
-                rejectPendingDirectTransferRequest(runtime, error);
-                rejectPendingRelayOfferRequest(
-                  runtime,
-                  error,
-                );
-              }
-            }
+          if (!runtime) {
+            socket.destroy();
             return;
           }
 
-          const message = decodeJsonFrame<{
-            kind: string;
-            receiverSessionId?: string;
-            receiverToken?: string;
-            offer?: IncomingTransferOffer;
-            offerId?: string;
-            pushToken?: string;
-          }>(frame.payload);
-
-          if (message.kind === "push-hello") {
-            const pendingDirectRequest = runtime?.pendingDirectTransferRequest;
-            const offer = runtime?.session.incomingOffer;
+          if (!registeredOfferId) {
+            const offerMessage = message as SenderControlMessage;
             if (
-              !runtime ||
-              !pendingDirectRequest ||
-              !offer ||
-              message.receiverSessionId !== sessionId ||
-              message.offerId !== pendingDirectRequest.offerId ||
-              message.pushToken !== pendingDirectRequest.pushToken
+              offerMessage.kind !== "offer" ||
+              offerMessage.receiverSessionId !== sessionId ||
+              offerMessage.receiverToken !== receiverToken
             ) {
-              void writeSocket(
-                socket,
-                encodeJsonFrame({
-                  kind: "error",
-                  message: "Unable to validate direct transfer session.",
-                }),
-              )
-                .catch(() => {})
-                .finally(() => {
-                  socket.destroy();
-                });
-              return;
-            }
-
-            const directRequest = takePendingDirectTransferRequest(runtime);
-            if (!directRequest) {
+              void writeControlMessage(socket, {
+                kind: "failed",
+                message: "Unable to validate receiver.",
+              }).catch(() => {});
               socket.destroy();
               return;
             }
 
-            detachClassifier();
-            void writeSocket(socket, encodeJsonFrame({ kind: "push-ready" }))
-              .then(() => {
-                runtime.pendingOfferSocket = undefined;
-                return receiveTransferFromSocket({
-                  offer,
-                  socket,
-                  onProgress: directRequest.onProgress,
-                  directTarget: `${offer.senderDeviceName} -> ${runtime.session.discoveryRecord.deviceName}`,
-                });
-              })
-              .then(directRequest.resolve)
-              .catch((error) => {
-                directRequest.reject(error instanceof Error ? error : new Error("Unable to receive transfer."));
-              });
-            return;
-          }
-
-          if (
-            message.kind !== "offer" ||
-            message.receiverSessionId !== sessionId ||
-            message.receiverToken !== receiverToken ||
-            !message.offer
-          ) {
-            void writeSocket(
-              socket,
-              encodeJsonFrame({
-                kind: "error",
-                message: "Unable to validate receiver.",
-              }),
-            )
-              .catch(() => {})
-              .finally(() => {
-                socket.destroy();
-              });
-            return;
-          }
-
-          if (!runtime || !registerIncomingOffer(runtime, message.offer, socket)) {
-            void writeSocket(
-              socket,
-              encodeJsonFrame({
+            if (!registerIncomingOffer(runtime, offerMessage.offer, socket)) {
+              void writeControlMessage(socket, {
                 kind: "busy",
                 message: "That receiver is busy right now.",
-              }),
-            )
-              .catch(() => {})
-              .finally(() => {
-                socket.destroy();
-              });
+              }).catch(() => {});
+              socket.destroy();
+              return;
+            }
+
+            registeredOfferId = offerMessage.offer.id;
+            void writeControlMessage(socket, {
+              kind: "offer-received",
+            }).catch(() => {});
             return;
           }
 
-          registeredOfferId = message.offer.id;
-          void writeSocket(socket, encodeJsonFrame({ kind: "offer-received" })).catch(() => {});
+          handleReceiveControlMessage(runtime, message as SenderControlMessage);
         });
 
         const handleData = (chunk: unknown) => {
-          parser(chunk as Uint8Array | Buffer | string);
+          try {
+            parser(chunk as Uint8Array | Buffer | string);
+          } catch (error) {
+            console.warn("Unable to decode sender control message", error);
+            socket.destroy();
+          }
         };
+
         const handleSocketEnded = () => {
           const runtime = activeReceiveRuntimes.get(sessionId);
-          if (runtime?.pendingOfferSocket === socket) {
-            runtime.pendingOfferSocket = undefined;
-            rejectPendingDirectTransferRequest(runtime, new Error("Sender is no longer available."));
-            rejectPendingRelayOfferRequest(runtime, new Error("Sender is no longer available."));
+          if (!runtime) {
+            return;
           }
 
-          if (
-            runtime &&
-            runtime.session.status === "waiting" &&
-            runtime.session.incomingOffer?.id === registeredOfferId
-          ) {
+          if (runtime.controlSocket === socket) {
+            runtime.controlSocket = undefined;
+            rejectPendingReceiveWaits(runtime, new Error("Sender is no longer available."));
+            runtime.activeDownloadAbortController?.abort();
+          }
+
+          if (runtime.session.status === "waiting" && runtime.session.incomingOffer?.id === registeredOfferId) {
             resetReceiveToDiscoverable(runtime);
           }
         };
-        const handleError = () => {
-          handleSocketEnded();
-        };
-        const handleClose = () => {
-          handleSocketEnded();
-        };
 
         socket.on("data", handleData);
-        socket.on("error", handleError);
-        socket.on("close", handleClose);
+        socket.on("error", handleSocketEnded);
+        socket.on("close", handleSocketEnded);
       },
     );
 
@@ -2149,7 +2188,7 @@ export async function startReceivingAvailability({
     sessionId,
     method: "preview",
     deviceName,
-    host: deviceIp,
+    host: deviceIp ?? "0.0.0.0",
     port: resolvedPort,
     token: receiverToken,
     serviceName: null,
@@ -2167,6 +2206,7 @@ export async function startReceivingAvailability({
           },
         }
       : {}),
+    stopping: false,
   };
 
   if (resolvedPort && zeroconfModule) {
@@ -2202,7 +2242,7 @@ export async function startReceivingAvailability({
     sessionId,
     method: resolvedPort ? (zeroconfModule ? "nearby" : "qr") : "preview",
     deviceName,
-    host: deviceIp,
+    host: deviceIp ?? "0.0.0.0",
     port: resolvedPort,
     token: receiverToken,
     serviceName,
@@ -2221,19 +2261,24 @@ export async function stopReceivingAvailability(sessionId: string) {
     return;
   }
 
-  rejectPendingDirectTransferRequest(runtime, new Error("Receiver is no longer available."));
-  rejectPendingRelayOfferRequest(runtime, new Error("Receiver is no longer available."));
+  runtime.stopping = true;
+  rejectPendingReceiveWaits(runtime, new Error("Receiver is no longer available."));
+  runtime.activeDownloadAbortController?.abort();
 
-  if (runtime.session.status === "waiting" && runtime.session.incomingOffer) {
-    if (runtime.session.incomingOffer.sender.relay) {
-      await declineRelayTransferSession(runtime.session.incomingOffer.sender.relay).catch(() => {});
+  if (runtime.session.incomingOffer) {
+    if (runtime.session.status === "waiting") {
+      if (runtime.session.incomingOffer.sender.relay) {
+        await declineRelayTransferSession(runtime.session.incomingOffer.sender.relay).catch(() => {});
+      }
+      await notifySenderRejected(runtime, runtime.session.incomingOffer, "Receiver is no longer available.").catch(
+        () => {},
+      );
+    } else if (runtime.session.status === "connecting" || runtime.session.status === "transferring") {
+      await notifySenderCanceled(runtime, "Receiver canceled the transfer.").catch(() => {});
     }
-    await notifySenderRejected(runtime, runtime.session.incomingOffer, "Receiver is no longer available.").catch(
-      () => {},
-    );
   }
 
-  runtime.pendingOfferSocket?.destroy();
+  closeReceiveControlSocket(runtime);
   runtime.zeroconf?.publisher.stop();
   runtime.server?.close();
   activeReceiveRuntimes.delete(sessionId);
@@ -2247,6 +2292,15 @@ export async function acceptIncomingTransferOffer(sessionId: string) {
 
   try {
     const result = await runReceiveTransfer(runtime);
+
+    if (runtime.controlSocket) {
+      const detail = result.detail;
+      await writeControlMessage(runtime.controlSocket, {
+        kind: "completed",
+        detail,
+      }).catch(() => {});
+    }
+
     withReceiveSessionUpdate(runtime, {
       status: "completed",
       receivedFiles: result.receivedFiles,
@@ -2262,6 +2316,13 @@ export async function acceptIncomingTransferOffer(sessionId: string) {
     });
     return true;
   } catch (error) {
+    if (runtime.controlSocket && !(error instanceof DirectTransferFallbackError)) {
+      await writeControlMessage(runtime.controlSocket, {
+        kind: "failed",
+        message: error instanceof Error ? error.message : "The transfer could not be completed.",
+      }).catch(() => {});
+    }
+
     withReceiveSessionUpdate(runtime, {
       status: "failed",
       progress: {

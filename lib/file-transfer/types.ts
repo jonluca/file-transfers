@@ -20,14 +20,36 @@ export interface SelectedTransferFile {
   sizeBytes: number;
 }
 
+export interface TransferManifestFile {
+  id: string;
+  name: string;
+  mimeType: string;
+  sizeBytes: number;
+}
+
 export interface TransferManifest {
   sessionId: string;
   deviceName: string;
-  files: SelectedTransferFile[];
+  files: TransferManifestFile[];
   fileCount: number;
   totalBytes: number;
   isPremiumSender: boolean;
   createdAt: string;
+}
+
+export interface DownloadableTransferFile extends TransferManifestFile {
+  downloadUrl: string;
+}
+
+export interface DownloadableTransferManifest {
+  version: 1;
+  kind: "local-http-share" | "direct-http-transfer";
+  sessionId: string;
+  deviceName: string;
+  startedAt: string;
+  shareUrl: string;
+  totalBytes: number;
+  files: DownloadableTransferFile[];
 }
 
 export interface DiscoveryRecord {
@@ -82,7 +104,7 @@ export interface ReceiveSession {
   id: string;
   status: TransferStatus;
   discoveryRecord: DiscoveryRecord;
-  qrPayload: string;
+  qrPayload: string | null;
   previewMode: boolean;
   incomingOffer: IncomingTransferOffer | null;
   peerDeviceName: string | null;
@@ -121,11 +143,9 @@ export interface HttpShareSession {
   shareUrl: string;
   manifestUrl: string;
   qrValue: string;
-  files: SelectedTransferFile[];
+  files: TransferManifestFile[];
   totalBytes: number;
   startedAt: string;
-  requestCount: number;
-  lastRequestAt: string | null;
   detail: string | null;
 }
 

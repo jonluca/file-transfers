@@ -161,6 +161,30 @@ export async function downloadRelayTransferFile({
   });
 }
 
+export async function fetchRelayTransferFile({
+  relay,
+  fileId,
+  signal,
+}: {
+  relay: RelayAccess;
+  fileId: string;
+  signal?: AbortSignal;
+}) {
+  const response = await fetch(getRelayUrl(`/relay/sessions/${relay.sessionId}/files/${fileId}`), {
+    headers: {
+      "x-relay-token": relay.receiverToken,
+    },
+    signal,
+  });
+
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(payload?.error ?? `Relay download failed with status ${response.status}.`);
+  }
+
+  return response;
+}
+
 export async function completeRelayTransferSession(relay: RelayAccess) {
   const response = await fetch(getRelayUrl(`/relay/sessions/${relay.sessionId}/complete`), {
     method: "POST",

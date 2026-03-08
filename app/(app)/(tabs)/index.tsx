@@ -24,6 +24,7 @@ import {
   type HttpShareSession,
   type ReceiveSession,
   type SelectedTransferFile,
+  type TransferManifestFile,
   type TransferHistoryEntry,
   type TransferProgress,
   type TransferSession,
@@ -54,17 +55,6 @@ function MimeIcon({ type }: { type: string }) {
 
 function getTransferDetail(value: string | null | undefined, fallback: string) {
   return value ?? fallback;
-}
-
-function formatLastRequestTime(value: string | null) {
-  if (!value) {
-    return "No visits yet";
-  }
-
-  return new Date(value).toLocaleTimeString([], {
-    hour: "numeric",
-    minute: "2-digit",
-  });
 }
 
 function createHistoryEntryFromSendSession(session: TransferSession): TransferHistoryEntry {
@@ -175,7 +165,13 @@ function OutlineButton({ label, onPress, icon }: { label: string; onPress: () =>
   );
 }
 
-function FileRow({ file, onRemove }: { file: SelectedTransferFile; onRemove?: () => void }) {
+function FileRow({
+  file,
+  onRemove,
+}: {
+  file: Pick<SelectedTransferFile, "name" | "mimeType" | "sizeBytes"> | TransferManifestFile;
+  onRemove?: () => void;
+}) {
   return (
     <View style={styles.fileRow}>
       <View style={styles.fileIconWrap}>
@@ -981,11 +977,6 @@ export default function TransferScreen() {
   }
 
   if (mode === "sharing" && activeHttpShareSession) {
-    const requestCountLabel =
-      activeHttpShareSession.requestCount === 0
-        ? "No browser requests yet."
-        : `${activeHttpShareSession.requestCount} request${activeHttpShareSession.requestCount === 1 ? "" : "s"} received.`;
-
     return (
       <View style={[styles.root, { paddingTop: insets.top + 16 }]}>
         <View style={styles.topBar}>
@@ -1025,14 +1016,6 @@ export default function TransferScreen() {
             <View style={styles.shareMetaRow}>
               <Text style={styles.shareMetaLabel}>Total size</Text>
               <Text style={styles.shareMetaValue}>{formatBytes(activeHttpShareSession.totalBytes)}</Text>
-            </View>
-            <View style={styles.shareMetaRow}>
-              <Text style={styles.shareMetaLabel}>Requests</Text>
-              <Text style={styles.shareMetaValue}>{requestCountLabel}</Text>
-            </View>
-            <View style={styles.shareMetaRow}>
-              <Text style={styles.shareMetaLabel}>Last visit</Text>
-              <Text style={styles.shareMetaValue}>{formatLastRequestTime(activeHttpShareSession.lastRequestAt)}</Text>
             </View>
           </View>
 
