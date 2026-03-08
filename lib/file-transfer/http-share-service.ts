@@ -1,8 +1,4 @@
-import {
-  startLocalHttpSession,
-  stopLocalHttpSession,
-  type LocalHttpSession,
-} from "./local-http-runtime";
+import { startLocalHttpSession, stopLocalHttpSession, type LocalHttpSession } from "./local-http-runtime";
 import type { HttpShareSession, SelectedTransferFile } from "./types";
 
 type HttpShareSessionUpdate = (session: HttpShareSession) => void;

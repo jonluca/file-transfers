@@ -422,13 +422,7 @@ function createDirectManifest(runtime: SharedHttpRuntime, sendSession: DirectSen
   } satisfies DownloadableTransferManifest;
 }
 
-async function createFileResponse({
-  file,
-  method,
-}: {
-  file: SelectedTransferFile;
-  method: string;
-}) {
+async function createFileResponse({ file, method }: { file: SelectedTransferFile; method: string }) {
   const sourceFile = new File(file.uri);
   const sourceInfo = sourceFile.info();
 

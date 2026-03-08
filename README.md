@@ -53,7 +53,7 @@ See [`.env.example`](/Users/jonlucadecaro/Documents/Other/file-transfers/.env.ex
 
 ## macOS Device Emulator
 
-Use [`scripts/macos-transfer-device.ts`](/Users/jonlucadecaro/Documents/Other/file-transfers/scripts/macos-transfer-device.ts) to emulate a nearby device from macOS for transfer debugging. The script speaks the same TLS framing and relay endpoints as the app, so it can act as either side of a transfer.
+Use [`scripts/macos-transfer-device.ts`](/Users/jonlucadecaro/Documents/Other/file-transfers/scripts/macos-transfer-device.ts) to emulate a nearby device from macOS for transfer debugging. The script now speaks the same fixed-port HTTP discovery/control/file protocol and relay endpoints as the app, so it can act as either side of a transfer.
 
 Start a long-running receiver service:
 
@@ -66,7 +66,7 @@ pnpm macos:device receive \
 
 That command:
 
-- starts the receiver control socket with the shared local-transfer certificate
+- starts an HTTP receiver service on port `41000`
 - advertises itself over Bonjour via `dns-sd` so the mobile sender can find it in nearby scan
 - writes a JSON state file with the current `discoveryRecord`, `qrPayload`, progress, and last transfer result
 
@@ -97,7 +97,7 @@ Transport options for both `send` and `receive`:
 
 - `--transport auto` tries direct WiFi first, then falls back to relay
 - `--transport direct` disables relay provisioning/fallback
-- `--transport relay` skips direct sockets and exercises the relay path only
+- `--transport relay` forces the local HTTP path to fail fast so relay is exercised immediately after acceptance
 
 Generate a launchd plist for a background receiver service:
 
@@ -118,7 +118,7 @@ launchctl kickstart -k "gui/$(id -u)/com.filetransfers.macos-device"
 
 ## Notes
 
-- Local transfer discovery uses Bonjour/mDNS and TLS sockets, so test on real devices on the same WiFi network.
+- Local transfer discovery uses Bonjour/mDNS and fixed-port HTTP on port `41000`, so test on real devices on the same WiFi network.
 - Hosted files default to local server storage in development and switch to Cloudflare R2 presigned uploads/downloads when the R2 environment variables are set.
 - Production hosted-link pages should use `https://storage.filetransfersapp.com` as `HOSTED_FILES_BASE_URL`.
 - RevenueCat purchase flows stay disabled until the public iOS and Android API keys are configured.

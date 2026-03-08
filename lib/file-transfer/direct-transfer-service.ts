@@ -447,15 +447,7 @@ function buildPeerAccessFromDiscovery(record: DiscoveryRecord): DirectPeerAccess
   };
 }
 
-async function postJsonWithTimeout({
-  url,
-  token,
-  body,
-}: {
-  url: string;
-  token: string;
-  body: unknown;
-}) {
+async function postJsonWithTimeout({ url, token, body }: { url: string; token: string; body: unknown }) {
   const controller = new AbortController();
   const timer = setTimeout(() => {
     controller.abort();
@@ -478,7 +470,9 @@ async function postJsonWithTimeout({
     }
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
-      throw new Error("Nearby device did not respond in time.");
+      throw new Error("Nearby device did not respond in time.", {
+        cause: error,
+      });
     }
 
     throw error;
@@ -691,8 +685,8 @@ function failReceiveSession(runtime: ReceiveRuntime, detail: string) {
 function isReceiveRuntimeBusy(runtime: ReceiveRuntime) {
   return Boolean(
     runtime.session.incomingOffer ||
-      runtime.session.status === "connecting" ||
-      runtime.session.status === "transferring",
+    runtime.session.status === "connecting" ||
+    runtime.session.status === "transferring",
   );
 }
 
