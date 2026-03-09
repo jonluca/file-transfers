@@ -4,8 +4,8 @@
 .expo
 .idea
 .pnpm-store
-android
-ios
+/android
+/ios
 dist
 node_modules
 server/storage/relay-sessions/
@@ -16,3 +16,6 @@ server/storage/relay-sessions/
 expo-env.d.ts
 # @end expo-cli
 tmp
+
+# Keep local Expo module native sources trackable while ignoring generated Android build output.
+modules/**/android/build/

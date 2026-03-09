@@ -1,0 +1,9 @@
+{
+  "platforms": ["apple", "android", "web"],
+  "apple": {
+    "modules": ["DirectTransferNativeModule"]
+  },
+  "android": {
+    "modules": ["expo.modules.directtransfernative.DirectTransferNativeModule"]
+  }
+}
