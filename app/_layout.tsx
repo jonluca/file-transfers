@@ -13,7 +13,7 @@ import * as SystemUI from "expo-system-ui";
 import { Slot } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import React, { useEffect } from "react";
-import { AppState, Platform } from "react-native";
+import { AppState, LogBox, Platform } from "react-native";
 import type { AppStateStatus } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { SafeAreaProvider } from "react-native-safe-area-context";
@@ -28,6 +28,16 @@ function onAppStateChange(status: AppStateStatus) {
   if (Platform.OS !== "web") {
     focusManager.setFocused(status === "active");
   }
+}
+
+const REVENUECAT_LOGBOX_PATTERNS = [
+  /^\[Purchases\].*ERROR:/,
+  "Unable to initialize RevenueCat session",
+];
+
+if (__DEV__ && Platform.OS !== "web") {
+  // RevenueCat's native logger can still surface SDK-prefixed errors in LogBox.
+  LogBox.ignoreLogs(REVENUECAT_LOGBOX_PATTERNS);
 }
 
 export const queryClient = createBoilerplateQueryClient();
