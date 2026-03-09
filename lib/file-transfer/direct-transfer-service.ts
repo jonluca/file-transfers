@@ -238,11 +238,34 @@ function createProgress(totalBytes: number, phase: TransferProgress["phase"], de
 }
 
 function withSendSessionUpdate(runtime: SendRuntime, patch: Partial<TransferSession>) {
+  const previousSession = runtime.session;
   runtime.session = {
     ...runtime.session,
     ...patch,
     progress: patch.progress ?? runtime.session.progress,
   };
+
+  if (
+    previousSession.status !== runtime.session.status ||
+    previousSession.awaitingReceiverResponse !== runtime.session.awaitingReceiverResponse ||
+    previousSession.progress.phase !== runtime.session.progress.phase ||
+    previousSession.progress.detail !== runtime.session.progress.detail ||
+    previousSession.progress.bytesTransferred !== runtime.session.progress.bytesTransferred
+  ) {
+    logDirectTransferDebug("Sender session state changed", {
+      sessionId: getSessionDebugId(runtime.session.id),
+      fromStatus: previousSession.status,
+      toStatus: runtime.session.status,
+      fromPhase: previousSession.progress.phase,
+      toPhase: runtime.session.progress.phase,
+      awaitingReceiverResponse: runtime.session.awaitingReceiverResponse,
+      bytesTransferred: runtime.session.progress.bytesTransferred,
+      totalBytes: runtime.session.progress.totalBytes,
+      detail: runtime.session.progress.detail,
+      peerDeviceName: runtime.session.peerDeviceName,
+    });
+  }
+
   runtime.updateSession?.(runtime.session);
 }
 
@@ -1425,6 +1448,7 @@ export async function startReceivingAvailability({
     token: receiverToken,
     deviceName,
     serviceName: requestedServiceName,
+    canAcceptOffer: () => activeReceiveRuntimes.get(sessionId)?.session.status === "discoverable",
     onOffer: async (offer) => {
       const runtime = activeReceiveRuntimes.get(sessionId);
       if (!runtime) {

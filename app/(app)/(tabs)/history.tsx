@@ -24,6 +24,7 @@ import {
   type ReceivedFileRecord,
   type TransferHistoryEntry,
 } from "@/lib/file-transfer";
+import { getTabScreenTopInset } from "@/lib/design/tab-screen-insets";
 import { useRecentTransfers } from "@/store";
 
 function FilePreviewIcon({ type }: { type: string }) {
@@ -224,11 +225,12 @@ function HistoryRow({ entry }: { entry: TransferHistoryEntry }) {
 
 export default function HistoryScreen() {
   const insets = useSafeAreaInsets();
+  const topInset = getTabScreenTopInset(insets.top);
   const recentTransfers = useRecentTransfers();
 
   if (recentTransfers.length === 0) {
     return (
-      <View style={[styles.root, styles.emptyRoot, { paddingTop: insets.top }]}>
+      <View style={[styles.root, styles.emptyRoot, { paddingTop: topInset }]}>
         <View style={styles.emptyIconWrap}>
           <File color={designTheme.mutedForeground} size={36} strokeWidth={1.8} />
         </View>
@@ -242,7 +244,7 @@ export default function HistoryScreen() {
     <ScrollView
       contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 24) + 16 }}
       showsVerticalScrollIndicator={false}
-      style={[styles.root, { paddingTop: insets.top + 16 }]}
+      style={[styles.root, { paddingTop: topInset + 16 }]}
     >
       <Text style={styles.title}>History</Text>
       <View style={styles.list}>

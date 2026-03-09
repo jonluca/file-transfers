@@ -54,6 +54,7 @@ interface RegisterDirectReceiveSessionOptions {
   token: string;
   deviceName: string;
   serviceName: string | null;
+  canAcceptOffer?: () => boolean;
   onOffer: (offer: IncomingTransferOffer) => Promise<DirectOfferDecision> | DirectOfferDecision;
   onEvent: (event: unknown) => Promise<void> | void;
   onInterrupted?: (detail: string) => Promise<void> | void;
@@ -86,6 +87,7 @@ interface BrowserShareRuntime {
 
 interface DirectReceiveRuntime {
   discoveryRecord: DiscoveryRecord;
+  canAcceptOffer?: RegisterDirectReceiveSessionOptions["canAcceptOffer"];
   onOffer: RegisterDirectReceiveSessionOptions["onOffer"];
   onEvent: RegisterDirectReceiveSessionOptions["onEvent"];
   onInterrupted?: RegisterDirectReceiveSessionOptions["onInterrupted"];
@@ -813,7 +815,9 @@ async function handleDirectRequest(runtime: SharedHttpRuntime, request: HttpRequ
     return createJsonResponse({
       statusCode: 200,
       body: createNearbyDiscoveryResponse(
-        Array.from(runtime.directReceivers.values(), (value) => value.discoveryRecord),
+        Array.from(runtime.directReceivers.values())
+          .filter((value) => value.canAcceptOffer?.() ?? true)
+          .map((value) => value.discoveryRecord),
       ),
       method,
     });
@@ -1056,6 +1060,7 @@ export async function registerDirectReceiveSession({
   token,
   deviceName,
   serviceName,
+  canAcceptOffer,
   onOffer,
   onEvent,
   onInterrupted,
@@ -1071,6 +1076,7 @@ export async function registerDirectReceiveSession({
       token,
       serviceName,
     }),
+    canAcceptOffer,
     onOffer,
     onEvent,
     onInterrupted,

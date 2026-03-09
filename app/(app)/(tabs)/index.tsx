@@ -18,6 +18,7 @@ import {
 } from "lucide-react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { usePremiumAccess } from "@/hooks/use-premium-access";
+import { getTabScreenTopInset } from "@/lib/design/tab-screen-insets";
 import { designFonts, designTheme } from "@/lib/design/theme";
 import {
   acceptIncomingTransferOffer,
@@ -44,6 +45,38 @@ import {
 import { useAppStore, useDeviceName, useServiceInstanceId } from "@/store";
 
 type TransferMode = "idle" | "sending" | "waiting" | "receiving" | "transferring" | "sharing";
+
+const TRANSFER_SCREEN_DEBUG_PREFIX = "[TransferScreen]";
+
+function logTransferScreenDebug(message: string, details?: Record<string, unknown>) {
+  if (!__DEV__) {
+    return;
+  }
+
+  if (details) {
+    console.debug(`${TRANSFER_SCREEN_DEBUG_PREFIX} ${message}`, details);
+    return;
+  }
+
+  console.debug(`${TRANSFER_SCREEN_DEBUG_PREFIX} ${message}`);
+}
+
+function getDebugSessionId(sessionId: string | null | undefined) {
+  return sessionId?.slice(0, 8) ?? null;
+}
+
+function getDebugErrorDetails(error: unknown) {
+  if (error instanceof Error) {
+    return {
+      name: error.name,
+      message: error.message,
+    };
+  }
+
+  return {
+    error: String(error),
+  };
+}
 
 function MimeIcon({ type }: { type: string }) {
   if (type.startsWith("image/")) {
@@ -239,6 +272,7 @@ function WaitingPulse({ tone = "primary" }: { tone?: "primary" | "neutral" }) {
 export default function TransferScreen() {
   const isFocused = useIsFocused();
   const insets = useSafeAreaInsets();
+  const topInset = getTabScreenTopInset(insets.top);
   const compactBottomPadding = insets.bottom + 16;
   const regularBottomPadding = insets.bottom + 24;
   const roomyBottomPadding = insets.bottom + 32;
@@ -658,6 +692,18 @@ export default function TransferScreen() {
 
   const totalStagedBytes = useMemo(() => stagedFiles.reduce((sum, file) => sum + file.sizeBytes, 0), [stagedFiles]);
   function handleSendSessionUpdate(nextSession: TransferSession) {
+    logTransferScreenDebug("Received send session update", {
+      sessionId: getDebugSessionId(nextSession.id),
+      status: nextSession.status,
+      phase: nextSession.progress.phase,
+      awaitingReceiverResponse: nextSession.awaitingReceiverResponse,
+      detail: nextSession.progress.detail,
+      bytesTransferred: nextSession.progress.bytesTransferred,
+      totalBytes: nextSession.progress.totalBytes,
+      peerDeviceName: nextSession.peerDeviceName,
+      currentMode: mode,
+    });
+
     setActiveSendSession({ ...nextSession });
     setTransferProgress(nextSession.progress);
 
@@ -682,6 +728,10 @@ export default function TransferScreen() {
     void stopSendingTransfer(nextSession.id);
 
     if (nextSession.status === "completed") {
+      logTransferScreenDebug("Leaving waiting screen after send completion", {
+        sessionId: getDebugSessionId(nextSession.id),
+        detail: nextSession.progress.detail,
+      });
       setNotice(getTransferDetail(nextSession.progress.detail, "Transfer complete."));
       setMode("transferring");
       scheduleReset({ clearFiles: true, nextMode: "idle" });
@@ -689,6 +739,11 @@ export default function TransferScreen() {
     }
 
     if (nextSession.status === "failed") {
+      logTransferScreenDebug("Leaving waiting screen after send failure", {
+        sessionId: getDebugSessionId(nextSession.id),
+        detail: nextSession.progress.detail,
+        peerDeviceName: nextSession.peerDeviceName,
+      });
       setNotice(getTransferDetail(nextSession.progress.detail, "The transfer could not be completed."));
       setActiveSendSession(null);
       setTransferProgress(null);
@@ -696,6 +751,12 @@ export default function TransferScreen() {
       return;
     }
 
+    logTransferScreenDebug("Leaving send session screen after terminal status", {
+      sessionId: getDebugSessionId(nextSession.id),
+      status: nextSession.status,
+      detail: nextSession.progress.detail,
+      nextMode: stagedFiles.length > 0 ? "sending" : "idle",
+    });
     setActiveSendSession(null);
     setTransferProgress(null);
     setMode(stagedFiles.length > 0 ? "sending" : "idle");
@@ -778,9 +839,22 @@ export default function TransferScreen() {
 
   async function handleSendToReceiver(record: DiscoveryRecord) {
     if (stagedFiles.length === 0) {
+      logTransferScreenDebug("Ignoring send request because no staged files are available", {
+        targetSessionId: getDebugSessionId(record.sessionId),
+        targetMethod: record.method,
+      });
       return;
     }
 
+    logTransferScreenDebug("Starting send flow to receiver", {
+      targetSessionId: getDebugSessionId(record.sessionId),
+      targetMethod: record.method,
+      targetDeviceName: record.deviceName,
+      targetHost: record.host,
+      targetPort: record.port,
+      stagedFileCount: stagedFiles.length,
+      stagedBytes: stagedFiles.reduce((sum, file) => sum + file.sizeBytes, 0),
+    });
     setNotice(null);
     setTransferProgress(null);
     setShowQrScanner(false);
@@ -795,9 +869,22 @@ export default function TransferScreen() {
         updateSession: handleSendSessionUpdate,
       });
 
+      logTransferScreenDebug("Send session started", {
+        sessionId: getDebugSessionId(session.id),
+        status: session.status,
+        awaitingReceiverResponse: session.awaitingReceiverResponse,
+        detail: session.progress.detail,
+        peerDeviceName: session.peerDeviceName,
+      });
       setActiveSendSession(session);
       setTransferProgress(session.progress);
     } catch (error) {
+      logTransferScreenDebug("Leaving waiting screen because send start threw", {
+        targetSessionId: getDebugSessionId(record.sessionId),
+        targetMethod: record.method,
+        targetDeviceName: record.deviceName,
+        ...getDebugErrorDetails(error),
+      });
       setActiveSendSession(null);
       setTransferProgress(null);
       setMode("sending");
@@ -882,8 +969,15 @@ export default function TransferScreen() {
 
     try {
       const record = parseDiscoveryQrPayload(value);
+      logTransferScreenDebug("Parsed receiver QR code", {
+        targetSessionId: getDebugSessionId(record.sessionId),
+        targetDeviceName: record.deviceName,
+        targetHost: record.host,
+        targetPort: record.port,
+      });
       void handleSendToReceiver(record);
-    } catch {
+    } catch (error) {
+      logTransferScreenDebug("QR code parse failed", getDebugErrorDetails(error));
       setNotice("That QR code does not contain a valid receiver.");
       scannedQrRef.current = false;
     }
@@ -910,7 +1004,7 @@ export default function TransferScreen() {
 
   if (mode === "idle") {
     return (
-      <View style={[styles.root, { paddingTop: insets.top, paddingBottom: compactBottomPadding }]}>
+      <View style={[styles.root, { paddingTop: topInset, paddingBottom: compactBottomPadding }]}>
         <View style={styles.idleWrap}>
           <LargeActionCard
             icon={<Upload color={designTheme.primaryForeground} size={48} strokeWidth={1.7} />}
@@ -935,7 +1029,7 @@ export default function TransferScreen() {
 
   if (mode === "sending") {
     return (
-      <View style={[styles.root, { paddingTop: insets.top + 16 }]}>
+      <View style={[styles.root, { paddingTop: topInset + 16 }]}>
         <View style={styles.topBar}>
           <Text style={styles.sectionTitle}>Ready to send</Text>
           <HeaderButton
@@ -1032,7 +1126,7 @@ export default function TransferScreen() {
 
   if (mode === "waiting") {
     return (
-      <View style={[styles.root, { paddingTop: insets.top, paddingBottom: regularBottomPadding }]}>
+      <View style={[styles.root, { paddingTop: topInset, paddingBottom: regularBottomPadding }]}>
         <View style={styles.centerWrap}>
           <WaitingPulse />
           <Text style={styles.centerTitle}>
@@ -1061,7 +1155,7 @@ export default function TransferScreen() {
   if (mode === "receiving") {
     if (incomingOffer && activeReceiveSession?.status === "waiting") {
       return (
-        <View style={[styles.root, { paddingTop: insets.top, paddingBottom: regularBottomPadding }]}>
+        <View style={[styles.root, { paddingTop: topInset, paddingBottom: regularBottomPadding }]}>
           <View style={styles.centerWrap}>
             <View style={styles.transferAvatar}>
               <Smartphone color={designTheme.secondaryForeground} size={30} strokeWidth={1.8} />
@@ -1101,7 +1195,7 @@ export default function TransferScreen() {
     }
 
     return (
-      <View style={[styles.root, { paddingTop: insets.top + 16 }]}>
+      <View style={[styles.root, { paddingTop: topInset + 16 }]}>
         <View style={styles.topBar}>
           <Text style={styles.sectionTitle}>Ready to receive</Text>
           <HeaderButton
@@ -1156,7 +1250,7 @@ export default function TransferScreen() {
 
   if (mode === "sharing" && activeHttpShareSession) {
     return (
-      <View style={[styles.root, { paddingTop: insets.top + 16 }]}>
+      <View style={[styles.root, { paddingTop: topInset + 16 }]}>
         <View style={styles.topBar}>
           <Text style={styles.sectionTitle}>Sharing in browser</Text>
           <HeaderButton
@@ -1236,7 +1330,7 @@ export default function TransferScreen() {
   }
 
   return (
-    <View style={[styles.root, { paddingTop: insets.top, paddingBottom: roomyBottomPadding }]}>
+    <View style={[styles.root, { paddingTop: topInset, paddingBottom: roomyBottomPadding }]}>
       <View style={styles.transferWrap}>
         <View style={styles.transferAvatar}>
           <Text style={styles.transferAvatarLabel}>{currentTransferName.charAt(0).toUpperCase()}</Text>
