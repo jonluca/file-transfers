@@ -4,7 +4,10 @@ import { fetchRequestHandler } from "@trpc/server/adapters/fetch";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import privacyPolicyText from "./legal/privacy.txt?raw";
+import { LandingPage } from "./landing-page";
 import termsOfServiceText from "./legal/terms.txt?raw";
 import { auth } from "./auth";
 import { db } from "./db/client";
@@ -18,6 +21,10 @@ import { createTRPCContext } from "./trpc/context";
 import { appRouter } from "./trpc/router";
 
 const app = new Hono();
+
+function renderDocument(markup: string) {
+  return `<!doctype html>${markup}`;
+}
 
 function hostedDownloadPageHtml({
   fileName,
@@ -103,7 +110,9 @@ app.use(
   }),
 );
 
-app.get("/", (c) =>
+app.get("/", (c) => c.html(renderDocument(renderToStaticMarkup(createElement(LandingPage)))));
+
+app.get("/status", (c) =>
   c.json({
     name: "file-transfers",
     status: "ok",

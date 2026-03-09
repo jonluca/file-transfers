@@ -1,7 +1,9 @@
 import { FILE_TRANSFERS_PRO_NAME } from "@/lib/subscriptions";
 import {
   DIRECT_TRANSFER_CHUNK_BYTES,
+  DIRECT_TRANSFER_MAX_CONCURRENT_CHUNKS,
   FREE_TRANSFER_CHUNK_BYTES,
+  FREE_TRANSFER_MAX_CONCURRENT_CHUNKS,
   FREE_TRANSFER_MAX_BYTES,
   FREE_TRANSFER_MAX_SPEED_BYTES_PER_SECOND,
 } from "./constants";
@@ -15,6 +17,7 @@ export type TransferPolicyContext = "send" | "share" | "receive";
 export interface TransferPolicy {
   chunkBytes: number;
   isPremium: boolean;
+  maxConcurrentChunks: number;
   maxBytesPerSecond: number | null;
   maxTransferBytes: number | null;
 }
@@ -79,6 +82,7 @@ export function getTransferPolicy(isPremium: boolean): TransferPolicy {
     return {
       chunkBytes: DIRECT_TRANSFER_CHUNK_BYTES,
       isPremium: true,
+      maxConcurrentChunks: DIRECT_TRANSFER_MAX_CONCURRENT_CHUNKS,
       maxBytesPerSecond: null,
       maxTransferBytes: null,
     };
@@ -87,6 +91,7 @@ export function getTransferPolicy(isPremium: boolean): TransferPolicy {
   return {
     chunkBytes: FREE_TRANSFER_CHUNK_BYTES,
     isPremium: false,
+    maxConcurrentChunks: FREE_TRANSFER_MAX_CONCURRENT_CHUNKS,
     maxBytesPerSecond: FREE_TRANSFER_MAX_SPEED_BYTES_PER_SECOND,
     maxTransferBytes: FREE_TRANSFER_MAX_BYTES,
   };
