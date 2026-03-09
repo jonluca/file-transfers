@@ -51,12 +51,26 @@ export interface DirectTransferNativeRangeDownloadResult extends DirectTransferN
   completedAtMs: number;
 }
 
+export interface DirectTransferNativeExportFileToDownloadsOptions {
+  fileName: string;
+  mimeType: string;
+  sourceUri: string;
+}
+
+export interface DirectTransferNativeExportFileToDownloadsResult {
+  uri: string;
+}
+
 export interface DirectTransferNativeModuleType {
   cancelRangeDownload(taskId: string): Promise<void>;
   collectPayloadMetrics(sessionId: string): Promise<DirectTransferNativePayloadMetric[]>;
   ensurePayloadServerStarted(): Promise<DirectTransferNativePayloadServerInfo>;
+  exportFileToDownloads(
+    options: DirectTransferNativeExportFileToDownloadsOptions,
+  ): Promise<DirectTransferNativeExportFileToDownloadsResult>;
   getRangeDownloadProgress(taskId: string): Promise<DirectTransferNativeRangeDownloadProgress | null>;
   registerPayloadSession(options: DirectTransferNativePayloadSessionOptions): Promise<void>;
+  shareFileUri(uri: string, mimeType: string): Promise<void>;
   startRangeDownload(
     options: DirectTransferNativeRangeDownloadOptions,
   ): Promise<DirectTransferNativeRangeDownloadResult>;

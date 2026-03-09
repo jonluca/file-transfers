@@ -1,16 +1,19 @@
 import * as DocumentPicker from "expo-document-picker";
+import * as Sharing from "expo-sharing";
 import * as IntentLauncher from "expo-intent-launcher";
 import * as Linking from "expo-linking";
 import { Directory, File, Paths } from "expo-file-system";
 import * as Crypto from "expo-crypto";
 import type { DocumentPickerAsset } from "expo-document-picker";
-import { Platform } from "react-native";
+import { PermissionsAndroid, Platform } from "react-native";
+import DirectTransferNative from "@/modules/direct-transfer-native";
 import type { ReceivedFileRecord, SelectedTransferFile } from "./types";
-import { RECEIVED_FILES_DIRECTORY_NAME } from "./constants";
+import { RECEIVED_FILES_DIRECTORY_NAME, RECEIVED_FILES_STAGING_DIRECTORY_NAME } from "./constants";
 
 const ALWAYS_PLACEHOLDER_FILE_BASENAMES = new Set(["unknown", "untitled"]);
 const MAYBE_PLACEHOLDER_FILE_BASENAMES = new Set(["document", "file"]);
 const ANDROID_GRANT_READ_URI_PERMISSION_FLAG = 1;
+const LEGACY_ANDROID_DOWNLOADS_PERMISSION = PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE;
 const MIME_TYPE_EXTENSION_OVERRIDES: Record<string, string> = {
   "application/json": "json",
   "application/pdf": "pdf",
@@ -163,8 +166,139 @@ export function getReceivedFilesDirectory() {
   return directory;
 }
 
+export function getReceivedFilesStagingDirectory() {
+  const directory = new Directory(Paths.cache, RECEIVED_FILES_STAGING_DIRECTORY_NAME);
+  directory.create({ idempotent: true, intermediates: true });
+  return directory;
+}
+
 function sanitizeFileName(name: string) {
   return name.replace(/[^\w.\-() ]+/g, "_");
+}
+
+function splitFileName(name: string) {
+  const sanitizedName = sanitizeFileName(name).trim() || "file";
+  const extensionIndex = sanitizedName.lastIndexOf(".");
+
+  if (extensionIndex <= 0) {
+    return {
+      basename: sanitizedName,
+      extension: "",
+    };
+  }
+
+  return {
+    basename: sanitizedName.slice(0, extensionIndex),
+    extension: sanitizedName.slice(extensionIndex),
+  };
+}
+
+function buildUniqueFileName(directory: Directory, fileName: string) {
+  const { basename, extension } = splitFileName(fileName);
+  let index = 0;
+
+  while (true) {
+    const suffix = index === 0 ? "" : ` (${index})`;
+    const candidate = `${basename}${suffix}${extension}`;
+    if (!new File(directory, candidate).exists) {
+      return candidate;
+    }
+    index += 1;
+  }
+}
+
+function isContentUri(uri: string) {
+  return uri.startsWith("content://");
+}
+
+async function ensureLegacyAndroidDownloadsPermissionAsync() {
+  if (Platform.OS !== "android" || typeof Platform.Version !== "number" || Platform.Version >= 29) {
+    return true;
+  }
+
+  if (await PermissionsAndroid.check(LEGACY_ANDROID_DOWNLOADS_PERMISSION)) {
+    return true;
+  }
+
+  const status = await PermissionsAndroid.request(LEGACY_ANDROID_DOWNLOADS_PERMISSION, {
+    title: "Save files to Downloads",
+    message: "Allow File Share to save received files in your Downloads folder.",
+    buttonPositive: "Allow",
+    buttonNegative: "Not now",
+  });
+
+  return status === PermissionsAndroid.RESULTS.GRANTED;
+}
+
+export async function moveReceivedFileToDefaultLocationAsync({
+  transferId,
+  sourceFile,
+  fileName,
+  mimeType,
+  sizeBytes,
+}: {
+  transferId: string;
+  sourceFile: File;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+}) {
+  const receivedAt = new Date().toISOString();
+  const normalizedMimeType = normalizeMimeType(mimeType);
+
+  if (
+    Platform.OS === "android" &&
+    typeof DirectTransferNative?.exportFileToDownloads === "function" &&
+    (await ensureLegacyAndroidDownloadsPermissionAsync())
+  ) {
+    try {
+      const exportResult = await DirectTransferNative.exportFileToDownloads({
+        sourceUri: sourceFile.uri,
+        fileName: sanitizeFileName(fileName),
+        mimeType: normalizedMimeType,
+      });
+
+      try {
+        if (sourceFile.exists) {
+          sourceFile.delete();
+        }
+      } catch {
+        // Best-effort staging cleanup after the public copy succeeds.
+      }
+
+      return {
+        record: {
+          id: Crypto.randomUUID(),
+          transferId,
+          name: fileName,
+          uri: exportResult.uri,
+          mimeType: normalizedMimeType,
+          sizeBytes,
+          receivedAt,
+        } satisfies ReceivedFileRecord,
+        savedLocationLabel: "Downloads",
+      };
+    } catch (error) {
+      console.warn("Unable to export received file to Downloads", error);
+    }
+  }
+
+  const directory = getReceivedFilesDirectory();
+  const destination = new File(directory, buildUniqueFileName(directory, fileName));
+  sourceFile.move(destination);
+
+  return {
+    record: {
+      id: Crypto.randomUUID(),
+      transferId,
+      name: fileName,
+      uri: destination.uri,
+      mimeType: normalizedMimeType,
+      sizeBytes,
+      receivedAt,
+    } satisfies ReceivedFileRecord,
+    savedLocationLabel: Platform.OS === "android" ? "Files" : "Downloads",
+  };
 }
 
 export function createReceivedFileRecord({
@@ -180,12 +314,11 @@ export function createReceivedFileRecord({
   mimeType: string;
   sizeBytes: number;
 }): ReceivedFileRecord {
-  const receivedAt = new Date().toISOString();
-  const targetName = `${receivedAt.replace(/[:.]/g, "-")}-${sanitizeFileName(fileName)}`;
   const directory = getReceivedFilesDirectory();
   const sourceFile = new File(sourceFileUri);
-  const destination = directory.createFile(targetName, mimeType);
+  const destination = new File(directory, buildUniqueFileName(directory, fileName));
   sourceFile.copy(destination);
+  const receivedAt = new Date().toISOString();
 
   return {
     id: Crypto.randomUUID(),
@@ -204,14 +337,30 @@ export async function openReceivedFileAsync(file: Pick<ReceivedFileRecord, "uri"
     return;
   }
 
-  // Android viewers need a content URI plus temporary read access for app-private files.
-  const contentUri = new File(file.uri).contentUri;
+  const contentUri = isContentUri(file.uri) ? file.uri : new File(file.uri).contentUri;
 
   await IntentLauncher.startActivityAsync("android.intent.action.VIEW", {
     data: contentUri,
     flags: ANDROID_GRANT_READ_URI_PERMISSION_FLAG,
     type: file.mimeType,
   });
+}
+
+export async function shareReceivedFileAsync(file: Pick<ReceivedFileRecord, "uri" | "mimeType">) {
+  if (Platform.OS === "android" && isContentUri(file.uri) && typeof DirectTransferNative?.shareFileUri === "function") {
+    await DirectTransferNative.shareFileUri(file.uri, file.mimeType);
+    return true;
+  }
+
+  const isAvailable = await Sharing.isAvailableAsync();
+  if (!isAvailable) {
+    return false;
+  }
+
+  await Sharing.shareAsync(file.uri, {
+    mimeType: file.mimeType,
+  });
+  return true;
 }
 
 export function formatBytes(value: number) {

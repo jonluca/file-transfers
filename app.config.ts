@@ -76,6 +76,13 @@ export default function getConfig({ config }: ConfigContext): ExpoConfig {
         },
       ],
       "expo-apple-authentication",
+      [
+        "expo-file-system",
+        {
+          enableFileSharing: true,
+          supportsOpeningDocumentsInPlace: true,
+        },
+      ],
       "expo-router",
       "expo-web-browser",
       "expo-sqlite",

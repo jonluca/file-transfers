@@ -25,7 +25,7 @@ import {
   LOCAL_TRANSFER_SERVICE_TYPE,
 } from "./constants";
 import { assertSelectedFilesTransferAllowed, getTransferPolicy, type TransferPolicy } from "./transfer-policy";
-import { getReceivedFilesDirectory } from "./files";
+import { getReceivedFilesStagingDirectory, moveReceivedFileToDefaultLocationAsync } from "./files";
 import {
   collectDirectSendPayloadMetrics,
   registerDirectReceiveSession,
@@ -861,7 +861,12 @@ async function receiveDirectHttpTransfer({
       maxConcurrentChunks: runtime.transferPolicy.maxConcurrentChunks,
     };
 
-    const receivedFiles: ReceivedFileRecord[] = [];
+    const downloadedFiles: Array<{
+      fileName: string;
+      mimeType: string;
+      outputFile: File;
+      sizeBytes: number;
+    }> = [];
     let bytesTransferred = 0;
     const downloadStartedAt = Date.now();
     let totalRequestDurationMs = 0;
@@ -870,7 +875,7 @@ async function receiveDirectHttpTransfer({
     let fallbackReason: string | null = null;
 
     for (const file of manifest.files) {
-      const outputFile = createTransferOutputFile(getReceivedFilesDirectory(), file.name);
+      const outputFile = createTransferOutputFile(getReceivedFilesStagingDirectory(), file.name);
       createdFiles.push(outputFile);
 
       logDirectTransferDebug("Downloading file from sender", {
@@ -928,14 +933,11 @@ async function receiveDirectHttpTransfer({
       usedNativeClient = usedNativeClient || adapterResult.usedNative;
       fallbackReason ??= adapterResult.fallbackReason;
 
-      receivedFiles.push({
-        id: Crypto.randomUUID(),
-        transferId: offer.id,
-        name: file.name,
-        uri: outputFile.uri,
+      downloadedFiles.push({
+        fileName: file.name,
         mimeType: file.mimeType,
+        outputFile,
         sizeBytes: file.sizeBytes,
-        receivedAt: nowIso(),
       });
 
       logDirectTransferDebug("Finished downloading file from sender", {
@@ -947,14 +949,30 @@ async function receiveDirectHttpTransfer({
 
     logDirectTransferDebug("Receiver completed direct transfer", {
       offerId: getSessionDebugId(offer.id),
-      receivedFileCount: receivedFiles.length,
+      receivedFileCount: downloadedFiles.length,
       bytesTransferred,
     });
+
+    const savedResults = await Promise.all(
+      downloadedFiles.map((file) =>
+        moveReceivedFileToDefaultLocationAsync({
+          transferId: offer.id,
+          sourceFile: file.outputFile,
+          fileName: file.fileName,
+          mimeType: file.mimeType,
+          sizeBytes: file.sizeBytes,
+        }),
+      ),
+    );
+    const receivedFiles = savedResults.map((result) => result.record);
+    const savedLocationLabel = savedResults.every((result) => result.savedLocationLabel === "Downloads")
+      ? "Downloads"
+      : "Files";
 
     return {
       receivedFiles,
       bytesTransferred,
-      detail: "Transfer complete.",
+      detail: `Transfer complete. Saved to ${savedLocationLabel}.`,
       diskWriteDurationMs: totalDiskWriteDurationMs,
       fallbackReason,
       requestDurationMs: totalRequestDurationMs,

@@ -1,4 +1,3 @@
-import * as Sharing from "expo-sharing";
 import { router } from "expo-router";
 import React from "react";
 import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
@@ -22,6 +21,7 @@ import {
   formatBytes,
   openReceivedFileAsync,
   type ReceivedFileRecord,
+  shareReceivedFileAsync,
   type TransferHistoryEntry,
 } from "@/lib/file-transfer";
 import { getTabScreenTopInset } from "@/lib/design/tab-screen-insets";
@@ -125,13 +125,11 @@ async function handleShareReceivedFile(file: ReceivedFileRecord | undefined) {
     return;
   }
 
-  const isAvailable = await Sharing.isAvailableAsync();
-  if (!isAvailable) {
-    return;
-  }
-
   try {
-    await Sharing.shareAsync(file.uri);
+    const didShare = await shareReceivedFileAsync(file);
+    if (!didShare) {
+      Alert.alert("Sharing unavailable", "This device does not support the system share sheet.");
+    }
   } catch (error) {
     console.error("Unable to share received file", error);
     Alert.alert("Unable to share file", "Please try again in a moment.");

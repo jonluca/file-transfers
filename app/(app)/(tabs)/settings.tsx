@@ -776,14 +776,8 @@ export default function SettingsScreen() {
               ) : null}
 
               <View style={styles.advancedActions}>
-                <PrimaryButton
-                  label={"Save chunk sizes"}
-                  onPress={handleSaveTransferChunkSettings}
-                />
-                <SecondaryButton
-                  label={"Reset defaults"}
-                  onPress={handleResetTransferChunkSettings}
-                />
+                <PrimaryButton label={"Save chunk sizes"} onPress={handleSaveTransferChunkSettings} />
+                <SecondaryButton label={"Reset defaults"} onPress={handleResetTransferChunkSettings} />
               </View>
             </View>
           ) : null}

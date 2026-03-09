@@ -1,7 +1,13 @@
 package expo.modules.directtransfernative
 
+import android.content.ContentValues
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
+import android.os.Environment
 import android.os.SystemClock
+import android.provider.MediaStore
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.functions.Queues
 import expo.modules.kotlin.modules.Module
@@ -10,6 +16,8 @@ import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.io.InputStream
 import java.io.RandomAccessFile
 import java.net.HttpURLConnection
@@ -17,6 +25,7 @@ import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketException
+import java.net.SocketTimeoutException
 import java.net.URL
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
@@ -33,6 +42,8 @@ import kotlin.math.min
 private const val HEADER_TERMINATOR = "\r\n\r\n"
 private const val HEADER_LIMIT_BYTES = 64 * 1024
 private const val IO_PAGE_BYTES = 256 * 1024
+private const val PAYLOAD_KEEP_ALIVE_IDLE_TIMEOUT_MS = 5_000
+private const val PAYLOAD_KEEP_ALIVE_MAX_REQUESTS = 32L
 
 class DirectTransferNativeModule : Module() {
   private data class PayloadFile(
@@ -93,6 +104,8 @@ class DirectTransferNativeModule : Module() {
           try {
             val client = socket.accept()
             client.tcpNoDelay = true
+            client.keepAlive = true
+            client.soTimeout = PAYLOAD_KEEP_ALIVE_IDLE_TIMEOUT_MS
             connectionExecutor.execute {
               handlePayloadConnection(client)
             }
@@ -301,6 +314,7 @@ class DirectTransferNativeModule : Module() {
 
   private data class ParsedHttpRequest(
     val headers: Map<String, String>,
+    val httpVersion: String,
     val method: String,
     val path: String,
   )
@@ -352,6 +366,18 @@ class DirectTransferNativeModule : Module() {
       val metrics = payloadMetrics.remove(sessionId) ?: mutableListOf()
       metrics.map { metric -> metric.toMap() }
     }.runOnQueue(Queues.DEFAULT)
+
+    AsyncFunction("exportFileToDownloads") { options: Map<String, Any?> ->
+      exportFileToDownloads(
+        sourceUri = options.requiredString("sourceUri"),
+        fileName = options.requiredString("fileName"),
+        mimeType = options.requiredString("mimeType"),
+      )
+    }.runOnQueue(Queues.DEFAULT)
+
+    AsyncFunction("shareFileUri") { uri: String, mimeType: String ->
+      shareFileUri(uri = uri, mimeType = mimeType)
+    }
 
     AsyncFunction("startRangeDownload") { options: Map<String, Any?>, promise: Promise ->
       try {
@@ -405,131 +431,154 @@ class DirectTransferNativeModule : Module() {
   private fun handlePayloadConnection(socket: Socket) {
     socket.use { client ->
       try {
-        val request = parseHttpRequest(client.getInputStream())
-        if (request == null) {
-          writeTextResponse(client, 400, "Invalid request.")
-          return
-        }
-
-        val pathSegments = request.path.split("/").filter { segment -> segment.isNotEmpty() }
-        if (
-          pathSegments.size < 5 ||
-          pathSegments[0] != "direct" ||
-          pathSegments[1] != "sessions" ||
-          pathSegments[3] != "files"
-        ) {
-          writeTextResponse(client, 404, "Not found.")
-          return
-        }
-
-        val sessionId = decodePathSegment(pathSegments[2])
-        val fileId = decodePathSegment(pathSegments[4])
-        val session = payloadSessions[sessionId]
-        if (session == null) {
-          writeTextResponse(client, 404, "Direct transfer session not found.")
-          return
-        }
-
-        val token = request.headers["x-direct-token"]
-        if (token == null || token != session.token) {
-          writeTextResponse(client, 401, "Unauthorized direct transfer request.")
-          return
-        }
-
-        val file = session.filesById[fileId]
-        if (file == null) {
-          writeTextResponse(client, 404, "File not found.")
-          return
-        }
-
-        val filePath = requireFilePath(file.uri)
-        val sourceFile = File(filePath)
-        if (!sourceFile.exists()) {
-          writeTextResponse(client, 410, "The selected file is no longer available on this device.")
-          return
-        }
-
-        val fileSize = if (file.sizeBytes > 0) file.sizeBytes else sourceFile.length()
-        val range = resolveRange(request.headers["range"], fileSize)
-        if (range == null) {
-          writeTextResponse(
-            client,
-            416,
-            "Requested range is not satisfiable.",
-            extraHeaders = mapOf(
-              "Accept-Ranges" to "bytes",
-              "Content-Range" to "bytes */$fileSize",
-            ),
-          )
-          return
-        }
-
-        val contentLength = if (fileSize == 0L) 0L else range.end - range.start + 1L
-        val headers = linkedMapOf(
-          "Cache-Control" to "no-store",
-          "Content-Type" to file.mimeType.ifBlank { "application/octet-stream" },
-          "Content-Length" to contentLength.toString(),
-          "Accept-Ranges" to "bytes",
-        )
-        if (range.partial && fileSize > 0L) {
-          headers["Content-Range"] = "bytes ${range.start}-${range.end}/$fileSize"
-        }
-
+        val input = BufferedInputStream(client.getInputStream())
         val output = BufferedOutputStream(client.getOutputStream())
-        val statusCode = if (range.partial) 206 else 200
-        output.write(createResponseHeaders(statusCode, headers))
 
-        if (request.method == "HEAD" || contentLength == 0L) {
-          output.flush()
-          return
-        }
-
-        val requestStartedAt = SystemClock.elapsedRealtimeNanos()
-        var bytesServed = 0L
-        var fileReadDurationMs = 0.0
-
-        RandomAccessFile(sourceFile, "r").use { input ->
-          input.seek(range.start)
-          val buffer = ByteArray(IO_PAGE_BYTES)
-          var remaining = contentLength
-          while (remaining > 0) {
-            val nextReadLength = min(buffer.size.toLong(), remaining).toInt()
-            val readStartedAt = SystemClock.elapsedRealtimeNanos()
-            val bytesRead = input.read(buffer, 0, nextReadLength)
-            fileReadDurationMs += elapsedMillis(readStartedAt)
-            if (bytesRead <= 0) {
-              break
-            }
-
-            output.write(buffer, 0, bytesRead)
-            bytesServed += bytesRead.toLong()
-            remaining -= bytesRead.toLong()
-
-            throttleChunkBytes(
-              bytesTransferred = bytesServed,
-              maxBytesPerSecond = session.maxBytesPerSecond,
-              startedAt = requestStartedAt,
-            )
+        repeat(PAYLOAD_KEEP_ALIVE_MAX_REQUESTS.toInt()) {
+          val request = try {
+            parseHttpRequest(input)
+          } catch (_: SocketTimeoutException) {
+            return
           }
-          output.flush()
-        }
+          if (request == null) {
+            return
+          }
 
-        appendPayloadMetric(
-          sessionId = sessionId,
-          metric = PayloadMetric(
-            sessionId = sessionId,
-            fileId = fileId,
-            bytesServed = bytesServed,
-            fileReadDurationMs = fileReadDurationMs,
-            responseCopyDurationMs = 0.0,
-            totalDurationMs = elapsedMillis(requestStartedAt),
-            usedNativeServer = true,
-          ),
-        )
+          val keepAlive = shouldKeepAlive(request, requestIndex = it)
+          if (!handlePayloadRequest(output, request, keepAlive)) {
+            return
+          }
+        }
+      } catch (_: SocketTimeoutException) {
+        // Idle keep-alive sockets time out and close quietly.
       } catch (_: Exception) {
         // Ignore per-request failures after best-effort cleanup.
       }
     }
+  }
+
+  private fun handlePayloadRequest(
+    output: BufferedOutputStream,
+    request: ParsedHttpRequest,
+    keepAlive: Boolean,
+  ): Boolean {
+    val pathSegments = request.path.split("/").filter { segment -> segment.isNotEmpty() }
+    if (
+      pathSegments.size < 5 ||
+      pathSegments[0] != "direct" ||
+      pathSegments[1] != "sessions" ||
+      pathSegments[3] != "files"
+    ) {
+      writeTextResponse(output, 404, "Not found.", keepAlive = keepAlive)
+      return keepAlive
+    }
+
+    val sessionId = decodePathSegment(pathSegments[2])
+    val fileId = decodePathSegment(pathSegments[4])
+    val session = payloadSessions[sessionId]
+    if (session == null) {
+      writeTextResponse(output, 404, "Direct transfer session not found.", keepAlive = keepAlive)
+      return keepAlive
+    }
+
+    val token = request.headers["x-direct-token"]
+    if (token == null || token != session.token) {
+      writeTextResponse(output, 401, "Unauthorized direct transfer request.", keepAlive = false)
+      return false
+    }
+
+    val file = session.filesById[fileId]
+    if (file == null) {
+      writeTextResponse(output, 404, "File not found.", keepAlive = keepAlive)
+      return keepAlive
+    }
+
+    val filePath = requireFilePath(file.uri)
+    val sourceFile = File(filePath)
+    if (!sourceFile.exists()) {
+      writeTextResponse(output, 410, "The selected file is no longer available on this device.", keepAlive = keepAlive)
+      return keepAlive
+    }
+
+    val fileSize = if (file.sizeBytes > 0) file.sizeBytes else sourceFile.length()
+    val range = resolveRange(request.headers["range"], fileSize)
+    if (range == null) {
+      writeTextResponse(
+        output,
+        416,
+        "Requested range is not satisfiable.",
+        keepAlive = keepAlive,
+        extraHeaders = mapOf(
+          "Accept-Ranges" to "bytes",
+          "Content-Range" to "bytes */$fileSize",
+        ),
+      )
+      return keepAlive
+    }
+
+    val contentLength = if (fileSize == 0L) 0L else range.end - range.start + 1L
+    val headers = linkedMapOf(
+      "Cache-Control" to "no-store",
+      "Content-Type" to file.mimeType.ifBlank { "application/octet-stream" },
+      "Content-Length" to contentLength.toString(),
+      "Accept-Ranges" to "bytes",
+    )
+    if (range.partial && fileSize > 0L) {
+      headers["Content-Range"] = "bytes ${range.start}-${range.end}/$fileSize"
+    }
+
+    val statusCode = if (range.partial) 206 else 200
+    output.write(createResponseHeaders(statusCode, headers, keepAlive = keepAlive))
+
+    if (request.method == "HEAD" || contentLength == 0L) {
+      output.flush()
+      return keepAlive
+    }
+
+    val requestStartedAt = SystemClock.elapsedRealtimeNanos()
+    var bytesServed = 0L
+    var fileReadDurationMs = 0.0
+
+    RandomAccessFile(sourceFile, "r").use { input ->
+      input.seek(range.start)
+      val buffer = ByteArray(IO_PAGE_BYTES)
+      var remaining = contentLength
+      while (remaining > 0) {
+        val nextReadLength = min(buffer.size.toLong(), remaining).toInt()
+        val readStartedAt = SystemClock.elapsedRealtimeNanos()
+        val bytesRead = input.read(buffer, 0, nextReadLength)
+        fileReadDurationMs += elapsedMillis(readStartedAt)
+        if (bytesRead <= 0) {
+          break
+        }
+
+        output.write(buffer, 0, bytesRead)
+        bytesServed += bytesRead.toLong()
+        remaining -= bytesRead.toLong()
+
+        throttleChunkBytes(
+          bytesTransferred = bytesServed,
+          maxBytesPerSecond = session.maxBytesPerSecond,
+          startedAt = requestStartedAt,
+        )
+      }
+      output.flush()
+    }
+
+    appendPayloadMetric(
+      sessionId = sessionId,
+      metric = PayloadMetric(
+        sessionId = sessionId,
+        fileId = fileId,
+        bytesServed = bytesServed,
+        fileReadDurationMs = fileReadDurationMs,
+        responseCopyDurationMs = 0.0,
+        totalDurationMs = elapsedMillis(requestStartedAt),
+        usedNativeServer = true,
+      ),
+    )
+
+    return keepAlive
   }
 
   private fun appendPayloadMetric(sessionId: String, metric: PayloadMetric) {
@@ -596,38 +645,63 @@ class DirectTransferNativeModule : Module() {
     }
 
     return ParsedHttpRequest(
+      httpVersion = requestLineParts.getOrElse(2) { "HTTP/1.1" }.trim().uppercase(),
       method = requestLineParts[0].trim().uppercase(),
       path = requestLineParts[1].trim().substringBefore('?'),
       headers = headers,
     )
   }
 
-  private fun createResponseHeaders(statusCode: Int, headers: Map<String, String>): ByteArray {
+  private fun shouldKeepAlive(request: ParsedHttpRequest, requestIndex: Int): Boolean {
+    if (requestIndex >= PAYLOAD_KEEP_ALIVE_MAX_REQUESTS - 1) {
+      return false
+    }
+
+    val connection = request.headers["connection"]?.trim()?.lowercase()
+    if (connection == "close") {
+      return false
+    }
+
+    return if (request.httpVersion == "HTTP/1.0") {
+      connection == "keep-alive"
+    } else {
+      true
+    }
+  }
+
+  private fun createResponseHeaders(
+    statusCode: Int,
+    headers: Map<String, String>,
+    keepAlive: Boolean,
+  ): ByteArray {
     val builder = StringBuilder()
     builder.append("HTTP/1.1 ").append(statusCode).append(' ').append(reasonPhrase(statusCode)).append("\r\n")
     headers.forEach { (key, value) ->
       builder.append(key).append(": ").append(value).append("\r\n")
     }
-    builder.append("Connection: close\r\n")
+    builder.append("Connection: ").append(if (keepAlive) "keep-alive" else "close").append("\r\n")
+    if (keepAlive) {
+      builder.append("Keep-Alive: timeout=${PAYLOAD_KEEP_ALIVE_IDLE_TIMEOUT_MS / 1000}, max=$PAYLOAD_KEEP_ALIVE_MAX_REQUESTS\r\n")
+    }
     builder.append("\r\n")
     return builder.toString().toByteArray(StandardCharsets.ISO_8859_1)
   }
 
   private fun writeTextResponse(
-    socket: Socket,
+    output: BufferedOutputStream,
     statusCode: Int,
     body: String,
+    keepAlive: Boolean,
     extraHeaders: Map<String, String> = emptyMap(),
   ) {
     val bodyBytes = body.toByteArray(StandardCharsets.UTF_8)
-    val output = BufferedOutputStream(socket.getOutputStream())
     val headers = linkedMapOf(
       "Cache-Control" to "no-store",
       "Content-Type" to "text/plain; charset=utf-8",
       "Content-Length" to bodyBytes.size.toString(),
     )
     headers.putAll(extraHeaders)
-    output.write(createResponseHeaders(statusCode, headers))
+    output.write(createResponseHeaders(statusCode, headers, keepAlive = keepAlive))
     output.write(bodyBytes)
     output.flush()
   }
@@ -689,6 +763,86 @@ class DirectTransferNativeModule : Module() {
 
   private fun decodePathSegment(value: String): String {
     return URLDecoder.decode(value, StandardCharsets.UTF_8.name())
+  }
+
+  private fun exportFileToDownloads(
+    sourceUri: String,
+    fileName: String,
+    mimeType: String,
+  ): Map<String, Any> {
+    val context = appContext.reactContext ?: throw IllegalStateException("React context is unavailable.")
+    val resolver = context.contentResolver
+    val normalizedMimeType = mimeType.ifBlank { "application/octet-stream" }
+    val normalizedFileName = fileName.trim().ifEmpty { "file" }
+
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+      val values = ContentValues().apply {
+        put(MediaStore.MediaColumns.DISPLAY_NAME, normalizedFileName)
+        put(MediaStore.MediaColumns.MIME_TYPE, normalizedMimeType)
+        put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+        put(MediaStore.MediaColumns.IS_PENDING, 1)
+      }
+      val destinationUri =
+        resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+          ?: throw IllegalStateException("Unable to create a Downloads file.")
+
+      try {
+        copyUriContents(resolver = resolver, sourceUri = sourceUri, destinationUri = destinationUri.toString())
+        val publishValues = ContentValues().apply {
+          put(MediaStore.MediaColumns.IS_PENDING, 0)
+        }
+        resolver.update(destinationUri, publishValues, null, null)
+        return mapOf(
+          "uri" to destinationUri.toString(),
+        )
+      } catch (error: Exception) {
+        runCatching {
+          resolver.delete(destinationUri, null, null)
+        }
+        throw error
+      }
+    }
+
+    val downloadsDirectory = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+    if (!downloadsDirectory.exists() && !downloadsDirectory.mkdirs()) {
+      throw IllegalStateException("Unable to access the Downloads directory.")
+    }
+    val destinationFile = createUniqueDownloadFile(downloadsDirectory, normalizedFileName)
+
+    openInputStream(resolver = resolver, uri = sourceUri).use { input ->
+      FileOutputStream(destinationFile).use { output ->
+        input.copyTo(output, IO_PAGE_BYTES)
+      }
+    }
+
+    return mapOf(
+      "uri" to Uri.fromFile(destinationFile).toString(),
+    )
+  }
+
+  private fun shareFileUri(uri: String, mimeType: String) {
+    val context = appContext.reactContext ?: throw IllegalStateException("React context is unavailable.")
+    val parsedUri = Uri.parse(uri)
+    val shareIntent =
+      Intent(Intent.ACTION_SEND).apply {
+        putExtra(Intent.EXTRA_STREAM, parsedUri)
+        setTypeAndNormalize(mimeType.ifBlank { "*/*" })
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+      }
+    val chooserIntent = Intent.createChooser(shareIntent, null).apply {
+      addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    val resInfoList =
+      context.packageManager.queryIntentActivities(chooserIntent, PackageManager.MATCH_DEFAULT_ONLY)
+    resInfoList.forEach { resolveInfo ->
+      context.grantUriPermission(
+        resolveInfo.activityInfo.packageName,
+        parsedUri,
+        Intent.FLAG_GRANT_READ_URI_PERMISSION,
+      )
+    }
+
+    appContext.throwingActivity.startActivity(chooserIntent)
   }
 
   private fun requireFilePath(uri: String): String {
@@ -773,6 +927,67 @@ class DirectTransferNativeModule : Module() {
           else -> 0L
         },
       )
+    }
+  }
+
+  private fun copyUriContents(
+    resolver: android.content.ContentResolver,
+    sourceUri: String,
+    destinationUri: String,
+  ) {
+    openInputStream(resolver = resolver, uri = sourceUri).use { input ->
+      val parsedDestinationUri = Uri.parse(destinationUri)
+      resolver.openOutputStream(parsedDestinationUri, "w").use { output ->
+        requireNotNull(output) {
+          "Unable to open the Downloads destination."
+        }
+        input.copyTo(output, IO_PAGE_BYTES)
+      }
+    }
+  }
+
+  private fun openInputStream(
+    resolver: android.content.ContentResolver,
+    uri: String,
+  ): InputStream {
+    val parsed = Uri.parse(uri)
+    return when (parsed.scheme) {
+      null,
+      "",
+      "file" -> FileInputStream(requireFilePath(uri))
+      "content" ->
+        resolver.openInputStream(parsed)
+          ?: throw IllegalStateException("Unable to open the source file for export.")
+      else -> throw IllegalStateException("Unsupported source URI scheme for export.")
+    }
+  }
+
+  private fun createUniqueDownloadFile(
+    downloadsDirectory: File,
+    fileName: String,
+  ): File {
+    val extensionIndex = fileName.lastIndexOf('.')
+    val basename =
+      if (extensionIndex <= 0) {
+        fileName
+      } else {
+        fileName.substring(0, extensionIndex)
+      }
+    val extension =
+      if (extensionIndex <= 0) {
+        ""
+      } else {
+        fileName.substring(extensionIndex)
+      }
+
+    var attempt = 0
+    while (true) {
+      val suffix = if (attempt == 0) "" else " ($attempt)"
+      val candidate = File(downloadsDirectory, "$basename$suffix$extension")
+      if (!candidate.exists()) {
+        return candidate
+      }
+      attempt += 1
     }
   }
 

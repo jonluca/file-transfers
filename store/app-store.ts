@@ -81,8 +81,7 @@ function normalizeTransferChunkBytes(value: number, fallback: number) {
     return fallback;
   }
 
-  const roundedValue =
-    Math.round(value / TRANSFER_CHUNK_SIZE_STEP_BYTES) * TRANSFER_CHUNK_SIZE_STEP_BYTES;
+  const roundedValue = Math.round(value / TRANSFER_CHUNK_SIZE_STEP_BYTES) * TRANSFER_CHUNK_SIZE_STEP_BYTES;
 
   return Math.min(MAX_TRANSFER_CHUNK_BYTES, Math.max(MIN_TRANSFER_CHUNK_BYTES, roundedValue));
 }

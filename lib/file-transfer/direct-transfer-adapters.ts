@@ -325,10 +325,7 @@ function getPreferredNativeDownloadOptions(options: DirectTransferDownloadRuntim
   return {
     ...options,
     chunkBytes: Math.max(options.chunkBytes, NATIVE_DIRECT_TRANSFER_CHUNK_BYTES_FLOOR),
-    maxConcurrentChunks: Math.max(
-      options.maxConcurrentChunks,
-      NATIVE_DIRECT_TRANSFER_MAX_CONCURRENT_CHUNKS_FLOOR,
-    ),
+    maxConcurrentChunks: Math.max(options.maxConcurrentChunks, NATIVE_DIRECT_TRANSFER_MAX_CONCURRENT_CHUNKS_FLOOR),
   } satisfies DirectTransferDownloadRuntimeOptions;
 }
 
