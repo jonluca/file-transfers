@@ -4,6 +4,7 @@ export const LOCAL_TRANSFER_SERVICE_DOMAIN = "local.";
 export const LOCAL_TRANSFER_KEEP_AWAKE_TAG = "file-transfers-active";
 export const LOCAL_HTTP_SHARE_KEEP_AWAKE_TAG = "file-transfers-http-share";
 export const LOCAL_HTTP_SERVER_PORT = 41000;
+export const DIRECT_TRANSFER_CHUNK_BYTES = 8 * 1024 * 1024;
 export const RECEIVED_FILES_DIRECTORY_NAME = "received";
 export const HOSTED_FILE_DEFAULT_EXPIRY_DAYS = 7;
 export const PREMIUM_ENTITLEMENT_ID = "premium";

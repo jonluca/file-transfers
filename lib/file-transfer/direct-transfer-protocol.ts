@@ -78,8 +78,8 @@ export function resolveDiscoveryHost(record: Pick<DiscoveryRecord, "host" | "met
   return record.method === "nearby" ? getUsableNearbyHost(record.host) : getUsableLanHost(record.host);
 }
 
-export function createServiceName(deviceName: string, sessionId: string) {
-  return `${deviceName.trim().slice(0, 24)}-${sessionId.slice(0, 6)}`;
+export function createServiceName(deviceName: string, stableId: string) {
+  return `${deviceName.trim().slice(0, 24)}-${stableId.trim().slice(0, 8)}`;
 }
 
 export function createDiscoveryRecord({

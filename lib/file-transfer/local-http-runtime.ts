@@ -9,12 +9,13 @@ import {
   type ServerConfig,
   type StaticMount,
 } from "react-native-nitro-http-server";
-import { LOCAL_HTTP_SERVER_PORT, LOCAL_HTTP_SHARE_KEEP_AWAKE_TAG } from "./constants";
+import { DIRECT_TRANSFER_CHUNK_BYTES, LOCAL_HTTP_SERVER_PORT, LOCAL_HTTP_SHARE_KEEP_AWAKE_TAG } from "./constants";
 import {
   DIRECT_TOKEN_HEADER,
   createDiscoveryRecord,
   createNearbyDiscoveryResponse,
   buildDirectSessionBaseUrl,
+  buildDirectSessionUrl,
   isPrivateIpv4Address,
   normalizeIpv4Address,
   nowIso,
@@ -462,10 +463,151 @@ function createDirectManifest(runtime: SharedHttpRuntime, sendSession: DirectSen
         name: file.name,
         mimeType: file.mimeType,
         sizeBytes: file.sizeBytes,
-        downloadUrl: `http://${runtime.publicHost}:${LOCAL_HTTP_SERVER_PORT}${hostedFile.downloadPath}`,
+        downloadUrl: buildDirectSessionUrl(
+          directBaseUrl,
+          `/files/${encodeURIComponent(file.id)}/${encodeURIComponent(file.name)}`,
+        ),
       };
     }),
   } satisfies DownloadableTransferManifest;
+}
+
+function createBinaryResponse({
+  statusCode,
+  body,
+  method,
+  headers,
+}: {
+  statusCode: number;
+  body: Uint8Array;
+  method: string;
+  headers: Record<string, string>;
+}) {
+  const responseBody =
+    body.byteOffset === 0 && body.byteLength === body.buffer.byteLength && body.buffer instanceof ArrayBuffer
+      ? body.buffer
+      : (body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength) as ArrayBuffer);
+
+  if (method === "HEAD") {
+    return {
+      statusCode,
+      headers,
+    } satisfies HttpResponse;
+  }
+
+  return {
+    statusCode,
+    headers,
+    body: responseBody,
+  } satisfies HttpResponse;
+}
+
+function resolveDirectByteRange(rangeHeader: string | null, fileSize: number) {
+  if (!rangeHeader) {
+    if (fileSize > DIRECT_TRANSFER_CHUNK_BYTES) {
+      return {
+        error: `Range header is required for files larger than ${DIRECT_TRANSFER_CHUNK_BYTES} bytes.`,
+      } as const;
+    }
+
+    return {
+      start: 0,
+      end: Math.max(fileSize - 1, 0),
+      partial: false,
+    } as const;
+  }
+
+  const match = /^bytes=(\d+)-(\d+)$/i.exec(rangeHeader.trim());
+  if (!match) {
+    return {
+      error: "Invalid Range header.",
+    } as const;
+  }
+
+  const start = Number(match[1]);
+  const end = Number(match[2]);
+
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start || start >= fileSize) {
+    return {
+      error: "Requested range is not satisfiable.",
+    } as const;
+  }
+
+  return {
+    start,
+    end: Math.min(end, fileSize - 1),
+    partial: true,
+  } as const;
+}
+
+function createDirectFileRangeResponse({
+  file,
+  request,
+  method,
+}: {
+  file: SelectedTransferFile;
+  request: HttpRequest;
+  method: string;
+}) {
+  const sourceFile = new File(file.uri);
+  const sourceInfo = sourceFile.info();
+
+  if (!sourceInfo.exists) {
+    return createTextResponse({
+      statusCode: 410,
+      body: "The selected file is no longer available on this device.",
+      contentType: "text/plain; charset=utf-8",
+      method,
+    });
+  }
+
+  const fileSize = sourceInfo.size ?? file.sizeBytes;
+  const range = resolveDirectByteRange(getRequestHeader(request, "Range"), fileSize);
+  if ("error" in range) {
+    const errorMessage = range.error ?? "Invalid Range header.";
+    return createTextResponse({
+      statusCode: errorMessage === "Requested range is not satisfiable." ? 416 : 400,
+      body: errorMessage,
+      contentType: "text/plain; charset=utf-8",
+      method,
+      headers: {
+        "Accept-Ranges": "bytes",
+        "Content-Range": `bytes */${fileSize}`,
+      },
+    });
+  }
+
+  const contentLength = fileSize === 0 ? 0 : range.end - range.start + 1;
+  const headers = {
+    ...createDefaultHeaders(file.mimeType || "application/octet-stream", contentLength),
+    "Accept-Ranges": "bytes",
+    ...(range.partial && fileSize > 0 ? { "Content-Range": `bytes ${range.start}-${range.end}/${fileSize}` } : {}),
+  };
+
+  if (contentLength === 0) {
+    return createBinaryResponse({
+      statusCode: range.partial ? 206 : 200,
+      body: new Uint8Array(0),
+      method,
+      headers,
+    });
+  }
+
+  const handle = sourceFile.open();
+
+  try {
+    handle.offset = range.start;
+    const bytes = handle.readBytes(contentLength);
+
+    return createBinaryResponse({
+      statusCode: range.partial ? 206 : 200,
+      body: bytes,
+      method,
+      headers,
+    });
+  } finally {
+    handle.close();
+  }
 }
 
 function collectStaticMounts(runtime: SharedHttpRuntime) {
@@ -755,6 +897,26 @@ async function handleDirectRequest(runtime: SharedHttpRuntime, request: HttpRequ
       return createJsonResponse({
         statusCode: 200,
         body: createDirectManifest(runtime, directSender),
+        method,
+      });
+    }
+
+    if (pathSegments[3] === "files" && pathSegments[4] && ["GET", "HEAD"].includes(method) && directSender) {
+      ensureDirectToken(request, directSender.token);
+      const fileId = decodeURIComponent(pathSegments[4]);
+      const hostedFile = directSender.filesById.get(fileId);
+      if (!hostedFile) {
+        return createTextResponse({
+          statusCode: 404,
+          body: "File not found.",
+          contentType: "text/plain; charset=utf-8",
+          method,
+        });
+      }
+
+      return createDirectFileRangeResponse({
+        file: hostedFile.source,
+        request,
         method,
       });
     }

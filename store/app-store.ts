@@ -1,11 +1,17 @@
+import * as Crypto from "expo-crypto";
 import AsyncStorage from "expo-sqlite/kv-store";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 import type { TransferHistoryEntry } from "@/lib/file-transfer";
 
+function createServiceInstanceId() {
+  return Crypto.randomUUID().replace(/-/g, "").slice(0, 8);
+}
+
 interface AppState {
   hasHydrated: boolean;
   deviceName: string;
+  serviceInstanceId: string;
   autoAcceptKnownDevices: boolean;
   recentTransfers: TransferHistoryEntry[];
   setHasHydrated: (value: boolean) => void;
@@ -17,6 +23,7 @@ interface AppState {
 
 const defaultState = {
   deviceName: "This device",
+  serviceInstanceId: createServiceInstanceId(),
   autoAcceptKnownDevices: false,
   recentTransfers: [] as TransferHistoryEntry[],
 };
@@ -62,6 +69,7 @@ export const useAppStore = create<AppState>()(
       storage: createJSONStorage(() => AsyncStorage),
       partialize: (state) => ({
         deviceName: state.deviceName,
+        serviceInstanceId: state.serviceInstanceId,
         autoAcceptKnownDevices: state.autoAcceptKnownDevices,
         recentTransfers: state.recentTransfers,
       }),
@@ -74,5 +82,6 @@ export const useAppStore = create<AppState>()(
 
 export const useHasHydrated = () => useAppStore((state) => state.hasHydrated);
 export const useDeviceName = () => useAppStore((state) => state.deviceName);
+export const useServiceInstanceId = () => useAppStore((state) => state.serviceInstanceId);
 export const useAutoAcceptKnownDevices = () => useAppStore((state) => state.autoAcceptKnownDevices);
 export const useRecentTransfers = () => useAppStore((state) => state.recentTransfers);

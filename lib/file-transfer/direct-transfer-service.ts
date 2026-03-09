@@ -18,6 +18,7 @@ import {
   resolveDiscoveryHost,
 } from "./direct-transfer-protocol";
 import {
+  DIRECT_TRANSFER_CHUNK_BYTES,
   LOCAL_TRANSFER_KEEP_AWAKE_TAG,
   LOCAL_TRANSFER_SERVICE_DOMAIN,
   LOCAL_TRANSFER_SERVICE_PROTOCOL,
@@ -451,48 +452,137 @@ async function fetchDownloadableManifest({
   return payload;
 }
 
-async function streamResponseToFile({
-  response,
+function parseContentRangeHeader(value: string | null) {
+  if (!value) {
+    return null;
+  }
+
+  const match = /^bytes (\d+)-(\d+)\/(\d+|\*)$/i.exec(value.trim());
+  if (!match) {
+    return null;
+  }
+
+  const start = Number(match[1]);
+  const end = Number(match[2]);
+  const total = match[3] === "*" ? null : Number(match[3]);
+
+  if (!Number.isFinite(start) || !Number.isFinite(end) || (total !== null && !Number.isFinite(total))) {
+    return null;
+  }
+
+  return {
+    start,
+    end,
+    total,
+  };
+}
+
+async function downloadFileInChunks({
+  url,
   destination,
+  totalBytes,
+  headers,
   signal,
   onBytes,
 }: {
-  response: Response;
+  url: string;
   destination: File;
+  totalBytes: number;
+  headers: Record<string, string>;
   signal: AbortSignal;
   onBytes: (value: number) => void;
 }) {
   destination.create({ overwrite: true, intermediates: true });
+  if (totalBytes === 0) {
+    return;
+  }
+
   const handle = destination.open();
-
   try {
-    if (!response.body) {
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      if (signal.aborted) {
-        throw new Error("Download canceled.");
-      }
-      handle.writeBytes(bytes);
-      onBytes(bytes.byteLength);
-      return;
-    }
+    let bytesDownloaded = 0;
 
-    const reader = response.body.getReader();
-    while (true) {
+    while (bytesDownloaded < totalBytes) {
       if (signal.aborted) {
         throw new Error("Download canceled.");
       }
 
-      const { done, value } = await reader.read();
-      if (done) {
-        break;
+      const chunkEnd = Math.min(bytesDownloaded + DIRECT_TRANSFER_CHUNK_BYTES - 1, totalBytes - 1);
+      const response = await fetch(url, {
+        method: "GET",
+        headers: {
+          ...headers,
+          Range: `bytes=${bytesDownloaded}-${chunkEnd}`,
+        },
+        signal,
+      });
+
+      if (!response.ok) {
+        throw new Error(`Unable to download file chunk (${response.status}).`);
       }
 
-      if (!value?.byteLength) {
+      const contentRange = parseContentRangeHeader(response.headers.get("content-range"));
+      if (response.status !== 206 || !contentRange) {
+        throw new Error("The sender did not return a partial content response.");
+      }
+
+      const expectedChunkBytes = chunkEnd - bytesDownloaded + 1;
+      if (
+        contentRange.start !== bytesDownloaded ||
+        contentRange.end !== chunkEnd ||
+        (contentRange.total !== null && contentRange.total !== totalBytes)
+      ) {
+        throw new Error("The sender returned an unexpected file chunk.");
+      }
+
+      let chunkBytesDownloaded = 0;
+
+      if (!response.body) {
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        if (signal.aborted) {
+          throw new Error("Download canceled.");
+        }
+
+        if (bytes.byteLength !== expectedChunkBytes) {
+          throw new Error("The sender returned an incomplete file chunk.");
+        }
+
+        handle.writeBytes(bytes);
+        chunkBytesDownloaded += bytes.byteLength;
+        bytesDownloaded += bytes.byteLength;
+        onBytes(bytes.byteLength);
         continue;
       }
 
-      handle.writeBytes(value);
-      onBytes(value.byteLength);
+      const reader = response.body.getReader();
+
+      while (chunkBytesDownloaded < expectedChunkBytes) {
+        if (signal.aborted) {
+          throw new Error("Download canceled.");
+        }
+
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
+        }
+
+        if (!value?.byteLength) {
+          continue;
+        }
+
+        const remainingChunkBytes = expectedChunkBytes - chunkBytesDownloaded;
+        if (value.byteLength > remainingChunkBytes) {
+          throw new Error("The sender returned too many bytes for this file chunk.");
+        }
+
+        handle.writeBytes(value);
+        chunkBytesDownloaded += value.byteLength;
+        bytesDownloaded += value.byteLength;
+        onBytes(value.byteLength);
+      }
+
+      if (chunkBytesDownloaded !== expectedChunkBytes) {
+        throw new Error("The sender returned an incomplete file chunk.");
+      }
     }
   } finally {
     handle.close();
@@ -725,21 +815,13 @@ async function receiveDirectHttpTransfer({
         updatedAt: nowIso(),
       });
 
-      const response = await fetch(file.downloadUrl, {
-        method: "GET",
+      await downloadFileInChunks({
+        url: file.downloadUrl,
+        destination: outputFile,
+        totalBytes: file.sizeBytes,
         headers: {
           [DIRECT_TOKEN_HEADER]: offer.sender.token,
         },
-        signal: abortController.signal,
-      });
-
-      if (!response.ok) {
-        throw new Error(`Unable to download "${file.name}" (${response.status}).`);
-      }
-
-      await streamResponseToFile({
-        response,
-        destination: outputFile,
         signal: abortController.signal,
         onBytes: (chunkBytes) => {
           fileBytesTransferred += chunkBytes;
@@ -1188,14 +1270,16 @@ export async function stopSendingTransfer(sessionId: string) {
 
 export async function startReceivingAvailability({
   deviceName,
+  serviceInstanceId,
   updateSession,
 }: {
   deviceName: string;
+  serviceInstanceId: string;
   updateSession?: ReceiveRuntimeUpdate;
 }) {
   const sessionId = Crypto.randomUUID();
   const receiverToken = Crypto.randomUUID().replace(/-/g, "");
-  const requestedServiceName = createServiceName(deviceName, sessionId);
+  const requestedServiceName = createServiceName(deviceName, serviceInstanceId);
 
   logDirectTransferDebug("Starting receiver availability", {
     sessionId: getSessionDebugId(sessionId),

@@ -40,7 +40,7 @@ import {
   type TransferProgress,
   type TransferSession,
 } from "@/lib/file-transfer";
-import { useAppStore, useDeviceName } from "@/store";
+import { useAppStore, useDeviceName, useServiceInstanceId } from "@/store";
 
 type TransferMode = "idle" | "sending" | "waiting" | "receiving" | "transferring" | "sharing";
 
@@ -244,6 +244,7 @@ export default function TransferScreen() {
   const footerBottomPadding = insets.bottom + 12;
   const bottomLinkPadding = insets.bottom + 16;
   const deviceName = useDeviceName();
+  const serviceInstanceId = useServiceInstanceId();
   const upsertRecentTransfer = useAppStore((state) => state.upsertRecentTransfer);
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [mode, setMode] = useState<TransferMode>("idle");
@@ -593,6 +594,7 @@ export default function TransferScreen() {
 
     const session = await startReceivingAvailability({
       deviceName,
+      serviceInstanceId,
       updateSession: handleReceiveSessionUpdate,
     });
 
