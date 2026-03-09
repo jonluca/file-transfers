@@ -1,8 +1,7 @@
+import { getTransferChunkSettings } from "@/store";
 import { FILE_TRANSFERS_PRO_NAME } from "@/lib/subscriptions";
 import {
-  DIRECT_TRANSFER_CHUNK_BYTES,
   DIRECT_TRANSFER_MAX_CONCURRENT_CHUNKS,
-  FREE_TRANSFER_CHUNK_BYTES,
   FREE_TRANSFER_MAX_CONCURRENT_CHUNKS,
   FREE_TRANSFER_MAX_BYTES,
   FREE_TRANSFER_MAX_SPEED_BYTES_PER_SECOND,
@@ -78,9 +77,11 @@ function formatPolicyBytes(value: number) {
 }
 
 export function getTransferPolicy(isPremium: boolean, context: TransferPolicyContext = "send"): TransferPolicy {
+  const { directTransferChunkBytes, freeTransferChunkBytes } = getTransferChunkSettings();
+
   if (context === "receive") {
     return {
-      chunkBytes: DIRECT_TRANSFER_CHUNK_BYTES,
+      chunkBytes: directTransferChunkBytes,
       isPremium,
       maxConcurrentChunks: DIRECT_TRANSFER_MAX_CONCURRENT_CHUNKS,
       maxBytesPerSecond: null,
@@ -90,7 +91,7 @@ export function getTransferPolicy(isPremium: boolean, context: TransferPolicyCon
 
   if (isPremium) {
     return {
-      chunkBytes: DIRECT_TRANSFER_CHUNK_BYTES,
+      chunkBytes: directTransferChunkBytes,
       isPremium: true,
       maxConcurrentChunks: DIRECT_TRANSFER_MAX_CONCURRENT_CHUNKS,
       maxBytesPerSecond: null,
@@ -99,7 +100,7 @@ export function getTransferPolicy(isPremium: boolean, context: TransferPolicyCon
   }
 
   return {
-    chunkBytes: FREE_TRANSFER_CHUNK_BYTES,
+    chunkBytes: freeTransferChunkBytes,
     isPremium: false,
     maxConcurrentChunks: FREE_TRANSFER_MAX_CONCURRENT_CHUNKS,
     maxBytesPerSecond: FREE_TRANSFER_MAX_SPEED_BYTES_PER_SECOND,

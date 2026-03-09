@@ -1,7 +1,7 @@
 import Constants from "expo-constants";
 import { File } from "expo-file-system";
 import * as Linking from "expo-linking";
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -25,6 +25,7 @@ import {
   Link,
   RefreshCw,
   Shield,
+  SlidersHorizontal,
   Smartphone,
   X,
 } from "lucide-react-native";
@@ -37,10 +38,22 @@ import { signOut, useSession } from "@/lib/auth-client";
 import { getTabScreenBottomPadding, getTabScreenTopInset } from "@/lib/design/tab-screen-insets";
 import { designFonts, designTheme } from "@/lib/design/theme";
 import { pickTransferFiles } from "@/lib/file-transfer";
+import {
+  MAX_TRANSFER_CHUNK_SIZE_MEGABYTES,
+  MIN_TRANSFER_CHUNK_SIZE_MEGABYTES,
+  TRANSFER_CHUNK_SIZE_STEP_BYTES,
+} from "@/lib/file-transfer/constants";
 import { getPaywallResultMessage, mapCustomerInfoToEntitlement, REVENUECAT_PAYWALL_RESULT } from "@/lib/purchases";
 import { FILE_TRANSFERS_PRO_NAME, PREMIUM_PRODUCT_IDS } from "@/lib/subscriptions";
 import { useRevenueCat } from "@/providers/revenuecat-provider";
-import { useAppStore, useAutoAcceptKnownDevices, useDeviceName, useDevPremiumOverrideEnabled } from "@/store";
+import {
+  useAppStore,
+  useAutoAcceptKnownDevices,
+  useDeviceName,
+  useDevPremiumOverrideEnabled,
+  useDirectTransferChunkBytes,
+  useFreeTransferChunkBytes,
+} from "@/store";
 
 function PrimaryButton({
   label,
@@ -209,6 +222,32 @@ function formatExpirationCopy(expiresAt: string | null) {
   return `Renews or expires ${new Date(expiresAt).toLocaleDateString()}`;
 }
 
+function chunkBytesToMegabytes(value: number) {
+  return Math.max(1, Math.round(value / TRANSFER_CHUNK_SIZE_STEP_BYTES));
+}
+
+function formatChunkMegabytesLabel(value: number) {
+  return `${chunkBytesToMegabytes(value)} MB`;
+}
+
+function parseChunkMegabytesDraft(value: string) {
+  const trimmedValue = value.trim();
+  if (!/^\d+$/.test(trimmedValue)) {
+    return null;
+  }
+
+  const megabytes = Number(trimmedValue);
+  if (
+    !Number.isInteger(megabytes) ||
+    megabytes < MIN_TRANSFER_CHUNK_SIZE_MEGABYTES ||
+    megabytes > MAX_TRANSFER_CHUNK_SIZE_MEGABYTES
+  ) {
+    return null;
+  }
+
+  return megabytes * TRANSFER_CHUNK_SIZE_STEP_BYTES;
+}
+
 export default function SettingsScreen() {
   const insets = useSafeAreaInsets();
   const topInset = getTabScreenTopInset(insets.top);
@@ -216,9 +255,14 @@ export default function SettingsScreen() {
   const deviceName = useDeviceName();
   const autoAcceptKnownDevices = useAutoAcceptKnownDevices();
   const devPremiumOverrideEnabled = useDevPremiumOverrideEnabled();
+  const directTransferChunkBytes = useDirectTransferChunkBytes();
+  const freeTransferChunkBytes = useFreeTransferChunkBytes();
   const setDeviceName = useAppStore((state) => state.setDeviceName);
   const setAutoAcceptKnownDevices = useAppStore((state) => state.setAutoAcceptKnownDevices);
   const setDevPremiumOverrideEnabled = useAppStore((state) => state.setDevPremiumOverrideEnabled);
+  const setDirectTransferChunkBytes = useAppStore((state) => state.setDirectTransferChunkBytes);
+  const setFreeTransferChunkBytes = useAppStore((state) => state.setFreeTransferChunkBytes);
+  const resetTransferChunkBytes = useAppStore((state) => state.resetTransferChunkBytes);
   const { data: session } = useSession();
   const premiumAccess = usePremiumAccess();
   const {
@@ -244,11 +288,30 @@ export default function SettingsScreen() {
   const [isEditingDeviceName, setIsEditingDeviceName] = useState(false);
   const [showPremiumDetails, setShowPremiumDetails] = useState(false);
   const [wantsHostedLinksPanel, setWantsHostedLinksPanel] = useState(false);
+  const [showAdvancedTransferSettings, setShowAdvancedTransferSettings] = useState(false);
+  const [directChunkMegabytesDraft, setDirectChunkMegabytesDraft] = useState(() =>
+    String(chunkBytesToMegabytes(directTransferChunkBytes)),
+  );
+  const [freeChunkMegabytesDraft, setFreeChunkMegabytesDraft] = useState(() =>
+    String(chunkBytesToMegabytes(freeTransferChunkBytes)),
+  );
+  const [advancedTransferNotice, setAdvancedTransferNotice] = useState<{
+    description: string;
+    tone: "default" | "warning";
+  } | null>(null);
   const [purchaseNotice, setPurchaseNotice] = useState<string | null>(null);
   const [hostedNotice, setHostedNotice] = useState<string | null>(null);
   const [hostedPasscode, setHostedPasscode] = useState("");
   const isPremium = premiumAccess.isPremium;
   const showHostedLinksPanel = wantsHostedLinksPanel && isPremium;
+
+  useEffect(() => {
+    setDirectChunkMegabytesDraft(String(chunkBytesToMegabytes(directTransferChunkBytes)));
+  }, [directTransferChunkBytes]);
+
+  useEffect(() => {
+    setFreeChunkMegabytesDraft(String(chunkBytesToMegabytes(freeTransferChunkBytes)));
+  }, [freeTransferChunkBytes]);
 
   async function handlePurchase(selectedPackage: PurchasesPackage) {
     if (!hasConfiguredRevenueCat) {
@@ -397,6 +460,34 @@ export default function SettingsScreen() {
     } catch (error) {
       setHostedNotice(error instanceof Error ? error.message : "Unable to upload the hosted file.");
     }
+  }
+
+  function handleSaveTransferChunkSettings() {
+    const nextDirectTransferChunkBytes = parseChunkMegabytesDraft(directChunkMegabytesDraft);
+    const nextFreeTransferChunkBytes = parseChunkMegabytesDraft(freeChunkMegabytesDraft);
+
+    if (nextDirectTransferChunkBytes === null || nextFreeTransferChunkBytes === null) {
+      setAdvancedTransferNotice({
+        description: `Enter whole megabytes between ${MIN_TRANSFER_CHUNK_SIZE_MEGABYTES} and ${MAX_TRANSFER_CHUNK_SIZE_MEGABYTES}.`,
+        tone: "warning",
+      });
+      return;
+    }
+
+    setDirectTransferChunkBytes(nextDirectTransferChunkBytes);
+    setFreeTransferChunkBytes(nextFreeTransferChunkBytes);
+    setAdvancedTransferNotice({
+      description: "Saved. New nearby sessions will use the updated chunk sizes.",
+      tone: "default",
+    });
+  }
+
+  function handleResetTransferChunkSettings() {
+    resetTransferChunkBytes();
+    setAdvancedTransferNotice({
+      description: "Restored the default nearby transfer chunk sizes.",
+      tone: "default",
+    });
   }
 
   return (
@@ -610,7 +701,92 @@ export default function SettingsScreen() {
               icon={<Shield color={designTheme.secondaryForeground} size={18} strokeWidth={1.9} />}
               label={"Auto-accept from known devices"}
             />
+            <SettingItem
+              action={
+                <View style={styles.advancedToggleWrap}>
+                  <Text style={styles.advancedToggleLabel}>{showAdvancedTransferSettings ? "Hide" : "Show"}</Text>
+                  <View style={showAdvancedTransferSettings ? styles.advancedToggleChevronExpanded : null}>
+                    <ChevronRight color={designTheme.mutedForeground} size={18} strokeWidth={2} />
+                  </View>
+                </View>
+              }
+              description={`Premium/direct ${formatChunkMegabytesLabel(directTransferChunkBytes)} • Free ${formatChunkMegabytesLabel(freeTransferChunkBytes)}`}
+              icon={<SlidersHorizontal color={designTheme.secondaryForeground} size={18} strokeWidth={1.9} />}
+              label={"Advanced transfer settings"}
+              onPress={() => {
+                setAdvancedTransferNotice(null);
+                setShowAdvancedTransferSettings((current) => !current);
+              }}
+            />
           </View>
+          {showAdvancedTransferSettings ? (
+            <View style={[styles.panel, styles.advancedPanel]}>
+              <Text style={styles.panelTitle}>Advanced transfer settings</Text>
+              <Text style={styles.panelCopy}>
+                Applies to new nearby send and receive sessions. Larger chunks reduce request overhead, while smaller
+                chunks retry less data after interruptions.
+              </Text>
+
+              <View style={styles.advancedField}>
+                <View style={styles.advancedFieldCopy}>
+                  <Text style={styles.advancedFieldLabel}>Premium/direct chunk size</Text>
+                  <Text style={styles.advancedFieldDescription}>
+                    Used for premium sends and all incoming nearby transfers.
+                  </Text>
+                </View>
+                <View style={styles.advancedInputWrap}>
+                  <TextInput
+                    keyboardType={"number-pad"}
+                    onChangeText={setDirectChunkMegabytesDraft}
+                    placeholder={"45"}
+                    placeholderTextColor={designTheme.mutedForeground}
+                    style={styles.advancedInput}
+                    value={directChunkMegabytesDraft}
+                  />
+                  <Text style={styles.advancedInputSuffix}>MB</Text>
+                </View>
+              </View>
+
+              <View style={styles.advancedField}>
+                <View style={styles.advancedFieldCopy}>
+                  <Text style={styles.advancedFieldLabel}>Free sender chunk size</Text>
+                  <Text style={styles.advancedFieldDescription}>
+                    Used when the sender stays on the free tier for nearby transfers.
+                  </Text>
+                </View>
+                <View style={styles.advancedInputWrap}>
+                  <TextInput
+                    keyboardType={"number-pad"}
+                    onChangeText={setFreeChunkMegabytesDraft}
+                    placeholder={"1"}
+                    placeholderTextColor={designTheme.mutedForeground}
+                    style={styles.advancedInput}
+                    value={freeChunkMegabytesDraft}
+                  />
+                  <Text style={styles.advancedInputSuffix}>MB</Text>
+                </View>
+              </View>
+
+              {advancedTransferNotice ? (
+                <InlineNotice
+                  description={advancedTransferNotice.description}
+                  title={"Transfer tuning"}
+                  tone={advancedTransferNotice.tone}
+                />
+              ) : null}
+
+              <View style={styles.advancedActions}>
+                <PrimaryButton
+                  label={"Save chunk sizes"}
+                  onPress={handleSaveTransferChunkSettings}
+                />
+                <SecondaryButton
+                  label={"Reset defaults"}
+                  onPress={handleResetTransferChunkSettings}
+                />
+              </View>
+            </View>
+          ) : null}
         </View>
 
         <View style={styles.section}>
@@ -949,6 +1125,19 @@ const styles = StyleSheet.create({
     fontSize: 13,
     lineHeight: 18,
   },
+  advancedToggleWrap: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: 8,
+  },
+  advancedToggleLabel: {
+    color: designTheme.mutedForeground,
+    fontFamily: designFonts.medium,
+    fontSize: 13,
+  },
+  advancedToggleChevronExpanded: {
+    transform: [{ rotate: "90deg" }],
+  },
   editRow: {
     alignItems: "center",
     backgroundColor: designTheme.card,
@@ -976,6 +1165,9 @@ const styles = StyleSheet.create({
     gap: 12,
     padding: 16,
   },
+  advancedPanel: {
+    marginTop: 12,
+  },
   panelTitle: {
     color: designTheme.foreground,
     fontFamily: designFonts.semibold,
@@ -986,6 +1178,50 @@ const styles = StyleSheet.create({
     fontFamily: designFonts.regular,
     fontSize: 14,
     lineHeight: 20,
+  },
+  advancedField: {
+    gap: 10,
+  },
+  advancedFieldCopy: {
+    gap: 4,
+  },
+  advancedFieldLabel: {
+    color: designTheme.foreground,
+    fontFamily: designFonts.medium,
+    fontSize: 15,
+  },
+  advancedFieldDescription: {
+    color: designTheme.mutedForeground,
+    fontFamily: designFonts.regular,
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  advancedInputWrap: {
+    alignItems: "center",
+    backgroundColor: designTheme.input,
+    borderColor: designTheme.border,
+    borderRadius: 14,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 12,
+    minHeight: 48,
+    paddingHorizontal: 14,
+  },
+  advancedInput: {
+    color: designTheme.foreground,
+    flex: 1,
+    fontFamily: designFonts.medium,
+    fontSize: 15,
+    minHeight: 24,
+    paddingVertical: 0,
+  },
+  advancedInputSuffix: {
+    color: designTheme.mutedForeground,
+    fontFamily: designFonts.medium,
+    fontSize: 13,
+  },
+  advancedActions: {
+    gap: 10,
   },
   hostedInput: {
     backgroundColor: designTheme.input,

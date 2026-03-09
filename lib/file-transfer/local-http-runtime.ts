@@ -581,10 +581,12 @@ async function createFileDownloadResponse({
   request,
   method,
   attachmentFileName,
+  chunkBytes,
   maxBytesPerSecond,
   perfContext,
 }: {
   attachmentFileName?: string;
+  chunkBytes?: number;
   file: SelectedTransferFile;
   maxBytesPerSecond: number | null;
   perfContext?: {
@@ -607,7 +609,7 @@ async function createFileDownloadResponse({
   }
 
   const fileSize = sourceInfo.size ?? file.sizeBytes;
-  const range = resolveDirectByteRange(getRequestHeader(request, "Range"), fileSize);
+  const range = resolveDirectByteRange(getRequestHeader(request, "Range"), fileSize, chunkBytes);
   if ("error" in range) {
     const errorMessage = range.error ?? "Invalid Range header.";
     return createTextResponse({
@@ -1013,6 +1015,7 @@ async function handleDirectRequest(runtime: SharedHttpRuntime, request: HttpRequ
 
       return createFileDownloadResponse({
         file: hostedFile.source,
+        chunkBytes: directSender.transferPolicy.chunkBytes,
         maxBytesPerSecond: directSender.transferPolicy.maxBytesPerSecond,
         perfContext: {
           sessionId,

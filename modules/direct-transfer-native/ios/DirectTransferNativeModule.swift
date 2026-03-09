@@ -521,6 +521,110 @@ private actor FileWriter {
   }
 }
 
+private final class StreamingDataTaskDelegate: NSObject, URLSessionDataDelegate, URLSessionTaskDelegate {
+  let chunks: AsyncThrowingStream<Data, Error>
+  private let chunksContinuation: AsyncThrowingStream<Data, Error>.Continuation
+  private let lock = NSLock()
+  private var responseContinuation: CheckedContinuation<HTTPURLResponse, Error>?
+  private var responseResult: Result<HTTPURLResponse, Error>?
+
+  override init() {
+    var continuation: AsyncThrowingStream<Data, Error>.Continuation?
+    self.chunks = AsyncThrowingStream<Data, Error> { streamContinuation in
+      continuation = streamContinuation
+    }
+    self.chunksContinuation = continuation!
+    super.init()
+  }
+
+  func waitForResponse() async throws -> HTTPURLResponse {
+    try await withCheckedThrowingContinuation { continuation in
+      lock.lock()
+      if let responseResult {
+        lock.unlock()
+        continuation.resume(with: responseResult)
+        return
+      }
+
+      responseContinuation = continuation
+      lock.unlock()
+    }
+  }
+
+  func urlSession(
+    _ session: URLSession,
+    dataTask: URLSessionDataTask,
+    didReceive response: URLResponse,
+    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+  ) {
+    guard let httpResponse = response as? HTTPURLResponse else {
+      let error = Exception(
+        name: "DirectTransferInvalidResponse",
+        description: "The sender returned an invalid response.",
+        code: "ERR_DIRECT_TRANSFER_DOWNLOAD"
+      )
+      resolveResponse(.failure(error))
+      chunksContinuation.finish(throwing: error)
+      completionHandler(.cancel)
+      return
+    }
+
+    resolveResponse(.success(httpResponse))
+    completionHandler(.allow)
+  }
+
+  func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+    if !data.isEmpty {
+      chunksContinuation.yield(data)
+    }
+  }
+
+  func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+    if let error {
+      resolveResponse(.failure(error))
+      chunksContinuation.finish(throwing: error)
+      return
+    }
+
+    if !hasResolvedResponse() {
+      let responseError = Exception(
+        name: "DirectTransferMissingResponse",
+        description: "The sender closed the connection before returning file headers.",
+        code: "ERR_DIRECT_TRANSFER_DOWNLOAD"
+      )
+      resolveResponse(.failure(responseError))
+      chunksContinuation.finish(throwing: responseError)
+      return
+    }
+
+    chunksContinuation.finish()
+  }
+
+  private func hasResolvedResponse() -> Bool {
+    lock.lock()
+    defer {
+      lock.unlock()
+    }
+
+    return responseResult != nil
+  }
+
+  private func resolveResponse(_ result: Result<HTTPURLResponse, Error>) {
+    let continuation: CheckedContinuation<HTTPURLResponse, Error>?
+
+    lock.lock()
+    if responseResult == nil {
+      responseResult = result
+    }
+    continuation = responseContinuation
+    responseContinuation = nil
+    let resolvedResult = responseResult!
+    lock.unlock()
+
+    continuation?.resume(with: resolvedResult)
+  }
+}
+
 public final class DirectTransferNativeModule: Module {
   private let stateQueue = DispatchQueue(label: "DirectTransferNative.State")
   private lazy var payloadServer = PayloadServer(
@@ -773,37 +877,104 @@ public final class DirectTransferNativeModule: Module {
       request.setValue(value, forHTTPHeaderField: key)
     }
 
+    let delegate = StreamingDataTaskDelegate()
+    let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
+    let dataTask = session.dataTask(with: request)
     let requestStartedAt = CACurrentMediaTime()
-    let (data, response) = try await URLSession.shared.data(for: request)
-    guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 206 else {
-      throw Exception(name: "DirectTransferBadStatus", description: "Unable to download file chunk.", code: "ERR_DIRECT_TRANSFER_DOWNLOAD")
-    }
+    let expectedChunkBytes = end - start + 1
 
-    guard let contentRange = parseContentRange(httpResponse.value(forHTTPHeaderField: "Content-Range")),
-          contentRange.start == start,
-          contentRange.end == end,
-          contentRange.total == nil || contentRange.total == totalBytes
-    else {
-      throw Exception(name: "DirectTransferBadRange", description: "The sender returned an unexpected file chunk.", code: "ERR_DIRECT_TRANSFER_DOWNLOAD")
-    }
+    try await withTaskCancellationHandler(operation: {
+      defer {
+        session.finishTasksAndInvalidate()
+      }
 
-    let expectedChunkBytes = Int(end - start + 1)
-    guard data.count == expectedChunkBytes else {
-      throw Exception(name: "DirectTransferIncompleteChunk", description: "The sender returned an incomplete file chunk.", code: "ERR_DIRECT_TRANSFER_DOWNLOAD")
-    }
+      dataTask.resume()
 
-    let diskWriteDurationMs = try await writer.write(data: data, at: UInt64(start))
-    progress.add(
-      bytes: Int64(data.count),
-      requestDurationMs: (CACurrentMediaTime() - requestStartedAt) * 1000,
-      diskWriteDurationMs: diskWriteDurationMs
-    )
+      let httpResponse = try await delegate.waitForResponse()
+      guard httpResponse.statusCode == 206 else {
+        throw Exception(name: "DirectTransferBadStatus", description: "Unable to download file chunk.", code: "ERR_DIRECT_TRANSFER_DOWNLOAD")
+      }
 
-    throttleChunk(
-      bytesTransferred: Int64(data.count),
-      maxBytesPerSecond: maxBytesPerSecond,
-      startedAt: requestStartedAt
-    )
+      guard let contentRange = parseContentRange(httpResponse.value(forHTTPHeaderField: "Content-Range")),
+            contentRange.start == start,
+            contentRange.end == end,
+            contentRange.total == nil || contentRange.total == totalBytes
+      else {
+        throw Exception(name: "DirectTransferBadRange", description: "The sender returned an unexpected file chunk.", code: "ERR_DIRECT_TRANSFER_DOWNLOAD")
+      }
+
+      var bytesDownloaded: Int64 = 0
+      var nextOffset = UInt64(start)
+      var pendingData = Data()
+      pendingData.reserveCapacity(ioPageBytes)
+
+      func flushPendingData() async throws {
+        guard !pendingData.isEmpty else {
+          return
+        }
+
+        let writeOffset = nextOffset
+        let bytesToWrite = pendingData
+        pendingData = Data()
+        pendingData.reserveCapacity(ioPageBytes)
+        nextOffset += UInt64(bytesToWrite.count)
+
+        let diskWriteDurationMs = try await writer.write(data: bytesToWrite, at: writeOffset)
+        progress.add(
+          bytes: Int64(bytesToWrite.count),
+          requestDurationMs: 0,
+          diskWriteDurationMs: diskWriteDurationMs
+        )
+
+        throttleChunk(
+          bytesTransferred: bytesDownloaded,
+          maxBytesPerSecond: maxBytesPerSecond,
+          startedAt: requestStartedAt
+        )
+      }
+
+      for try await data in delegate.chunks {
+        try Task.checkCancellation()
+        if data.isEmpty {
+          continue
+        }
+
+        let remainingChunkBytes = expectedChunkBytes - bytesDownloaded
+        if Int64(data.count) > remainingChunkBytes {
+          throw Exception(
+            name: "DirectTransferTooManyBytes",
+            description: "The sender returned too many bytes for this file chunk.",
+            code: "ERR_DIRECT_TRANSFER_DOWNLOAD"
+          )
+        }
+
+        pendingData.append(data)
+        bytesDownloaded += Int64(data.count)
+
+        if pendingData.count >= ioPageBytes {
+          try await flushPendingData()
+        }
+      }
+
+      try await flushPendingData()
+
+      guard bytesDownloaded == expectedChunkBytes else {
+        throw Exception(
+          name: "DirectTransferIncompleteChunk",
+          description: "The sender returned an incomplete file chunk.",
+          code: "ERR_DIRECT_TRANSFER_DOWNLOAD"
+        )
+      }
+
+      progress.add(
+        bytes: 0,
+        requestDurationMs: (CACurrentMediaTime() - requestStartedAt) * 1000,
+        diskWriteDurationMs: 0
+      )
+    }, onCancel: {
+      dataTask.cancel()
+      session.invalidateAndCancel()
+    })
   }
 
   private func parseContentRange(_ value: String?) -> ParsedRange? {

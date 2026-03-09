@@ -1,10 +1,14 @@
-import { DIRECT_TRANSFER_CHUNK_BYTES } from "./constants";
+import { DEFAULT_DIRECT_TRANSFER_CHUNK_BYTES } from "./constants";
 
-export function resolveDirectByteRange(rangeHeader: string | null, fileSize: number) {
+export function resolveDirectByteRange(
+  rangeHeader: string | null,
+  fileSize: number,
+  chunkBytes = DEFAULT_DIRECT_TRANSFER_CHUNK_BYTES,
+) {
   if (!rangeHeader) {
-    if (fileSize > DIRECT_TRANSFER_CHUNK_BYTES) {
+    if (fileSize > chunkBytes) {
       return {
-        error: `Range header is required for files larger than ${DIRECT_TRANSFER_CHUNK_BYTES} bytes.`,
+        error: `Range header is required for files larger than ${chunkBytes} bytes.`,
       } as const;
     }
 
