@@ -467,6 +467,26 @@ function matchTarget(record: DiscoveryRecord, name: string | null, sessionId: st
   );
 }
 
+function findReplacementDiscoveryRecord(target: DiscoveryRecord, records: DiscoveryRecord[]) {
+  if (target.serviceName) {
+    const exactServiceMatch = records.find((record) => record.serviceName === target.serviceName);
+    if (exactServiceMatch) {
+      return exactServiceMatch;
+    }
+  }
+
+  if (records.length === 1) {
+    return records[0]!;
+  }
+
+  const exactDeviceMatches = records.filter((record) => record.deviceName === target.deviceName);
+  if (exactDeviceMatches.length === 1) {
+    return exactDeviceMatches[0]!;
+  }
+
+  return null;
+}
+
 async function fetchNearbyDiscoveryRecords(host: string, port: number) {
   const controller = new AbortController();
   const timer = setTimeout(() => {
@@ -489,6 +509,27 @@ async function fetchNearbyDiscoveryRecords(host: string, port: number) {
     return parseNearbyDiscoveryResponse(await response.json());
   } finally {
     clearTimeout(timer);
+  }
+}
+
+async function refreshTargetRecord(target: DiscoveryRecord) {
+  const host = resolveDiscoveryHost(target);
+  if (!host || target.port <= 0) {
+    return target;
+  }
+
+  try {
+    const refreshed = findReplacementDiscoveryRecord(target, await fetchNearbyDiscoveryRecords(host, target.port));
+    if (!refreshed) {
+      return target;
+    }
+
+    return {
+      ...refreshed,
+      method: target.method,
+    };
+  } catch {
+    return target;
   }
 }
 
@@ -1001,7 +1042,7 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
     host,
     port: LOCAL_HTTP_SERVER_PORT,
     token: receiverToken,
-    serviceName: options.nearby ? createServiceName(options.deviceName, sessionId) : null,
+    serviceName: options.nearby ? createServiceName(sessionId) : null,
   });
 
   const state: ReceiveServiceState = {
@@ -1324,7 +1365,7 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
 
 async function runSendCommand(options: SendCommandOptions) {
   const files = await buildSelectedFiles(options.filePaths);
-  const target = await resolveTargetRecord(options);
+  const target = await refreshTargetRecord(await resolveTargetRecord(options));
   const host = getPreferredLanAddress();
   if (!host) {
     throw new Error("No usable local WiFi address was found on this Mac.");

@@ -373,6 +373,88 @@ async function fetchNearbyDiscoveryRecords({ host, port }: { host: string; port:
   }
 }
 
+function findReplacementDiscoveryRecord(target: DiscoveryRecord, records: DiscoveryRecord[]) {
+  if (target.serviceName) {
+    const exactServiceMatch = records.find((record) => record.serviceName === target.serviceName);
+    if (exactServiceMatch) {
+      return exactServiceMatch;
+    }
+  }
+
+  if (records.length === 1) {
+    return records[0]!;
+  }
+
+  const exactDeviceMatches = records.filter((record) => record.deviceName === target.deviceName);
+  if (exactDeviceMatches.length === 1) {
+    return exactDeviceMatches[0]!;
+  }
+
+  return null;
+}
+
+async function refreshDiscoveryTarget(target: DiscoveryRecord) {
+  const host = resolveDiscoveryHost(target);
+  if (!host || target.port <= 0) {
+    return target;
+  }
+
+  try {
+    const refreshed = findReplacementDiscoveryRecord(
+      target,
+      await fetchNearbyDiscoveryRecords({
+        host,
+        port: target.port,
+      }),
+    );
+
+    if (!refreshed) {
+      logDirectTransferDebug("Receiver discovery refresh found no replacement", {
+        targetDeviceName: target.deviceName,
+        targetMethod: target.method,
+        targetHost: target.host,
+        targetPort: target.port,
+        targetSessionId: getSessionDebugId(target.sessionId),
+      });
+      return target;
+    }
+
+    if (
+      refreshed.sessionId === target.sessionId &&
+      refreshed.token === target.token &&
+      refreshed.host === target.host &&
+      refreshed.port === target.port
+    ) {
+      return target;
+    }
+
+    logDirectTransferDebug("Receiver discovery target refreshed", {
+      targetDeviceName: target.deviceName,
+      previousHost: target.host,
+      previousPort: target.port,
+      previousSessionId: getSessionDebugId(target.sessionId),
+      refreshedHost: refreshed.host,
+      refreshedPort: refreshed.port,
+      refreshedSessionId: getSessionDebugId(refreshed.sessionId),
+    });
+
+    return {
+      ...refreshed,
+      method: target.method,
+    };
+  } catch (error) {
+    logDirectTransferDebug("Receiver discovery refresh failed", {
+      targetDeviceName: target.deviceName,
+      targetMethod: target.method,
+      targetHost: target.host,
+      targetPort: target.port,
+      targetSessionId: getSessionDebugId(target.sessionId),
+      ...getErrorDebugDetails(error),
+    });
+    return target;
+  }
+}
+
 function buildPeerAccessFromDiscovery(record: DiscoveryRecord): DirectPeerAccess {
   return {
     sessionId: record.sessionId,
@@ -1177,47 +1259,49 @@ export async function startSendingTransfer({
     targetSessionId: getSessionDebugId(target.sessionId),
   });
 
-  if (target.port <= 0 || !target.token.trim()) {
+  const refreshedTarget = await refreshDiscoveryTarget(target);
+
+  if (refreshedTarget.port <= 0 || !refreshedTarget.token.trim()) {
     logDirectTransferDebug("Sender target is no longer valid", {
       senderSessionId: getSessionDebugId(sessionId),
-      targetPort: target.port,
-      hasToken: Boolean(target.token.trim()),
-      targetMethod: target.method,
-      targetHost: target.host,
-      targetDeviceName: target.deviceName,
-      targetSessionId: getSessionDebugId(target.sessionId),
+      targetPort: refreshedTarget.port,
+      hasToken: Boolean(refreshedTarget.token.trim()),
+      targetMethod: refreshedTarget.method,
+      targetHost: refreshedTarget.host,
+      targetDeviceName: refreshedTarget.deviceName,
+      targetSessionId: getSessionDebugId(refreshedTarget.sessionId),
     });
     throw new Error("That receiver is no longer available.");
   }
 
-  const validatedTargetHost = resolveDiscoveryHost(target);
+  const validatedTargetHost = resolveDiscoveryHost(refreshedTarget);
   if (!validatedTargetHost) {
     logDirectTransferDebug("Sender target host could not be resolved", {
       senderSessionId: getSessionDebugId(sessionId),
-      targetMethod: target.method,
-      targetHost: target.host,
-      targetPort: target.port,
-      targetDeviceName: target.deviceName,
-      targetSessionId: getSessionDebugId(target.sessionId),
+      targetMethod: refreshedTarget.method,
+      targetHost: refreshedTarget.host,
+      targetPort: refreshedTarget.port,
+      targetDeviceName: refreshedTarget.deviceName,
+      targetSessionId: getSessionDebugId(refreshedTarget.sessionId),
     });
     throw new Error(
-      target.method === "qr"
+      refreshedTarget.method === "qr"
         ? "That QR code does not contain a usable local WiFi address."
         : "That receiver is not advertising a usable local WiFi address.",
     );
   }
 
   const resolvedTarget =
-    validatedTargetHost === target.host
-      ? target
+    validatedTargetHost === refreshedTarget.host
+      ? refreshedTarget
       : {
-          ...target,
+          ...refreshedTarget,
           host: validatedTargetHost,
         };
 
   logDirectTransferDebug("Sender target resolved", {
     senderSessionId: getSessionDebugId(sessionId),
-    originalHost: target.host,
+    originalHost: refreshedTarget.host,
     resolvedHost: resolvedTarget.host,
     targetMethod: resolvedTarget.method,
     targetPort: resolvedTarget.port,
@@ -1328,7 +1412,7 @@ export async function startReceivingAvailability({
 }) {
   const sessionId = Crypto.randomUUID();
   const receiverToken = Crypto.randomUUID().replace(/-/g, "");
-  const requestedServiceName = createServiceName(deviceName, serviceInstanceId);
+  const requestedServiceName = createServiceName(serviceInstanceId);
   const transferPolicy = getTransferPolicy(isPremium);
 
   logDirectTransferDebug("Starting receiver availability", {

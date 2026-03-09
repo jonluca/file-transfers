@@ -180,19 +180,23 @@ function HistoryRow({ entry }: { entry: TransferHistoryEntry }) {
             onPress={() => {
               void handleOpenReceivedFile(firstFile);
             }}
-            style={({ pressed }) => [styles.inlineAction, pressed ? styles.pressed : null]}
+            style={({ pressed }) => [styles.actionButton, styles.actionButtonPrimary, pressed ? styles.pressed : null]}
           >
-            <FolderOpen color={designTheme.primary} size={14} strokeWidth={2.2} />
-            <Text style={styles.inlineActionLabel}>Open</Text>
+            <FolderOpen color={designTheme.primaryForeground} size={16} strokeWidth={2.2} />
+            <Text style={[styles.actionButtonLabel, styles.actionButtonLabelPrimary]}>Open</Text>
           </Pressable>
           <Pressable
             onPress={() => {
               void handleShareReceivedFile(firstFile);
             }}
-            style={({ pressed }) => [styles.inlineAction, pressed ? styles.pressed : null]}
+            style={({ pressed }) => [
+              styles.actionButton,
+              styles.actionButtonSecondary,
+              pressed ? styles.pressed : null,
+            ]}
           >
-            <Share2 color={designTheme.primary} size={14} strokeWidth={2.2} />
-            <Text style={styles.inlineActionLabel}>Share</Text>
+            <Share2 color={designTheme.primary} size={16} strokeWidth={2.2} />
+            <Text style={[styles.actionButtonLabel, styles.actionButtonLabelSecondary]}>Share</Text>
           </Pressable>
         </View>
       ) : null}
@@ -378,16 +382,35 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     gap: 10,
   },
-  inlineAction: {
+  actionButton: {
     alignItems: "center",
+    borderRadius: 999,
+    borderWidth: 1,
+    flex: 1,
     flexDirection: "row",
-    gap: 6,
-    paddingVertical: 2,
+    gap: 8,
+    justifyContent: "center",
+    minHeight: 42,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
   },
-  inlineActionLabel: {
+  actionButtonPrimary: {
+    backgroundColor: designTheme.primary,
+    borderColor: designTheme.primary,
+  },
+  actionButtonSecondary: {
+    backgroundColor: "rgba(37, 99, 235, 0.08)",
+    borderColor: "rgba(37, 99, 235, 0.14)",
+  },
+  actionButtonLabel: {
+    fontFamily: designFonts.semibold,
+    fontSize: 14,
+  },
+  actionButtonLabelPrimary: {
+    color: designTheme.primaryForeground,
+  },
+  actionButtonLabelSecondary: {
     color: designTheme.primary,
-    fontFamily: designFonts.medium,
-    fontSize: 13,
   },
   rowButton: {
     alignSelf: "flex-start",
