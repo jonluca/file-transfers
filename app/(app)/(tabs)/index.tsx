@@ -307,7 +307,7 @@ export default function TransferScreen() {
       } = {},
     ) => {
       const sessionId = options.sessionId ?? activeHttpShareSession?.id ?? null;
-      const nextMode = options.nextMode ?? "idle";
+      const nextMode = options.nextMode ?? (stagedFiles.length > 0 ? "sending" : "idle");
       const noticeMessage = options.noticeMessage;
 
       if (!sessionId) {
@@ -359,7 +359,7 @@ export default function TransferScreen() {
       setNotice(getTransferDetail(nextSession.detail, "Browser sharing stopped unexpectedly."));
     }
 
-    setMode((current) => (current === "sharing" ? "idle" : current));
+    setMode((current) => (current === "sharing" ? (stagedFiles.length > 0 ? "sending" : "idle") : current));
   });
 
   useEffect(() => {
@@ -640,6 +640,12 @@ export default function TransferScreen() {
   }
 
   async function handleStartBrowserShare() {
+    if (stagedFiles.length === 0) {
+      setNotice("Pick files first.");
+      setMode("idle");
+      return;
+    }
+
     try {
       if (activeHttpShareSession) {
         await stopBrowserShareSession({
@@ -648,18 +654,13 @@ export default function TransferScreen() {
         });
       }
 
-      const files = await pickTransferFiles();
-      if (files.length === 0) {
-        return;
-      }
-
       setNotice(null);
       setTransferProgress(null);
       setShowQrCode(false);
       setShowQrScanner(false);
 
       const session = await startHttpShareSession({
-        files,
+        files: stagedFiles,
         deviceName,
         updateSession: handleHttpShareSessionUpdate,
       });
@@ -668,7 +669,7 @@ export default function TransferScreen() {
       setMode("sharing");
     } catch (error) {
       setActiveHttpShareSession(null);
-      setMode("idle");
+      setMode(stagedFiles.length > 0 ? "sending" : "idle");
       setNotice(error instanceof Error ? error.message : "Unable to start browser sharing.");
     }
   }
@@ -759,13 +760,6 @@ export default function TransferScreen() {
               void handleStartReceiving();
             }}
           />
-          <LargeActionCard
-            icon={<Globe color={designTheme.foreground} size={46} strokeWidth={1.7} />}
-            label={"Share in browser"}
-            onPress={() => {
-              void handleStartBrowserShare();
-            }}
-          />
           {notice ? <Text style={styles.centerNotice}>{notice}</Text> : null}
         </View>
       </View>
@@ -805,7 +799,19 @@ export default function TransferScreen() {
 
           <View style={styles.discoverySection}>
             <Text style={styles.discoveryTitle}>Choose a receiver</Text>
-            <Text style={styles.discoveryHint}>Pick a nearby device or scan its QR code.</Text>
+            <Text style={styles.discoveryHint}>
+              Pick a nearby device, scan its QR code, or share these files in a browser on the same WiFi network.
+            </Text>
+          </View>
+
+          <View style={styles.browserShareAction}>
+            <OutlineButton
+              label={"Share in browser"}
+              icon={<Globe color={designTheme.primary} size={16} strokeWidth={2} />}
+              onPress={() => {
+                void handleStartBrowserShare();
+              }}
+            />
           </View>
 
           {nearbyRecords.length > 0 ? (
@@ -1209,6 +1215,9 @@ const styles = StyleSheet.create({
     color: designTheme.foreground,
     fontFamily: designFonts.medium,
     fontSize: 15,
+  },
+  browserShareAction: {
+    marginBottom: 24,
   },
   footerArea: {
     borderTopColor: designTheme.border,

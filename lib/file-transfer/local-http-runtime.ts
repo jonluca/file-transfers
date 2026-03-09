@@ -9,7 +9,7 @@ import {
   type ServerConfig,
   type StaticMount,
 } from "react-native-nitro-http-server";
-import { DIRECT_TRANSFER_CHUNK_BYTES, LOCAL_HTTP_SERVER_PORT, LOCAL_HTTP_SHARE_KEEP_AWAKE_TAG } from "./constants";
+import { LOCAL_HTTP_SERVER_PORT, LOCAL_HTTP_SHARE_KEEP_AWAKE_TAG } from "./constants";
 import {
   DIRECT_TOKEN_HEADER,
   createDiscoveryRecord,
@@ -20,6 +20,7 @@ import {
   normalizeIpv4Address,
   nowIso,
 } from "./direct-transfer-protocol";
+import { resolveDirectByteRange } from "./direct-transfer-range";
 import { formatBytes } from "./files";
 import type {
   DirectPeerAccess,
@@ -163,13 +164,7 @@ function toStaticRootDirectory(uri: string) {
   return decodeURI(fileSystemUri);
 }
 
-function createHostedFileRoute({
-  file,
-  mountPath,
-}: {
-  file: SelectedTransferFile;
-  mountPath: string;
-}) {
+function createHostedFileRoute({ file, mountPath }: { file: SelectedTransferFile; mountPath: string }) {
   const sourceFile = new File(file.uri);
   const sourceInfo = sourceFile.info();
 
@@ -500,44 +495,6 @@ function createBinaryResponse({
     headers,
     body: responseBody,
   } satisfies HttpResponse;
-}
-
-function resolveDirectByteRange(rangeHeader: string | null, fileSize: number) {
-  if (!rangeHeader) {
-    if (fileSize > DIRECT_TRANSFER_CHUNK_BYTES) {
-      return {
-        error: `Range header is required for files larger than ${DIRECT_TRANSFER_CHUNK_BYTES} bytes.`,
-      } as const;
-    }
-
-    return {
-      start: 0,
-      end: Math.max(fileSize - 1, 0),
-      partial: false,
-    } as const;
-  }
-
-  const match = /^bytes=(\d+)-(\d+)$/i.exec(rangeHeader.trim());
-  if (!match) {
-    return {
-      error: "Invalid Range header.",
-    } as const;
-  }
-
-  const start = Number(match[1]);
-  const end = Number(match[2]);
-
-  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start || start >= fileSize) {
-    return {
-      error: "Requested range is not satisfiable.",
-    } as const;
-  }
-
-  return {
-    start,
-    end: Math.min(end, fileSize - 1),
-    partial: true,
-  } as const;
 }
 
 function createDirectFileRangeResponse({
