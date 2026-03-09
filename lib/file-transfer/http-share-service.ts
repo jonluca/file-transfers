@@ -21,15 +21,18 @@ function toHttpShareSession(session: LocalHttpSession): HttpShareSession {
 export async function startHttpShareSession({
   files,
   deviceName,
+  isPremium,
   updateSession,
 }: {
   files: SelectedTransferFile[];
   deviceName: string;
+  isPremium: boolean;
   updateSession?: HttpShareSessionUpdate;
 }) {
   const session = await startLocalHttpSession({
     files,
     deviceName,
+    isPremium,
     updateSession: updateSession
       ? (nextSession) => {
           updateSession(toHttpShareSession(nextSession));

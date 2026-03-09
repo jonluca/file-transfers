@@ -8,6 +8,7 @@ import {
   S3Client,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { createAttachmentContentDisposition } from "../../lib/file-transfer/content-disposition";
 import { serverEnv } from "../env";
 
 const localStorageRoot = path.resolve(process.cwd(), serverEnv.hostedFilesLocalDirectory);
@@ -153,10 +154,6 @@ export async function deleteStoredFile(storageKey: string) {
   await unlink(getLocalFilePath(storageKey)).catch(() => {});
 }
 
-function escapeContentDispositionFileName(fileName: string) {
-  return fileName.replace(/["\\]/g, "_");
-}
-
 export async function createDownloadLink({
   storageKey,
   fileName,
@@ -174,7 +171,7 @@ export async function createDownloadLink({
       new GetObjectCommand({
         Bucket: serverEnv.r2Bucket,
         Key: storageKey,
-        ResponseContentDisposition: `attachment; filename="${escapeContentDispositionFileName(fileName)}"`,
+        ResponseContentDisposition: createAttachmentContentDisposition(fileName),
         ResponseContentType: mimeType,
       }),
       { expiresIn: PRESIGNED_URL_TTL_SECONDS },

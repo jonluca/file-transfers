@@ -10,6 +10,7 @@ import { auth } from "./auth";
 import { db } from "./db/client";
 import { hostedFile, subscriptionMembership } from "./db/schema";
 import { serverEnv } from "./env";
+import { createAttachmentContentDisposition } from "../lib/file-transfer/content-disposition";
 import { PREMIUM_ENTITLEMENT_ALIASES } from "@/lib/subscriptions";
 import { createDownloadLink, readLocalStoredFile, storeUploadedFile } from "./storage/hosted-storage";
 import { verifyHostedFilePasscode } from "./trpc/routers/hosted-files";
@@ -227,7 +228,7 @@ app.get("/h/:slug/download", async (c) => {
 
   const contents = await readLocalStoredFile(record.storageKey);
   c.header("content-type", record.mimeType);
-  c.header("content-disposition", `attachment; filename="${record.fileName}"`);
+  c.header("content-disposition", createAttachmentContentDisposition(record.fileName));
   return c.body(contents);
 });
 

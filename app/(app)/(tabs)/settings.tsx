@@ -415,8 +415,8 @@ export default function SettingsScreen() {
                 </Text>
                 <Text style={styles.heroDescription}>
                   {isPremium
-                    ? "Fast transfers are unlocked on this device, and hosted links are ready when you sign in."
-                    : "Unlimited transfer speeds, hosted browser links, and RevenueCat billing."}
+                    ? "Unlimited local transfer size and speed are unlocked on this device, and hosted links are ready when you sign in."
+                    : "Unlimited transfer size and speed, hosted browser links, and RevenueCat billing."}
                 </Text>
               </View>
             </View>
@@ -617,7 +617,7 @@ export default function SettingsScreen() {
               onPress={() => {
                 Alert.alert(
                   "Help & FAQ",
-                  "Free transfers work directly over nearby WiFi. Upgrade only when you want faster transfers or hosted browser links.",
+                  "Free senders can transfer up to 100 MB at up to 5 MB/s over nearby WiFi. Premium senders remove those limits and can still send larger files to free receivers.",
                 );
               }}
             />
@@ -634,7 +634,8 @@ export default function SettingsScreen() {
 
         <View style={styles.footerNote}>
           <Text style={styles.footerNoteText}>
-            Free transfers stay anonymous and work over nearby WiFi. Premium only adds faster speeds and hosted links.
+            Free senders stay anonymous over nearby WiFi with up to 100 MB and 5 MB/s. Premium removes the sender limits
+            and adds hosted links.
           </Text>
         </View>
       </ScrollView>
@@ -666,7 +667,7 @@ export default function SettingsScreen() {
               </Text>
 
               <View style={styles.modalBenefits}>
-                <PremiumBenefit label={"Unlimited local transfer speed"} />
+                <PremiumBenefit label={"Unlimited local transfer size and speed"} />
                 <PremiumBenefit label={"Hosted file links in the browser"} />
                 <PremiumBenefit label={"Up to 10 GB per file"} />
               </View>

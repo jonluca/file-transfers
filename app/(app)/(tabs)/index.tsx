@@ -17,6 +17,7 @@ import {
   X,
 } from "lucide-react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { usePremiumAccess } from "@/hooks/use-premium-access";
 import { designFonts, designTheme } from "@/lib/design/theme";
 import {
   acceptIncomingTransferOffer,
@@ -245,6 +246,7 @@ export default function TransferScreen() {
   const bottomLinkPadding = insets.bottom + 16;
   const deviceName = useDeviceName();
   const serviceInstanceId = useServiceInstanceId();
+  const premiumAccess = usePremiumAccess();
   const upsertRecentTransfer = useAppStore((state) => state.upsertRecentTransfer);
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [mode, setMode] = useState<TransferMode>("idle");
@@ -262,6 +264,11 @@ export default function TransferScreen() {
   const handledFinalizedReceiveSessionIds = useRef(new Set<string>());
   const stoppingHttpShareSessionIdRef = useRef<string | null>(null);
   const scannedQrRef = useRef(false);
+  const isStartingReceiveAvailabilityRef = useRef(false);
+  const receiveAvailabilityKeyRef = useRef<string | null>(null);
+  const ensureReceiveAvailabilityRef = useRef<
+    (options?: { preserveNotice?: boolean; showReceivingScreen?: boolean; surfaceErrors?: boolean }) => Promise<boolean>
+  >(async () => false);
 
   useEffect(() => {
     let cancelled = false;
@@ -297,6 +304,15 @@ export default function TransferScreen() {
       }
     };
   }, []);
+
+  useEffect(() => {
+    const sessionId = activeReceiveSession?.id;
+    return () => {
+      if (sessionId) {
+        void stopReceivingAvailability(sessionId);
+      }
+    };
+  }, [activeReceiveSession?.id]);
 
   const stopBrowserShareSession = useEffectEvent(
     async (
@@ -361,6 +377,242 @@ export default function TransferScreen() {
 
     setMode((current) => (current === "sharing" ? (stagedFiles.length > 0 ? "sending" : "idle") : current));
   });
+
+  function scheduleReset({ clearFiles, nextMode }: { clearFiles: boolean; nextMode: TransferMode }) {
+    if (completionTimeoutRef.current) {
+      clearTimeout(completionTimeoutRef.current);
+    }
+
+    completionTimeoutRef.current = setTimeout(() => {
+      setActiveSendSession(null);
+      setActiveReceiveSession(null);
+      setTransferProgress(null);
+      setNotice(null);
+      setShowQrScanner(false);
+      setShowQrCode(false);
+      if (clearFiles) {
+        setStagedFiles([]);
+      }
+      setMode(nextMode);
+      completionTimeoutRef.current = null;
+    }, 1000);
+  }
+
+  function handleReceiveSessionUpdate(nextSession: ReceiveSession) {
+    setActiveReceiveSession({ ...nextSession });
+    if (nextSession.status === "discoverable") {
+      if (mode === "receiving") {
+        setTransferProgress(nextSession.progress);
+      }
+      return;
+    }
+
+    setTransferProgress(nextSession.progress);
+
+    if (nextSession.status === "waiting") {
+      setMode("receiving");
+      return;
+    }
+
+    if (nextSession.status === "connecting" || nextSession.status === "transferring") {
+      setMode("transferring");
+      return;
+    }
+
+    if (
+      ["completed", "failed", "canceled"].includes(nextSession.status) &&
+      !handledFinalizedReceiveSessionIds.current.has(nextSession.id)
+    ) {
+      handledFinalizedReceiveSessionIds.current.add(nextSession.id);
+      upsertRecentTransfer(createHistoryEntryFromReceiveSession(nextSession));
+    }
+
+    receiveAvailabilityKeyRef.current = null;
+    setActiveReceiveSession(null);
+
+    if (nextSession.status === "completed") {
+      setNotice(getTransferDetail(nextSession.progress.detail, "Transfer complete."));
+      setMode("transferring");
+      scheduleReset({ clearFiles: false, nextMode: "idle" });
+      void (async () => {
+        await stopReceivingAvailability(nextSession.id).catch(() => {});
+        await ensureReceiveAvailabilityRef.current({
+          preserveNotice: true,
+          showReceivingScreen: false,
+          surfaceErrors: false,
+        });
+      })();
+      return;
+    }
+
+    if (nextSession.status === "failed") {
+      setTransferProgress(null);
+      const detail = getTransferDetail(nextSession.progress.detail, "The transfer could not be completed.");
+      const shouldSurfaceError =
+        !activeHttpShareSession && detail !== "Local transfer stopped because browser sharing started.";
+
+      if (shouldSurfaceError) {
+        setNotice(detail);
+      }
+
+      setMode((current) => {
+        if (current === "receiving") {
+          return "receiving";
+        }
+
+        if (current === "transferring" && !activeSendSession) {
+          return "idle";
+        }
+
+        return current;
+      });
+      void (async () => {
+        await stopReceivingAvailability(nextSession.id).catch(() => {});
+        if (!activeHttpShareSession) {
+          await ensureReceiveAvailabilityRef.current({
+            preserveNotice: true,
+            showReceivingScreen: mode === "receiving",
+            surfaceErrors: false,
+          });
+        }
+      })();
+      return;
+    }
+
+    setTransferProgress(null);
+    setMode((current) => {
+      if (current === "receiving") {
+        return "idle";
+      }
+
+      if (current === "transferring" && !activeSendSession) {
+        return "idle";
+      }
+
+      return current;
+    });
+    void (async () => {
+      await stopReceivingAvailability(nextSession.id).catch(() => {});
+      if (!activeHttpShareSession) {
+        await ensureReceiveAvailabilityRef.current({
+          preserveNotice: true,
+          showReceivingScreen: false,
+          surfaceErrors: false,
+        });
+      }
+    })();
+  }
+
+  const ensureReceiveAvailability = useEffectEvent(
+    async ({
+      preserveNotice = true,
+      showReceivingScreen = false,
+      surfaceErrors = false,
+    }: {
+      preserveNotice?: boolean;
+      showReceivingScreen?: boolean;
+      surfaceErrors?: boolean;
+    } = {}) => {
+      if (activeHttpShareSession) {
+        return false;
+      }
+
+      const nextReceiveAvailabilityKey = `${deviceName}|${serviceInstanceId}|${premiumAccess.isPremium ? "premium" : "free"}`;
+      const hasUsableSession =
+        Boolean(activeReceiveSession) &&
+        !["completed", "failed", "canceled"].includes(activeReceiveSession?.status ?? "") &&
+        receiveAvailabilityKeyRef.current === nextReceiveAvailabilityKey;
+
+      if (hasUsableSession) {
+        if (showReceivingScreen && activeReceiveSession) {
+          setNotice(null);
+          setTransferProgress(activeReceiveSession.progress);
+          setShowQrScanner(false);
+          setShowQrCode(false);
+          setMode("receiving");
+        }
+        return true;
+      }
+
+      if (isStartingReceiveAvailabilityRef.current) {
+        return false;
+      }
+
+      isStartingReceiveAvailabilityRef.current = true;
+      if (!preserveNotice) {
+        setNotice(null);
+      }
+
+      if (showReceivingScreen) {
+        setTransferProgress(null);
+        setShowQrScanner(false);
+        setShowQrCode(false);
+        setMode("receiving");
+      }
+
+      if (activeReceiveSession) {
+        await stopReceivingAvailability(activeReceiveSession.id).catch(() => {});
+        setActiveReceiveSession(null);
+      }
+
+      const session = await startReceivingAvailability({
+        deviceName,
+        isPremium: premiumAccess.isPremium,
+        serviceInstanceId,
+        updateSession: handleReceiveSessionUpdate,
+      }).catch((error) => {
+        receiveAvailabilityKeyRef.current = null;
+        setActiveReceiveSession(null);
+        if (showReceivingScreen) {
+          setTransferProgress(null);
+          setMode("idle");
+        }
+        if (surfaceErrors) {
+          setNotice(error instanceof Error ? error.message : "Unable to get ready to receive.");
+        }
+        return null;
+      });
+
+      isStartingReceiveAvailabilityRef.current = false;
+
+      if (!session) {
+        return false;
+      }
+
+      receiveAvailabilityKeyRef.current = nextReceiveAvailabilityKey;
+      setActiveReceiveSession(session);
+      if (showReceivingScreen) {
+        setTransferProgress(session.progress);
+      }
+      return true;
+    },
+  );
+
+  useEffect(() => {
+    ensureReceiveAvailabilityRef.current = ensureReceiveAvailability;
+  });
+
+  useEffect(() => {
+    if (activeHttpShareSession) {
+      return;
+    }
+
+    const nextReceiveAvailabilityKey = `${deviceName}|${serviceInstanceId}|${premiumAccess.isPremium ? "premium" : "free"}`;
+    const hasUsableSession =
+      Boolean(activeReceiveSession) &&
+      !["completed", "failed", "canceled"].includes(activeReceiveSession?.status ?? "") &&
+      receiveAvailabilityKeyRef.current === nextReceiveAvailabilityKey;
+
+    if (hasUsableSession || isStartingReceiveAvailabilityRef.current) {
+      return;
+    }
+
+    void ensureReceiveAvailability({
+      preserveNotice: true,
+      showReceivingScreen: false,
+      surfaceErrors: mode === "receiving",
+    });
+  }, [activeHttpShareSession, activeReceiveSession, deviceName, mode, premiumAccess.isPremium, serviceInstanceId]);
 
   useEffect(() => {
     const sessionId = activeHttpShareSession?.id;
@@ -449,67 +701,6 @@ export default function TransferScreen() {
     setMode(stagedFiles.length > 0 ? "sending" : "idle");
   }
 
-  function handleReceiveSessionUpdate(nextSession: ReceiveSession) {
-    setActiveReceiveSession({ ...nextSession });
-    setTransferProgress(nextSession.progress);
-
-    if (nextSession.status === "discoverable" || nextSession.status === "waiting") {
-      setMode("receiving");
-      return;
-    }
-
-    if (nextSession.status === "connecting" || nextSession.status === "transferring") {
-      setMode("transferring");
-      return;
-    }
-
-    if (
-      ["completed", "failed", "canceled"].includes(nextSession.status) &&
-      !handledFinalizedReceiveSessionIds.current.has(nextSession.id)
-    ) {
-      handledFinalizedReceiveSessionIds.current.add(nextSession.id);
-      upsertRecentTransfer(createHistoryEntryFromReceiveSession(nextSession));
-    }
-
-    if (nextSession.status === "completed") {
-      void stopReceivingAvailability(nextSession.id);
-      setNotice(getTransferDetail(nextSession.progress.detail, "Transfer complete."));
-      setMode("transferring");
-      scheduleReset({ clearFiles: false, nextMode: "idle" });
-      return;
-    }
-
-    if (nextSession.status === "failed") {
-      void stopReceivingAvailability(nextSession.id);
-      setActiveReceiveSession(null);
-      setTransferProgress(null);
-      setNotice(getTransferDetail(nextSession.progress.detail, "The transfer could not be completed."));
-      setMode("receiving");
-      void beginReceivingAvailability({ preserveNotice: true }).catch(() => {});
-      return;
-    }
-  }
-
-  function scheduleReset({ clearFiles, nextMode }: { clearFiles: boolean; nextMode: TransferMode }) {
-    if (completionTimeoutRef.current) {
-      clearTimeout(completionTimeoutRef.current);
-    }
-
-    completionTimeoutRef.current = setTimeout(() => {
-      setActiveSendSession(null);
-      setActiveReceiveSession(null);
-      setTransferProgress(null);
-      setNotice(null);
-      setShowQrScanner(false);
-      setShowQrCode(false);
-      if (clearFiles) {
-        setStagedFiles([]);
-      }
-      setMode(nextMode);
-      completionTimeoutRef.current = null;
-    }, 1000);
-  }
-
   async function handlePickFiles(append = false) {
     if (activeHttpShareSession) {
       await stopBrowserShareSession({
@@ -559,12 +750,11 @@ export default function TransferScreen() {
       await stopSendingTransfer(activeSendSession.id);
     }
 
-    if (activeReceiveSession) {
-      await stopReceivingAvailability(activeReceiveSession.id);
+    if (mode === "receiving" && activeReceiveSession?.status === "waiting" && activeReceiveSession.incomingOffer) {
+      await declineIncomingTransferOffer(activeReceiveSession.id);
     }
 
     setActiveSendSession(null);
-    setActiveReceiveSession(null);
     setTransferProgress(null);
     setNotice(null);
     setShowQrScanner(false);
@@ -572,42 +762,17 @@ export default function TransferScreen() {
     setMode(stagedFiles.length > 0 ? "sending" : "idle");
   }
 
-  async function beginReceivingAvailability({ preserveNotice = false }: { preserveNotice?: boolean } = {}) {
-    if (activeHttpShareSession) {
-      await stopBrowserShareSession({
-        sessionId: activeHttpShareSession.id,
-        noticeMessage: preserveNotice ? undefined : null,
-      });
-    }
-
-    if (!preserveNotice) {
-      setNotice(null);
-    }
-    setTransferProgress(null);
-    setShowQrScanner(false);
-    setShowQrCode(false);
-    setMode("receiving");
-
-    if (activeReceiveSession) {
-      await stopReceivingAvailability(activeReceiveSession.id);
-    }
-
-    const session = await startReceivingAvailability({
-      deviceName,
-      serviceInstanceId,
-      updateSession: handleReceiveSessionUpdate,
+  async function handleStartReceiving() {
+    const ready = await ensureReceiveAvailability({
+      preserveNotice: false,
+      showReceivingScreen: true,
+      surfaceErrors: true,
     });
 
-    setActiveReceiveSession(session);
-    setTransferProgress(session.progress);
-  }
-
-  async function handleStartReceiving() {
-    try {
-      await beginReceivingAvailability();
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Unable to get ready to receive.");
-      setMode("idle");
+    if (ready) {
+      setShowQrScanner(false);
+      setShowQrCode(false);
+      setMode("receiving");
     }
   }
 
@@ -626,6 +791,7 @@ export default function TransferScreen() {
         files: stagedFiles,
         target: record,
         deviceName,
+        isPremium: premiumAccess.isPremium,
         updateSession: handleSendSessionUpdate,
       });
 
@@ -662,6 +828,7 @@ export default function TransferScreen() {
       const session = await startHttpShareSession({
         files: stagedFiles,
         deviceName,
+        isPremium: premiumAccess.isPremium,
         updateSession: handleHttpShareSessionUpdate,
       });
 

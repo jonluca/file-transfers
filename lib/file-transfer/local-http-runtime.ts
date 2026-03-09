@@ -2,14 +2,9 @@ import * as Crypto from "expo-crypto";
 import { File } from "expo-file-system";
 import * as Network from "expo-network";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
-import {
-  ConfigServer,
-  type HttpRequest,
-  type HttpResponse,
-  type ServerConfig,
-  type StaticMount,
-} from "react-native-nitro-http-server";
+import { ConfigServer, type HttpRequest, type HttpResponse, type ServerConfig } from "react-native-nitro-http-server";
 import { LOCAL_HTTP_SERVER_PORT, LOCAL_HTTP_SHARE_KEEP_AWAKE_TAG } from "./constants";
+import { createAttachmentContentDisposition } from "./content-disposition";
 import {
   DIRECT_TOKEN_HEADER,
   createDiscoveryRecord,
@@ -22,6 +17,7 @@ import {
 } from "./direct-transfer-protocol";
 import { resolveDirectByteRange } from "./direct-transfer-range";
 import { formatBytes } from "./files";
+import { assertSelectedFilesTransferAllowed, type TransferPolicy } from "./transfer-policy";
 import type {
   DirectPeerAccess,
   DiscoveryRecord,
@@ -69,6 +65,7 @@ interface RegisterDirectSendSessionOptions {
   deviceName: string;
   startedAt: string;
   files: SelectedTransferFile[];
+  transferPolicy: TransferPolicy;
   onEvent: (event: unknown) => Promise<void> | void;
   onInterrupted?: (detail: string) => Promise<void> | void;
 }
@@ -76,13 +73,12 @@ interface RegisterDirectSendSessionOptions {
 interface HostedShareFile {
   source: SelectedTransferFile;
   downloadPath: string;
-  staticMountPath: string;
-  staticRootDirectory: string;
 }
 
 interface BrowserShareRuntime {
   session: LocalHttpSession;
   filesById: Map<string, HostedShareFile>;
+  transferPolicy: TransferPolicy;
   updateSession?: LocalHttpSessionUpdate;
   finalizing: boolean;
   onFinalized?: (session: LocalHttpSession) => void;
@@ -102,6 +98,7 @@ interface DirectSendRuntime {
   startedAt: string;
   files: SelectedTransferFile[];
   filesById: Map<string, HostedShareFile>;
+  transferPolicy: TransferPolicy;
   onEvent: RegisterDirectSendSessionOptions["onEvent"];
   onInterrupted?: RegisterDirectSendSessionOptions["onInterrupted"];
 }
@@ -159,9 +156,31 @@ function decodeUriValue(value: string) {
   }
 }
 
-function toStaticRootDirectory(uri: string) {
-  const fileSystemUri = uri.startsWith("file://") ? uri.slice("file://".length) : uri;
-  return decodeURI(fileSystemUri);
+function sleep(milliseconds: number) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, milliseconds);
+  });
+}
+
+async function throttleTransferBytes({
+  bytesTransferred,
+  maxBytesPerSecond,
+  startedAt,
+}: {
+  bytesTransferred: number;
+  maxBytesPerSecond: number | null;
+  startedAt: number;
+}) {
+  if (!maxBytesPerSecond || bytesTransferred <= 0) {
+    return;
+  }
+
+  const minimumDurationMs = Math.ceil((bytesTransferred / maxBytesPerSecond) * 1000);
+  const elapsedMs = Date.now() - startedAt;
+  const remainingMs = minimumDurationMs - elapsedMs;
+  if (remainingMs > 0) {
+    await sleep(remainingMs);
+  }
 }
 
 function createHostedFileRoute({ file, mountPath }: { file: SelectedTransferFile; mountPath: string }) {
@@ -177,8 +196,6 @@ function createHostedFileRoute({ file, mountPath }: { file: SelectedTransferFile
   return {
     source: file,
     downloadPath: `${mountPath}/${encodeURIComponent(diskFileName)}`,
-    staticMountPath: mountPath,
-    staticRootDirectory: toStaticRootDirectory(sourceFile.parentDirectory.uri),
   } satisfies HostedShareFile;
 }
 
@@ -497,15 +514,19 @@ function createBinaryResponse({
   } satisfies HttpResponse;
 }
 
-function createDirectFileRangeResponse({
+async function createFileDownloadResponse({
   file,
   request,
   method,
+  attachmentFileName,
+  maxBytesPerSecond,
 }: {
+  attachmentFileName?: string;
   file: SelectedTransferFile;
+  maxBytesPerSecond: number | null;
   request: HttpRequest;
   method: string;
-}) {
+}): Promise<HttpResponse> {
   const sourceFile = new File(file.uri);
   const sourceInfo = sourceFile.info();
 
@@ -538,6 +559,7 @@ function createDirectFileRangeResponse({
   const headers = {
     ...createDefaultHeaders(file.mimeType || "application/octet-stream", contentLength),
     "Accept-Ranges": "bytes",
+    ...(attachmentFileName ? { "Content-Disposition": createAttachmentContentDisposition(attachmentFileName) } : {}),
     ...(range.partial && fileSize > 0 ? { "Content-Range": `bytes ${range.start}-${range.end}/${fileSize}` } : {}),
   };
 
@@ -550,11 +572,27 @@ function createDirectFileRangeResponse({
     });
   }
 
+  if (method === "HEAD") {
+    return createBinaryResponse({
+      statusCode: range.partial ? 206 : 200,
+      body: new Uint8Array(0),
+      method,
+      headers,
+    });
+  }
+
+  const startedAt = Date.now();
   const handle = sourceFile.open();
 
   try {
     handle.offset = range.start;
     const bytes = handle.readBytes(contentLength);
+
+    await throttleTransferBytes({
+      bytesTransferred: bytes.byteLength,
+      maxBytesPerSecond,
+      startedAt,
+    });
 
     return createBinaryResponse({
       statusCode: range.partial ? 206 : 200,
@@ -567,35 +605,9 @@ function createDirectFileRangeResponse({
   }
 }
 
-function collectStaticMounts(runtime: SharedHttpRuntime) {
-  const mounts: StaticMount[] = [];
-
-  if (runtime.browserSession) {
-    for (const hostedFile of runtime.browserSession.filesById.values()) {
-      mounts.push({
-        type: "static",
-        path: hostedFile.staticMountPath,
-        root: hostedFile.staticRootDirectory,
-      });
-    }
-  }
-
-  for (const directSender of runtime.directSenders.values()) {
-    for (const hostedFile of directSender.filesById.values()) {
-      mounts.push({
-        type: "static",
-        path: hostedFile.staticMountPath,
-        root: hostedFile.staticRootDirectory,
-      });
-    }
-  }
-
-  return mounts;
-}
-
-function createServerConfig(runtime: SharedHttpRuntime) {
+function createServerConfig() {
   return {
-    mounts: collectStaticMounts(runtime),
+    mounts: [],
   } satisfies ServerConfig;
 }
 
@@ -604,7 +616,7 @@ async function startRuntimeServer(runtime: SharedHttpRuntime) {
   const started = await server.start(
     LOCAL_HTTP_SERVER_PORT,
     (request) => handleRequest(runtime, request),
-    createServerConfig(runtime),
+    createServerConfig(),
     runtime.publicHost,
   );
 
@@ -735,7 +747,17 @@ function toDirectPeerAccess(sessionId: string, token: string, publicHost: string
   };
 }
 
-function handleBrowserShareRequest(runtime: SharedHttpRuntime, request: HttpRequest) {
+function findBrowserHostedFile(browserSession: BrowserShareRuntime, path: string) {
+  for (const hostedFile of browserSession.filesById.values()) {
+    if (hostedFile.downloadPath === path) {
+      return hostedFile;
+    }
+  }
+
+  return null;
+}
+
+async function handleBrowserShareRequest(runtime: SharedHttpRuntime, request: HttpRequest) {
   const browserSession = runtime.browserSession;
   if (!browserSession) {
     return null;
@@ -762,6 +784,17 @@ function handleBrowserShareRequest(runtime: SharedHttpRuntime, request: HttpRequ
       statusCode: 200,
       body: createBrowserManifest(runtime.publicHost, browserSession),
       method,
+    });
+  }
+
+  const hostedFile = findBrowserHostedFile(browserSession, path);
+  if (hostedFile) {
+    return createFileDownloadResponse({
+      file: hostedFile.source,
+      request,
+      method,
+      attachmentFileName: hostedFile.source.name,
+      maxBytesPerSecond: browserSession.transferPolicy.maxBytesPerSecond,
     });
   }
 
@@ -871,8 +904,9 @@ async function handleDirectRequest(runtime: SharedHttpRuntime, request: HttpRequ
         });
       }
 
-      return createDirectFileRangeResponse({
+      return createFileDownloadResponse({
         file: hostedFile.source,
+        maxBytesPerSecond: directSender.transferPolicy.maxBytesPerSecond,
         request,
         method,
       });
@@ -905,7 +939,7 @@ async function handleDirectRequest(runtime: SharedHttpRuntime, request: HttpRequ
 }
 
 async function handleRequest(runtime: SharedHttpRuntime, request: HttpRequest) {
-  const browserResponse = handleBrowserShareRequest(runtime, request);
+  const browserResponse = await handleBrowserShareRequest(runtime, request);
   if (browserResponse) {
     return browserResponse;
   }
@@ -941,16 +975,19 @@ export async function startLocalHttpSession({
   sessionId = Crypto.randomUUID(),
   files,
   deviceName,
+  isPremium,
   updateSession,
   onFinalized,
 }: {
   sessionId?: string;
   files: SelectedTransferFile[];
   deviceName: string;
+  isPremium: boolean;
   updateSession?: LocalHttpSessionUpdate;
   onFinalized?: (session: LocalHttpSession) => void;
 }) {
   validateSelectedFiles(files, "Pick at least one file to start browser sharing.");
+  const transferPolicy = assertSelectedFilesTransferAllowed(files, isPremium, "share");
 
   const runtime = await ensureRuntime("browser");
   if (runtime.browserSession) {
@@ -971,6 +1008,7 @@ export async function startLocalHttpSession({
     filesById: new Map(
       buildBrowserHostedFiles(sessionId, files).map((hostedFile) => [hostedFile.source.id, hostedFile]),
     ),
+    transferPolicy,
     updateSession,
     finalizing: false,
     onFinalized,
@@ -1073,6 +1111,7 @@ export async function registerDirectSendSession({
   deviceName,
   startedAt,
   files,
+  transferPolicy,
   onEvent,
   onInterrupted,
 }: RegisterDirectSendSessionOptions) {
@@ -1088,6 +1127,7 @@ export async function registerDirectSendSession({
     filesById: new Map(
       buildDirectHostedFiles({ sessionId, token, files }).map((hostedFile) => [hostedFile.source.id, hostedFile]),
     ),
+    transferPolicy,
     onEvent,
     onInterrupted,
   });

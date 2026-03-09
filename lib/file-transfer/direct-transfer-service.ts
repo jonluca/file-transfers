@@ -18,12 +18,12 @@ import {
   resolveDiscoveryHost,
 } from "./direct-transfer-protocol";
 import {
-  DIRECT_TRANSFER_CHUNK_BYTES,
   LOCAL_TRANSFER_KEEP_AWAKE_TAG,
   LOCAL_TRANSFER_SERVICE_DOMAIN,
   LOCAL_TRANSFER_SERVICE_PROTOCOL,
   LOCAL_TRANSFER_SERVICE_TYPE,
 } from "./constants";
+import { assertSelectedFilesTransferAllowed, getTransferPolicy, type TransferPolicy } from "./transfer-policy";
 import { getReceivedFilesDirectory } from "./files";
 import {
   registerDirectReceiveSession,
@@ -88,6 +88,7 @@ type SenderToReceiverEvent =
 interface SendRuntime {
   session: TransferSession;
   target: DiscoveryRecord;
+  transferPolicy: TransferPolicy;
   updateSession?: SendRuntimeUpdate;
   offerDelivered: boolean;
   stopping: boolean;
@@ -95,6 +96,7 @@ interface SendRuntime {
 
 interface ReceiveRuntime {
   session: ReceiveSession;
+  transferPolicy: TransferPolicy;
   updateSession?: ReceiveRuntimeUpdate;
   activeDownloadAbortController?: AbortController;
   stopZeroconfPublishing?: () => Promise<void>;
@@ -163,6 +165,33 @@ function getPeerDebugDetails(peer: Pick<DirectPeerAccess, "sessionId" | "host" |
     host: peer.host,
     port: peer.port,
   };
+}
+
+function sleep(milliseconds: number) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, milliseconds);
+  });
+}
+
+async function throttleTransferBytes({
+  bytesTransferred,
+  maxBytesPerSecond,
+  startedAt,
+}: {
+  bytesTransferred: number;
+  maxBytesPerSecond: number | null;
+  startedAt: number;
+}) {
+  if (!maxBytesPerSecond || bytesTransferred <= 0) {
+    return;
+  }
+
+  const minimumDurationMs = Math.ceil((bytesTransferred / maxBytesPerSecond) * 1000);
+  const elapsedMs = Date.now() - startedAt;
+  const remainingMs = minimumDurationMs - elapsedMs;
+  if (remainingMs > 0) {
+    await sleep(remainingMs);
+  }
 }
 
 function toTransferManifestFile(file: SelectedTransferFile): TransferManifestFile {
@@ -480,13 +509,17 @@ function parseContentRangeHeader(value: string | null) {
 async function downloadFileInChunks({
   url,
   destination,
+  chunkBytes,
+  maxBytesPerSecond,
   totalBytes,
   headers,
   signal,
   onBytes,
 }: {
+  chunkBytes: number;
   url: string;
   destination: File;
+  maxBytesPerSecond: number | null;
   totalBytes: number;
   headers: Record<string, string>;
   signal: AbortSignal;
@@ -506,7 +539,8 @@ async function downloadFileInChunks({
         throw new Error("Download canceled.");
       }
 
-      const chunkEnd = Math.min(bytesDownloaded + DIRECT_TRANSFER_CHUNK_BYTES - 1, totalBytes - 1);
+      const chunkStartedAt = Date.now();
+      const chunkEnd = Math.min(bytesDownloaded + chunkBytes - 1, totalBytes - 1);
       const response = await fetch(url, {
         method: "GET",
         headers: {
@@ -583,6 +617,12 @@ async function downloadFileInChunks({
       if (chunkBytesDownloaded !== expectedChunkBytes) {
         throw new Error("The sender returned an incomplete file chunk.");
       }
+
+      await throttleTransferBytes({
+        bytesTransferred: chunkBytesDownloaded,
+        maxBytesPerSecond,
+        startedAt: chunkStartedAt,
+      });
     }
   } finally {
     handle.close();
@@ -816,8 +856,10 @@ async function receiveDirectHttpTransfer({
       });
 
       await downloadFileInChunks({
+        chunkBytes: runtime.transferPolicy.chunkBytes,
         url: file.downloadUrl,
         destination: outputFile,
+        maxBytesPerSecond: runtime.transferPolicy.maxBytesPerSecond,
         totalBytes: file.sizeBytes,
         headers: {
           [DIRECT_TOKEN_HEADER]: offer.sender.token,
@@ -1112,14 +1154,17 @@ export async function startSendingTransfer({
   files,
   target,
   deviceName,
+  isPremium,
   updateSession,
 }: {
   files: SelectedTransferFile[];
   target: DiscoveryRecord;
   deviceName: string;
+  isPremium: boolean;
   updateSession?: SendRuntimeUpdate;
 }) {
   const sessionId = Crypto.randomUUID();
+  const transferPolicy = assertSelectedFilesTransferAllowed(files, isPremium, "send");
 
   logDirectTransferDebug("Starting sender transfer session", {
     senderSessionId: getSessionDebugId(sessionId),
@@ -1190,6 +1235,7 @@ export async function startSendingTransfer({
     sessionId,
     token: Crypto.randomUUID().replace(/-/g, ""),
     deviceName,
+    transferPolicy,
     startedAt: manifest.createdAt,
     files,
     onEvent: async (event) => {
@@ -1219,6 +1265,7 @@ export async function startSendingTransfer({
   const runtime: SendRuntime = {
     session: createInitialSendSession(manifest, resolvedTarget),
     target: resolvedTarget,
+    transferPolicy,
     updateSession,
     offerDelivered: false,
     stopping: false,
@@ -1270,16 +1317,19 @@ export async function stopSendingTransfer(sessionId: string) {
 
 export async function startReceivingAvailability({
   deviceName,
+  isPremium,
   serviceInstanceId,
   updateSession,
 }: {
   deviceName: string;
+  isPremium: boolean;
   serviceInstanceId: string;
   updateSession?: ReceiveRuntimeUpdate;
 }) {
   const sessionId = Crypto.randomUUID();
   const receiverToken = Crypto.randomUUID().replace(/-/g, "");
   const requestedServiceName = createServiceName(deviceName, serviceInstanceId);
+  const transferPolicy = getTransferPolicy(isPremium);
 
   logDirectTransferDebug("Starting receiver availability", {
     sessionId: getSessionDebugId(sessionId),
@@ -1367,6 +1417,7 @@ export async function startReceivingAvailability({
         serviceName: nearbyAdvertiser.serviceName,
       }),
     ),
+    transferPolicy,
     updateSession,
     stopZeroconfPublishing: nearbyAdvertiser.stop,
     stopping: false,
