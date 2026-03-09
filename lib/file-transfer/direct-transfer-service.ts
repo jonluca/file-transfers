@@ -1823,6 +1823,15 @@ export async function startNearbyScan({
       return;
     }
 
+    if (scanner.isScanning) {
+      logDirectTransferDebug("Nearby discovery scan restart is waiting for the native scanner to stop", {
+        reason,
+        currentRecordCount: currentRecords.size,
+      });
+      scheduleRestart(NEARBY_DISCOVERY_RETRY_DELAY_MS, "failure");
+      return;
+    }
+
     startScanner();
     scheduleRestart(NEARBY_DISCOVERY_RESCAN_INTERVAL_MS, "scheduled");
   }
