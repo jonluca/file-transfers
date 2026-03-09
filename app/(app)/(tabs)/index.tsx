@@ -20,7 +20,6 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { InlineNotice } from "@/components/ui";
 import { usePremiumAccess } from "@/hooks/use-premium-access";
-import { getTabScreenTopInset } from "@/lib/design/tab-screen-insets";
 import { designFonts, designTheme } from "@/lib/design/theme";
 import {
   acceptIncomingTransferOffer,
@@ -366,7 +365,8 @@ function WaitingPulse({ tone = "primary" }: { tone?: "primary" | "neutral" }) {
 export default function TransferScreen() {
   const isFocused = useIsFocused();
   const insets = useSafeAreaInsets();
-  const topInset = getTabScreenTopInset(insets.top);
+  // View-root tab states need the raw safe-area inset because NativeTabs disables automatic iOS content insets.
+  const screenTopPadding = insets.top + 16;
   const compactBottomPadding = insets.bottom + 16;
   const regularBottomPadding = insets.bottom + 24;
   const roomyBottomPadding = insets.bottom + 32;
@@ -1177,7 +1177,7 @@ export default function TransferScreen() {
 
   if (mode === "idle") {
     return (
-      <View style={[styles.root, { paddingTop: topInset, paddingBottom: compactBottomPadding }]}>
+      <View style={[styles.root, { paddingTop: screenTopPadding, paddingBottom: compactBottomPadding }]}>
         <View style={styles.idleWrap}>
           <LargeActionCard
             icon={<Upload color={designTheme.primaryForeground} size={48} strokeWidth={1.7} />}
@@ -1207,7 +1207,7 @@ export default function TransferScreen() {
 
   if (mode === "sending") {
     return (
-      <View style={[styles.root, { paddingTop: topInset + 16 }]}>
+      <View style={[styles.root, { paddingTop: screenTopPadding }]}>
         <View style={styles.topBar}>
           <Text style={styles.sectionTitle}>Ready to send</Text>
           <HeaderButton
@@ -1293,7 +1293,7 @@ export default function TransferScreen() {
 
   if (mode === "waiting") {
     return (
-      <View style={[styles.root, { paddingTop: topInset, paddingBottom: regularBottomPadding }]}>
+      <View style={[styles.root, { paddingTop: screenTopPadding, paddingBottom: regularBottomPadding }]}>
         <View style={styles.centerWrap}>
           <WaitingPulse />
           <Text style={styles.centerTitle}>
@@ -1322,7 +1322,7 @@ export default function TransferScreen() {
   if (mode === "receiving") {
     if (incomingOffer && activeReceiveSession?.status === "waiting") {
       return (
-        <View style={[styles.root, { paddingTop: topInset, paddingBottom: regularBottomPadding }]}>
+        <View style={[styles.root, { paddingTop: screenTopPadding, paddingBottom: regularBottomPadding }]}>
           <View style={styles.centerWrap}>
             <View style={styles.transferAvatar}>
               <Smartphone color={designTheme.secondaryForeground} size={30} strokeWidth={1.8} />
@@ -1362,7 +1362,7 @@ export default function TransferScreen() {
     }
 
     return (
-      <View style={[styles.root, { paddingTop: topInset + 16 }]}>
+      <View style={[styles.root, { paddingTop: screenTopPadding }]}>
         <View style={styles.topBar}>
           <Text style={styles.sectionTitle}>Ready to receive</Text>
           <HeaderButton
@@ -1417,7 +1417,7 @@ export default function TransferScreen() {
 
   if (mode === "sharing" && activeHttpShareSession) {
     return (
-      <View style={[styles.root, { paddingTop: topInset + 16 }]}>
+      <View style={[styles.root, { paddingTop: screenTopPadding }]}>
         <View style={styles.topBar}>
           <Text style={styles.sectionTitle}>Sharing in browser</Text>
           <HeaderButton
@@ -1497,7 +1497,7 @@ export default function TransferScreen() {
   }
 
   return (
-    <View style={[styles.root, { paddingTop: topInset, paddingBottom: roomyBottomPadding }]}>
+    <View style={[styles.root, { paddingTop: screenTopPadding, paddingBottom: roomyBottomPadding }]}>
       <View style={styles.transferWrap}>
         <View style={styles.transferAvatar}>
           <Text style={styles.transferAvatarLabel}>{currentTransferName.charAt(0).toUpperCase()}</Text>
