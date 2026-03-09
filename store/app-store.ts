@@ -13,10 +13,12 @@ interface AppState {
   deviceName: string;
   serviceInstanceId: string;
   autoAcceptKnownDevices: boolean;
+  devPremiumOverrideEnabled: boolean;
   recentTransfers: TransferHistoryEntry[];
   setHasHydrated: (value: boolean) => void;
   setDeviceName: (value: string) => void;
   setAutoAcceptKnownDevices: (value: boolean) => void;
+  setDevPremiumOverrideEnabled: (value: boolean) => void;
   upsertRecentTransfer: (value: TransferHistoryEntry) => void;
   clearRecentTransfers: () => void;
 }
@@ -25,6 +27,7 @@ const defaultState = {
   deviceName: "This device",
   serviceInstanceId: createServiceInstanceId(),
   autoAcceptKnownDevices: false,
+  devPremiumOverrideEnabled: false,
   recentTransfers: [] as TransferHistoryEntry[],
 };
 
@@ -41,6 +44,10 @@ export const useAppStore = create<AppState>()(
       setAutoAcceptKnownDevices: (value) =>
         set({
           autoAcceptKnownDevices: value,
+        }),
+      setDevPremiumOverrideEnabled: (value) =>
+        set({
+          devPremiumOverrideEnabled: value,
         }),
       upsertRecentTransfer: (value) =>
         set((state) => {
@@ -71,6 +78,7 @@ export const useAppStore = create<AppState>()(
         deviceName: state.deviceName,
         serviceInstanceId: state.serviceInstanceId,
         autoAcceptKnownDevices: state.autoAcceptKnownDevices,
+        devPremiumOverrideEnabled: state.devPremiumOverrideEnabled,
         recentTransfers: state.recentTransfers,
       }),
       onRehydrateStorage: () => (state) => {
@@ -84,4 +92,5 @@ export const useHasHydrated = () => useAppStore((state) => state.hasHydrated);
 export const useDeviceName = () => useAppStore((state) => state.deviceName);
 export const useServiceInstanceId = () => useAppStore((state) => state.serviceInstanceId);
 export const useAutoAcceptKnownDevices = () => useAppStore((state) => state.autoAcceptKnownDevices);
+export const useDevPremiumOverrideEnabled = () => useAppStore((state) => state.devPremiumOverrideEnabled);
 export const useRecentTransfers = () => useAppStore((state) => state.recentTransfers);

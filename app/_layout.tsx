@@ -41,7 +41,7 @@ function RootLayoutContent() {
   });
 
   if (!hasHydrated || !fontsLoaded) {
-    return <FullScreenLoader label={"Loading File Transfers..."} />;
+    return <FullScreenLoader label={"Loading File Share..."} />;
   }
 
   return <Slot />;

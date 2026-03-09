@@ -1,4 +1,4 @@
-# File Transfers
+# File Share
 
 Anonymous-first Expo app for device-to-device file transfers. Free transfers stay local on the same WiFi network, while premium adds faster transfer speeds, hosted browser-download links, and cross-device purchase restore after sign-in.
 

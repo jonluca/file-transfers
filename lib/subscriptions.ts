@@ -1,4 +1,4 @@
-export const FILE_TRANSFERS_PRO_NAME = "FileTransfers Pro";
+export const FILE_TRANSFERS_PRO_NAME = "File Share Pro";
 
 // Keep `premium` as the primary identifier so existing webhook/backend behavior
 // continues to work, but accept common aliases during rollout.
@@ -6,6 +6,7 @@ export const PREMIUM_ENTITLEMENT_ID = "premium";
 export const PREMIUM_ENTITLEMENT_ALIASES = [
   PREMIUM_ENTITLEMENT_ID,
   "filetransfers_pro",
+  "FileTransfers Pro",
   FILE_TRANSFERS_PRO_NAME,
 ] as const;
 

@@ -39,7 +39,7 @@ import { pickTransferFiles } from "@/lib/file-transfer";
 import { getPaywallResultMessage, mapCustomerInfoToEntitlement, REVENUECAT_PAYWALL_RESULT } from "@/lib/purchases";
 import { FILE_TRANSFERS_PRO_NAME, PREMIUM_PRODUCT_IDS } from "@/lib/subscriptions";
 import { useRevenueCat } from "@/providers/revenuecat-provider";
-import { useAppStore, useAutoAcceptKnownDevices, useDeviceName } from "@/store";
+import { useAppStore, useAutoAcceptKnownDevices, useDeviceName, useDevPremiumOverrideEnabled } from "@/store";
 
 function PrimaryButton({
   label,
@@ -212,8 +212,10 @@ export default function SettingsScreen() {
   const insets = useSafeAreaInsets();
   const deviceName = useDeviceName();
   const autoAcceptKnownDevices = useAutoAcceptKnownDevices();
+  const devPremiumOverrideEnabled = useDevPremiumOverrideEnabled();
   const setDeviceName = useAppStore((state) => state.setDeviceName);
   const setAutoAcceptKnownDevices = useAppStore((state) => state.setAutoAcceptKnownDevices);
+  const setDevPremiumOverrideEnabled = useAppStore((state) => state.setDevPremiumOverrideEnabled);
   const { data: session } = useSession();
   const premiumAccess = usePremiumAccess();
   const {
@@ -489,7 +491,7 @@ export default function SettingsScreen() {
                   setHostedNotice(
                     session?.user
                       ? `${FILE_TRANSFERS_PRO_NAME} is required to create hosted links.`
-                      : "Sign in first, then upgrade to FileTransfers Pro to create hosted links.",
+                      : `Sign in first, then upgrade to ${FILE_TRANSFERS_PRO_NAME} to create hosted links.`,
                   );
                   return;
                 }
@@ -626,11 +628,32 @@ export default function SettingsScreen() {
               icon={<Info color={designTheme.secondaryForeground} size={18} strokeWidth={1.9} />}
               label={"About"}
               onPress={() => {
-                Alert.alert("About", `File Transfers\nVersion ${Constants.expoConfig?.version ?? "1.0.0"}`);
+                Alert.alert("About", `File Share\nVersion ${Constants.expoConfig?.version ?? "1.0.0"}`);
               }}
             />
           </View>
         </View>
+
+        {__DEV__ ? (
+          <View style={styles.section}>
+            <Text style={styles.sectionLabel}>Developer</Text>
+            <View style={styles.group}>
+              <SettingItem
+                action={
+                  <Switch
+                    ios_backgroundColor={designTheme.border}
+                    onValueChange={setDevPremiumOverrideEnabled}
+                    trackColor={{ false: designTheme.border, true: designTheme.primary }}
+                    value={devPremiumOverrideEnabled}
+                  />
+                }
+                description={"Debug only. Forces local premium feature gating on this device."}
+                icon={<Crown color={designTheme.secondaryForeground} size={18} strokeWidth={1.9} />}
+                label={"Premium override"}
+              />
+            </View>
+          </View>
+        ) : null}
 
         <View style={styles.footerNote}>
           <Text style={styles.footerNoteText}>

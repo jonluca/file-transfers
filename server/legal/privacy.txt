@@ -1,7 +1,7 @@
-File Transfers Privacy Policy
+File Share Privacy Policy
 Last updated: March 8, 2026
 
-File Transfers only uses the information needed to sign you in, transfer files, host files you choose to share, and manage subscriptions.
+File Share only uses the information needed to sign you in, transfer files, host files you choose to share, and manage subscriptions.
 This can include your account details, basic profile information, file transfer metadata, hosted files, and purchase status.
 Hosted files are stored only to provide the download link you request and may be deleted when they expire or are removed.
 We do not sell your personal information.

@@ -54,7 +54,7 @@ Create the following in RevenueCat:
    - `yearly`
 2. Entitlement
    - Primary app identifier: `premium`
-   - User-facing name in the app: `FileTransfers Pro`
+   - User-facing name in the app: `File Share Pro`
 3. Current offering
    - Attach the `monthly` product to the monthly package
    - Attach the `yearly` product to the annual package
@@ -63,7 +63,7 @@ Create the following in RevenueCat:
 5. Customer Center
    - Enable it in the RevenueCat dashboard and add any restore/support/custom URL actions you want
 
-The app is resilient to common entitlement aliases during setup (`premium`, `filetransfers_pro`, `FileTransfers Pro`), but `premium` is still the cleanest identifier for this codebase because the backend already understands it.
+The app is resilient to common entitlement aliases during setup (`premium`, `filetransfers_pro`, `FileTransfers Pro`, `File Share Pro`), but `premium` is still the cleanest identifier for this codebase because the backend already understands it.
 
 ## 4. App architecture in this repo
 
@@ -111,7 +111,7 @@ async function handleRestore() {
   const entitlement = mapCustomerInfoToEntitlement(customerInfo, true);
 
   if (entitlement.isPremium) {
-    // user has FileTransfers Pro access
+    // user has File Share Pro access
   }
 }
 ```
@@ -122,7 +122,7 @@ async function handleRestore() {
 const premiumAccess = usePremiumAccess();
 
 if (premiumAccess.isPremium) {
-  // unlock FileTransfers Pro features
+  // unlock File Share Pro features
 }
 ```
 

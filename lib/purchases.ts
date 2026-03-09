@@ -172,9 +172,9 @@ export async function presentCustomerCenter(params?: PresentCustomerCenterParams
 export function getPaywallResultMessage(result: PAYWALL_RESULT) {
   switch (result) {
     case PAYWALL_RESULT.NOT_PRESENTED:
-      return "FileTransfers Pro is already active.";
+      return "File Share Pro is already active.";
     case PAYWALL_RESULT.PURCHASED:
-      return "FileTransfers Pro is active on this device.";
+      return "File Share Pro is active on this device.";
     case PAYWALL_RESULT.RESTORED:
       return "Your purchases were restored.";
     case PAYWALL_RESULT.CANCELLED:

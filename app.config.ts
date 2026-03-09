@@ -58,7 +58,7 @@ export default function getConfig({ config }: ConfigContext): ExpoConfig {
   return withAndroidGradleDaemonJvmPin(
     withIosInAppPurchaseCapability({
       ...config,
-      name: "File Transfers",
+      name: "File Share",
       slug: "file-transfers",
       version: VERSION,
       icon: "./assets/icon.png",
