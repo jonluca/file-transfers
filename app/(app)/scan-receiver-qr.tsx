@@ -7,7 +7,7 @@ import { useIsFocused } from "@react-navigation/native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { designFonts, designTheme } from "@/lib/design/theme";
 import { parseDiscoveryQrPayload } from "@/lib/file-transfer";
-import { useAppStore } from "@/store";
+import { useAppStore, useDeviceName } from "@/store";
 
 function ActionButton({
   icon,
@@ -40,6 +40,7 @@ export default function ScanReceiverQrScreen() {
   const insets = useSafeAreaInsets();
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [notice, setNotice] = useState<string | null>(null);
+  const deviceName = useDeviceName();
   const setPendingScannedReceiver = useAppStore((state) => state.setPendingScannedReceiver);
   const requestedPermissionRef = useRef(false);
   const scannedQrRef = useRef(false);
@@ -91,7 +92,9 @@ export default function ScanReceiverQrScreen() {
     scannedQrRef.current = true;
 
     try {
-      const record = parseDiscoveryQrPayload(data);
+      const record = parseDiscoveryQrPayload(data, {
+        deviceName,
+      });
       setNotice(null);
       setPendingScannedReceiver(record);
       router.back();

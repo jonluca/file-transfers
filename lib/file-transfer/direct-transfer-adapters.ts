@@ -325,19 +325,7 @@ function getPreferredNativeDownloadOptions(options: DirectTransferDownloadRuntim
 export async function downloadFileWithBestAvailableAdapter(options: DirectTransferDownloadRuntimeOptions) {
   if (isNativeDirectTransferAvailable()) {
     const nativeOptions = getPreferredNativeDownloadOptions(options);
-    try {
-      return await NativeRangeTransferAdapter.downloadFile(nativeOptions);
-    } catch (error) {
-      if (options.signal.aborted) {
-        throw error;
-      }
-
-      const fallbackResult = await JsRangeTransferAdapter.downloadFile(options);
-      return {
-        ...fallbackResult,
-        fallbackReason: error instanceof Error ? error.message : "Native direct transfer failed before completion.",
-      } satisfies DirectTransferDownloadResult;
-    }
+    return NativeRangeTransferAdapter.downloadFile(nativeOptions);
   }
 
   return JsRangeTransferAdapter.downloadFile(options);

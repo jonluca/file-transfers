@@ -413,6 +413,7 @@ export default function TransferScreen() {
     let cleanup: (() => void) | undefined;
 
     void startNearbyScan({
+      deviceName,
       onUpdate(records) {
         if (cancelled) {
           return;
@@ -433,7 +434,7 @@ export default function TransferScreen() {
       cancelled = true;
       cleanup?.();
     };
-  }, [activeReceiveSession?.id]);
+  }, [activeReceiveSession?.id, deviceName]);
 
   useEffect(() => {
     return () => {

@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Environment
 import android.os.SystemClock
 import android.provider.MediaStore
+import android.provider.OpenableColumns
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.functions.Queues
 import expo.modules.kotlin.modules.Module
@@ -445,7 +446,21 @@ class DirectTransferNativeModule : Module() {
           }
 
           val keepAlive = shouldKeepAlive(request, requestIndex = it)
-          if (!handlePayloadRequest(output, request, keepAlive)) {
+          val shouldContinue =
+            try {
+              handlePayloadRequest(output, request, keepAlive)
+            } catch (error: Exception) {
+              runCatching {
+                writeTextResponse(
+                  output,
+                  500,
+                  error.message ?: "Internal direct transfer error.",
+                  keepAlive = false,
+                )
+              }
+              false
+            }
+          if (!shouldContinue) {
             return
           }
         }
@@ -493,14 +508,12 @@ class DirectTransferNativeModule : Module() {
       return keepAlive
     }
 
-    val filePath = requireFilePath(file.uri)
-    val sourceFile = File(filePath)
-    if (!sourceFile.exists()) {
+    val fileSize = resolvePayloadFileSize(file)
+    if (fileSize < 0L) {
       writeTextResponse(output, 410, "The selected file is no longer available on this device.", keepAlive = keepAlive)
       return keepAlive
     }
 
-    val fileSize = if (file.sizeBytes > 0) file.sizeBytes else sourceFile.length()
     val range = resolveRange(request.headers["range"], fileSize)
     if (range == null) {
       writeTextResponse(
@@ -536,42 +549,22 @@ class DirectTransferNativeModule : Module() {
     }
 
     val requestStartedAt = SystemClock.elapsedRealtimeNanos()
-    var bytesServed = 0L
-    var fileReadDurationMs = 0.0
-
-    RandomAccessFile(sourceFile, "r").use { input ->
-      input.seek(range.start)
-      val buffer = ByteArray(IO_PAGE_BYTES)
-      var remaining = contentLength
-      while (remaining > 0) {
-        val nextReadLength = min(buffer.size.toLong(), remaining).toInt()
-        val readStartedAt = SystemClock.elapsedRealtimeNanos()
-        val bytesRead = input.read(buffer, 0, nextReadLength)
-        fileReadDurationMs += elapsedMillis(readStartedAt)
-        if (bytesRead <= 0) {
-          break
-        }
-
-        output.write(buffer, 0, bytesRead)
-        bytesServed += bytesRead.toLong()
-        remaining -= bytesRead.toLong()
-
-        throttleChunkBytes(
-          bytesTransferred = bytesServed,
-          maxBytesPerSecond = session.maxBytesPerSecond,
-          startedAt = requestStartedAt,
-        )
-      }
-      output.flush()
-    }
+    val streamedRange = streamPayloadRange(
+      file = file,
+      rangeStart = range.start,
+      contentLength = contentLength,
+      output = output,
+      maxBytesPerSecond = session.maxBytesPerSecond,
+      requestStartedAt = requestStartedAt,
+    )
 
     appendPayloadMetric(
       sessionId = sessionId,
       metric = PayloadMetric(
         sessionId = sessionId,
         fileId = fileId,
-        bytesServed = bytesServed,
-        fileReadDurationMs = fileReadDurationMs,
+        bytesServed = streamedRange.bytesServed,
+        fileReadDurationMs = streamedRange.fileReadDurationMs,
         responseCopyDurationMs = 0.0,
         totalDurationMs = elapsedMillis(requestStartedAt),
         usedNativeServer = true,
@@ -755,6 +748,7 @@ class DirectTransferNativeModule : Module() {
       400 -> "Bad Request"
       401 -> "Unauthorized"
       404 -> "Not Found"
+      500 -> "Internal Server Error"
       410 -> "Gone"
       416 -> "Range Not Satisfiable"
       else -> "Error"
@@ -851,6 +845,188 @@ class DirectTransferNativeModule : Module() {
       return parsed.path ?: uri.removePrefix("file://")
     }
     throw IllegalStateException("Only file:// URIs are supported for direct transfer.")
+  }
+
+  private data class StreamedPayloadRange(
+    val bytesServed: Long,
+    val fileReadDurationMs: Double,
+  )
+
+  private fun resolvePayloadFileSize(file: PayloadFile): Long {
+    if (file.sizeBytes > 0L) {
+      return file.sizeBytes
+    }
+
+    val parsed = Uri.parse(file.uri)
+    return when (parsed.scheme) {
+      null,
+      "",
+      "file" -> {
+        val sourceFile = File(requireFilePath(file.uri))
+        if (!sourceFile.exists()) {
+          -1L
+        } else {
+          sourceFile.length()
+        }
+      }
+      "content" -> {
+        val resolver = requireContentResolver()
+        val descriptor = resolver.openFileDescriptor(parsed, "r") ?: return -1L
+        descriptor.use {
+          if (it.statSize >= 0L) {
+            return it.statSize
+          }
+        }
+        queryContentSizeBytes(resolver, parsed)
+      }
+      else -> throw IllegalStateException("Unsupported direct transfer URI scheme.")
+    }
+  }
+
+  private fun streamPayloadRange(
+    file: PayloadFile,
+    rangeStart: Long,
+    contentLength: Long,
+    output: BufferedOutputStream,
+    maxBytesPerSecond: Long?,
+    requestStartedAt: Long,
+  ): StreamedPayloadRange {
+    val parsed = Uri.parse(file.uri)
+    return when (parsed.scheme) {
+      null,
+      "",
+      "file" -> streamFilePayloadRange(
+        filePath = requireFilePath(file.uri),
+        rangeStart = rangeStart,
+        contentLength = contentLength,
+        output = output,
+        maxBytesPerSecond = maxBytesPerSecond,
+        requestStartedAt = requestStartedAt,
+      )
+      "content" -> streamContentPayloadRange(
+        contentUri = parsed,
+        rangeStart = rangeStart,
+        contentLength = contentLength,
+        output = output,
+        maxBytesPerSecond = maxBytesPerSecond,
+        requestStartedAt = requestStartedAt,
+      )
+      else -> throw IllegalStateException("Unsupported direct transfer URI scheme.")
+    }
+  }
+
+  private fun streamFilePayloadRange(
+    filePath: String,
+    rangeStart: Long,
+    contentLength: Long,
+    output: BufferedOutputStream,
+    maxBytesPerSecond: Long?,
+    requestStartedAt: Long,
+  ): StreamedPayloadRange {
+    val sourceFile = File(filePath)
+    if (!sourceFile.exists()) {
+      throw IllegalStateException("The selected file is no longer available on this device.")
+    }
+
+    var bytesServed = 0L
+    var fileReadDurationMs = 0.0
+    RandomAccessFile(sourceFile, "r").use { input ->
+      input.seek(rangeStart)
+      val buffer = ByteArray(IO_PAGE_BYTES)
+      var remaining = contentLength
+      while (remaining > 0) {
+        val nextReadLength = min(buffer.size.toLong(), remaining).toInt()
+        val readStartedAt = SystemClock.elapsedRealtimeNanos()
+        val bytesRead = input.read(buffer, 0, nextReadLength)
+        fileReadDurationMs += elapsedMillis(readStartedAt)
+        if (bytesRead <= 0) {
+          break
+        }
+
+        output.write(buffer, 0, bytesRead)
+        bytesServed += bytesRead.toLong()
+        remaining -= bytesRead.toLong()
+
+        throttleChunkBytes(
+          bytesTransferred = bytesServed,
+          maxBytesPerSecond = maxBytesPerSecond,
+          startedAt = requestStartedAt,
+        )
+      }
+      output.flush()
+    }
+
+    return StreamedPayloadRange(
+      bytesServed = bytesServed,
+      fileReadDurationMs = fileReadDurationMs,
+    )
+  }
+
+  private fun streamContentPayloadRange(
+    contentUri: Uri,
+    rangeStart: Long,
+    contentLength: Long,
+    output: BufferedOutputStream,
+    maxBytesPerSecond: Long?,
+    requestStartedAt: Long,
+  ): StreamedPayloadRange {
+    val resolver = requireContentResolver()
+    val descriptor =
+      resolver.openFileDescriptor(contentUri, "r")
+        ?: throw IllegalStateException("Unable to open the selected file for direct transfer.")
+
+    var bytesServed = 0L
+    var fileReadDurationMs = 0.0
+    descriptor.use { parcelFileDescriptor ->
+      FileInputStream(parcelFileDescriptor.fileDescriptor).use { input ->
+        input.channel.position(rangeStart)
+        val buffer = ByteArray(IO_PAGE_BYTES)
+        var remaining = contentLength
+        while (remaining > 0) {
+          val nextReadLength = min(buffer.size.toLong(), remaining).toInt()
+          val readStartedAt = SystemClock.elapsedRealtimeNanos()
+          val bytesRead = input.read(buffer, 0, nextReadLength)
+          fileReadDurationMs += elapsedMillis(readStartedAt)
+          if (bytesRead <= 0) {
+            break
+          }
+
+          output.write(buffer, 0, bytesRead)
+          bytesServed += bytesRead.toLong()
+          remaining -= bytesRead.toLong()
+
+          throttleChunkBytes(
+            bytesTransferred = bytesServed,
+            maxBytesPerSecond = maxBytesPerSecond,
+            startedAt = requestStartedAt,
+          )
+        }
+        output.flush()
+      }
+    }
+
+    return StreamedPayloadRange(
+      bytesServed = bytesServed,
+      fileReadDurationMs = fileReadDurationMs,
+    )
+  }
+
+  private fun queryContentSizeBytes(
+    resolver: android.content.ContentResolver,
+    contentUri: Uri,
+  ): Long {
+    resolver.query(contentUri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+      val sizeColumnIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
+      if (sizeColumnIndex >= 0 && cursor.moveToFirst() && !cursor.isNull(sizeColumnIndex)) {
+        return cursor.getLong(sizeColumnIndex)
+      }
+    }
+    return -1L
+  }
+
+  private fun requireContentResolver(): android.content.ContentResolver {
+    val context = appContext.reactContext ?: throw IllegalStateException("React context is unavailable.")
+    return context.contentResolver
   }
 
   private fun throttleChunkBytes(bytesTransferred: Long, maxBytesPerSecond: Long?, startedAt: Long) {

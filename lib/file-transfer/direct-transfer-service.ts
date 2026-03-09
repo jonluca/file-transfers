@@ -128,18 +128,88 @@ const NEARBY_DISCOVERY_REQUEST_TIMEOUT_MS = 2500;
 const PROGRESS_UPDATE_INTERVAL_MS = 250;
 const PROGRESS_UPDATE_BYTES = 256 * 1024;
 const DIRECT_TRANSFER_DEBUG_PREFIX = "[DirectTransfer]";
+const UNKNOWN_DEBUG_DEVICE_NAME = "unknown-device";
+const DEBUG_SESSION_DETAIL_KEYS = ["sessionId", "senderSessionId", "receiverSessionId"] as const;
+const debugDeviceNameBySessionDebugId = new Map<string, string>();
 
-function logDirectTransferDebug(message: string, details?: Record<string, unknown>) {
+function normalizeDebugDeviceName(deviceName: string | null | undefined) {
+  const trimmed = deviceName?.trim();
+  return trimmed ? trimmed : UNKNOWN_DEBUG_DEVICE_NAME;
+}
+
+function rememberDebugDeviceName(sessionId: string, deviceName: string) {
+  const debugId = getSessionDebugId(sessionId);
+  if (!debugId) {
+    return;
+  }
+
+  debugDeviceNameBySessionDebugId.set(debugId, normalizeDebugDeviceName(deviceName));
+}
+
+function forgetDebugDeviceName(sessionId: string) {
+  const debugId = getSessionDebugId(sessionId);
+  if (!debugId) {
+    return;
+  }
+
+  debugDeviceNameBySessionDebugId.delete(debugId);
+}
+
+function getDebugDeviceNameFromDetails(details?: Record<string, unknown>) {
+  if (!details) {
+    return null;
+  }
+
+  for (const key of DEBUG_SESSION_DETAIL_KEYS) {
+    const value = details[key];
+    if (typeof value !== "string") {
+      continue;
+    }
+
+    const deviceName = debugDeviceNameBySessionDebugId.get(value);
+    if (deviceName) {
+      return deviceName;
+    }
+  }
+
+  return null;
+}
+
+function getDebugDeviceName(sessionId: string | null | undefined) {
+  const debugId = getSessionDebugId(sessionId);
+  if (!debugId) {
+    return null;
+  }
+
+  return debugDeviceNameBySessionDebugId.get(debugId) ?? null;
+}
+
+function logDirectTransferDebug(
+  message: string,
+  details?: Record<string, unknown>,
+  options?: {
+    deviceName?: string | null;
+    sessionId?: string | null;
+  },
+) {
   if (!__DEV__) {
     return;
   }
 
+  const localDeviceName = normalizeDebugDeviceName(
+    options?.deviceName ?? getDebugDeviceName(options?.sessionId) ?? getDebugDeviceNameFromDetails(details),
+  );
+  const prefix = `${DIRECT_TRANSFER_DEBUG_PREFIX}[${localDeviceName}]`;
+
   if (details) {
-    console.debug(`${DIRECT_TRANSFER_DEBUG_PREFIX} ${message}`, details);
+    console.debug(`${prefix} ${message}`, {
+      localDeviceName,
+      ...details,
+    });
     return;
   }
 
-  console.debug(`${DIRECT_TRANSFER_DEBUG_PREFIX} ${message}`);
+  console.debug(`${prefix} ${message}`);
 }
 
 function getSessionDebugId(sessionId: string | null | undefined) {
@@ -405,16 +475,33 @@ async function createNearbyAdvertiser({
   };
 }
 
-async function fetchNearbyDiscoveryRecords({ host, port }: { host: string; port: number }) {
+async function fetchNearbyDiscoveryRecords({
+  host,
+  port,
+  debugDeviceName,
+  debugSessionId,
+}: {
+  host: string;
+  port: number;
+  debugDeviceName?: string;
+  debugSessionId?: string;
+}) {
   const controller = new AbortController();
   const timer = setTimeout(() => {
     controller.abort();
   }, NEARBY_DISCOVERY_REQUEST_TIMEOUT_MS);
 
-  logDirectTransferDebug("Fetching nearby discovery records", {
-    host,
-    port,
-  });
+  logDirectTransferDebug(
+    "Fetching nearby discovery records",
+    {
+      host,
+      port,
+    },
+    {
+      deviceName: debugDeviceName,
+      sessionId: debugSessionId,
+    },
+  );
 
   try {
     const response = await fetch(buildNearbyDiscoveryUrl(host, port), {
@@ -425,12 +512,19 @@ async function fetchNearbyDiscoveryRecords({ host, port }: { host: string; port:
       signal: controller.signal,
     });
 
-    logDirectTransferDebug("Nearby discovery response received", {
-      host,
-      port,
-      statusCode: response.status,
-      ok: response.ok,
-    });
+    logDirectTransferDebug(
+      "Nearby discovery response received",
+      {
+        host,
+        port,
+        statusCode: response.status,
+        ok: response.ok,
+      },
+      {
+        deviceName: debugDeviceName,
+        sessionId: debugSessionId,
+      },
+    );
 
     if (!response.ok) {
       throw new Error(`Nearby discovery returned ${response.status}.`);
@@ -438,11 +532,18 @@ async function fetchNearbyDiscoveryRecords({ host, port }: { host: string; port:
 
     return parseNearbyDiscoveryResponse(await response.json());
   } catch (error) {
-    logDirectTransferDebug("Nearby discovery request failed", {
-      host,
-      port,
-      ...getErrorDebugDetails(error),
-    });
+    logDirectTransferDebug(
+      "Nearby discovery request failed",
+      {
+        host,
+        port,
+        ...getErrorDebugDetails(error),
+      },
+      {
+        deviceName: debugDeviceName,
+        sessionId: debugSessionId,
+      },
+    );
     throw error;
   } finally {
     clearTimeout(timer);
@@ -469,7 +570,7 @@ function findReplacementDiscoveryRecord(target: DiscoveryRecord, records: Discov
   return null;
 }
 
-async function refreshDiscoveryTarget(target: DiscoveryRecord) {
+async function refreshDiscoveryTarget(target: DiscoveryRecord, senderSessionId: string, senderDeviceName: string) {
   const host = resolveDiscoveryHost(target);
   if (!host || target.port <= 0) {
     return target;
@@ -481,17 +582,26 @@ async function refreshDiscoveryTarget(target: DiscoveryRecord) {
       await fetchNearbyDiscoveryRecords({
         host,
         port: target.port,
+        debugDeviceName: senderDeviceName,
+        debugSessionId: senderSessionId,
       }),
     );
 
     if (!refreshed) {
-      logDirectTransferDebug("Receiver discovery refresh found no replacement", {
-        targetDeviceName: target.deviceName,
-        targetMethod: target.method,
-        targetHost: target.host,
-        targetPort: target.port,
-        targetSessionId: getSessionDebugId(target.sessionId),
-      });
+      logDirectTransferDebug(
+        "Receiver discovery refresh found no replacement",
+        {
+          senderSessionId: getSessionDebugId(senderSessionId),
+          targetDeviceName: target.deviceName,
+          targetMethod: target.method,
+          targetHost: target.host,
+          targetPort: target.port,
+          targetSessionId: getSessionDebugId(target.sessionId),
+        },
+        {
+          deviceName: senderDeviceName,
+        },
+      );
       return target;
     }
 
@@ -504,29 +614,43 @@ async function refreshDiscoveryTarget(target: DiscoveryRecord) {
       return target;
     }
 
-    logDirectTransferDebug("Receiver discovery target refreshed", {
-      targetDeviceName: target.deviceName,
-      previousHost: target.host,
-      previousPort: target.port,
-      previousSessionId: getSessionDebugId(target.sessionId),
-      refreshedHost: refreshed.host,
-      refreshedPort: refreshed.port,
-      refreshedSessionId: getSessionDebugId(refreshed.sessionId),
-    });
+    logDirectTransferDebug(
+      "Receiver discovery target refreshed",
+      {
+        senderSessionId: getSessionDebugId(senderSessionId),
+        targetDeviceName: target.deviceName,
+        previousHost: target.host,
+        previousPort: target.port,
+        previousSessionId: getSessionDebugId(target.sessionId),
+        refreshedHost: refreshed.host,
+        refreshedPort: refreshed.port,
+        refreshedSessionId: getSessionDebugId(refreshed.sessionId),
+      },
+      {
+        deviceName: senderDeviceName,
+      },
+    );
 
     return {
       ...refreshed,
       method: target.method,
     };
   } catch (error) {
-    logDirectTransferDebug("Receiver discovery refresh failed", {
-      targetDeviceName: target.deviceName,
-      targetMethod: target.method,
-      targetHost: target.host,
-      targetPort: target.port,
-      targetSessionId: getSessionDebugId(target.sessionId),
-      ...getErrorDebugDetails(error),
-    });
+    logDirectTransferDebug(
+      "Receiver discovery refresh failed",
+      {
+        senderSessionId: getSessionDebugId(senderSessionId),
+        targetDeviceName: target.deviceName,
+        targetMethod: target.method,
+        targetHost: target.host,
+        targetPort: target.port,
+        targetSessionId: getSessionDebugId(target.sessionId),
+        ...getErrorDebugDetails(error),
+      },
+      {
+        deviceName: senderDeviceName,
+      },
+    );
     return target;
   }
 }
@@ -540,17 +664,36 @@ function buildPeerAccessFromDiscovery(record: DiscoveryRecord): DirectPeerAccess
   };
 }
 
-async function postJsonWithTimeout({ url, token, body }: { url: string; token: string; body: unknown }) {
+async function postJsonWithTimeout({
+  url,
+  token,
+  body,
+  debugDeviceName,
+  debugSessionId,
+}: {
+  url: string;
+  token: string;
+  body: unknown;
+  debugDeviceName?: string;
+  debugSessionId?: string;
+}) {
   const controller = new AbortController();
   const timer = setTimeout(() => {
     controller.abort();
   }, PEER_REQUEST_TIMEOUT_MS);
 
-  logDirectTransferDebug("Posting direct peer request", {
-    ...getUrlDebugDetails(url),
-    tokenSuffix: getTokenDebugSuffix(token),
-    ...getPeerRequestBodyDebugDetails(body),
-  });
+  logDirectTransferDebug(
+    "Posting direct peer request",
+    {
+      ...getUrlDebugDetails(url),
+      tokenSuffix: getTokenDebugSuffix(token),
+      ...getPeerRequestBodyDebugDetails(body),
+    },
+    {
+      deviceName: debugDeviceName,
+      sessionId: debugSessionId,
+    },
+  );
 
   try {
     const response = await fetch(url, {
@@ -563,24 +706,38 @@ async function postJsonWithTimeout({ url, token, body }: { url: string; token: s
       signal: controller.signal,
     });
 
-    logDirectTransferDebug("Direct peer response received", {
-      ...getUrlDebugDetails(url),
-      statusCode: response.status,
-      ok: response.ok,
-      ...getPeerRequestBodyDebugDetails(body),
-    });
+    logDirectTransferDebug(
+      "Direct peer response received",
+      {
+        ...getUrlDebugDetails(url),
+        statusCode: response.status,
+        ok: response.ok,
+        ...getPeerRequestBodyDebugDetails(body),
+      },
+      {
+        deviceName: debugDeviceName,
+        sessionId: debugSessionId,
+      },
+    );
 
     if (!response.ok) {
       const payload = (await response.json().catch(() => null)) as { error?: string } | null;
       throw new Error(payload?.error ?? `Direct transfer request failed with status ${response.status}.`);
     }
   } catch (error) {
-    logDirectTransferDebug("Direct peer request failed", {
-      ...getUrlDebugDetails(url),
-      tokenSuffix: getTokenDebugSuffix(token),
-      ...getPeerRequestBodyDebugDetails(body),
-      ...getErrorDebugDetails(error),
-    });
+    logDirectTransferDebug(
+      "Direct peer request failed",
+      {
+        ...getUrlDebugDetails(url),
+        tokenSuffix: getTokenDebugSuffix(token),
+        ...getPeerRequestBodyDebugDetails(body),
+        ...getErrorDebugDetails(error),
+      },
+      {
+        deviceName: debugDeviceName,
+        sessionId: debugSessionId,
+      },
+    );
 
     if (error instanceof Error && error.name === "AbortError") {
       throw new Error("Nearby device did not respond in time.", {
@@ -594,13 +751,18 @@ async function postJsonWithTimeout({ url, token, body }: { url: string; token: s
   }
 }
 
-async function postDirectEvent(peer: DirectPeerAccess, event: ReceiverToSenderEvent | SenderToReceiverEvent) {
+async function postDirectEvent(
+  peer: DirectPeerAccess,
+  event: ReceiverToSenderEvent | SenderToReceiverEvent,
+  debugSessionId?: string,
+) {
   await postJsonWithTimeout({
     url: buildDirectSessionUrl(peer, "/events"),
     token: peer.token,
     body: {
       event,
     },
+    debugSessionId,
   });
 }
 
@@ -611,6 +773,7 @@ async function postIncomingOffer(peer: DiscoveryRecord, offer: IncomingTransferO
     body: {
       offer,
     },
+    debugSessionId: offer.id,
   });
 }
 
@@ -627,6 +790,7 @@ async function fetchDownloadableManifest({
 }) {
   logDirectTransferDebug("Fetching sender manifest", {
     offerId: getSessionDebugId(offer.id),
+    receiverSessionId: getSessionDebugId(sessionId),
     senderDeviceName: offer.senderDeviceName,
     ...getPeerDebugDetails(peer),
   });
@@ -643,6 +807,7 @@ async function fetchDownloadableManifest({
 
   logDirectTransferDebug("Sender manifest response received", {
     offerId: getSessionDebugId(offer.id),
+    receiverSessionId: getSessionDebugId(sessionId),
     statusCode: response.status,
     ok: response.ok,
     ...getUrlDebugDetails(manifestUrl),
@@ -664,6 +829,7 @@ async function fetchDownloadableManifest({
 
   logDirectTransferDebug("Sender manifest loaded", {
     offerId: getSessionDebugId(offer.id),
+    receiverSessionId: getSessionDebugId(sessionId),
     fileCount: payload.files.length,
     totalBytes: payload.totalBytes,
   });
@@ -900,10 +1066,14 @@ function createReceiveProgressReporter(runtime: ReceiveRuntime) {
 
     lastSentAt = now;
     lastSentBytes = progress.bytesTransferred;
-    void postDirectEvent(offer.sender, {
-      kind: "progress",
-      progress,
-    }).catch(() => {});
+    void postDirectEvent(
+      offer.sender,
+      {
+        kind: "progress",
+        progress,
+      },
+      runtime.session.id,
+    ).catch(() => {});
   };
 }
 
@@ -956,14 +1126,20 @@ async function receiveDirectHttpTransfer({
       maxConcurrentChunks: runtime.transferPolicy.maxConcurrentChunks,
     };
 
-    logDirectTransferDebug("Receiver download policy resolved", {
-      offerId: getSessionDebugId(offer.id),
-      adapterKind: getDirectTransferClientAdapterKind(),
-      chunkBytes: downloadPolicy.chunkBytes,
-      maxConcurrentChunks: downloadPolicy.maxConcurrentChunks,
-      transferPolicyChunkBytes: runtime.transferPolicy.chunkBytes,
-      transferPolicyMaxConcurrentChunks: runtime.transferPolicy.maxConcurrentChunks,
-    });
+    logDirectTransferDebug(
+      "Receiver download policy resolved",
+      {
+        offerId: getSessionDebugId(offer.id),
+        adapterKind: getDirectTransferClientAdapterKind(),
+        chunkBytes: downloadPolicy.chunkBytes,
+        maxConcurrentChunks: downloadPolicy.maxConcurrentChunks,
+        transferPolicyChunkBytes: runtime.transferPolicy.chunkBytes,
+        transferPolicyMaxConcurrentChunks: runtime.transferPolicy.maxConcurrentChunks,
+      },
+      {
+        sessionId: runtime.session.id,
+      },
+    );
 
     const downloadedFiles: Array<{
       fileName: string;
@@ -982,12 +1158,18 @@ async function receiveDirectHttpTransfer({
       const outputFile = createTransferOutputFile(getReceivedFilesStagingDirectory(), file.name);
       createdFiles.push(outputFile);
 
-      logDirectTransferDebug("Downloading file from sender", {
-        offerId: getSessionDebugId(offer.id),
-        fileName: file.name,
-        sizeBytes: file.sizeBytes,
-        destinationUri: outputFile.uri,
-      });
+      logDirectTransferDebug(
+        "Downloading file from sender",
+        {
+          offerId: getSessionDebugId(offer.id),
+          fileName: file.name,
+          sizeBytes: file.sizeBytes,
+          destinationUri: outputFile.uri,
+        },
+        {
+          sessionId: runtime.session.id,
+        },
+      );
 
       let fileBytesTransferred = 0;
       let lastReportedFileBytes = 0;
@@ -1044,18 +1226,30 @@ async function receiveDirectHttpTransfer({
         sizeBytes: file.sizeBytes,
       });
 
-      logDirectTransferDebug("Finished downloading file from sender", {
-        offerId: getSessionDebugId(offer.id),
-        fileName: file.name,
-        bytesTransferred: fileBytesTransferred,
-      });
+      logDirectTransferDebug(
+        "Finished downloading file from sender",
+        {
+          offerId: getSessionDebugId(offer.id),
+          fileName: file.name,
+          bytesTransferred: fileBytesTransferred,
+        },
+        {
+          sessionId: runtime.session.id,
+        },
+      );
     }
 
-    logDirectTransferDebug("Receiver completed direct transfer", {
-      offerId: getSessionDebugId(offer.id),
-      receivedFileCount: downloadedFiles.length,
-      bytesTransferred,
-    });
+    logDirectTransferDebug(
+      "Receiver completed direct transfer",
+      {
+        offerId: getSessionDebugId(offer.id),
+        receivedFileCount: downloadedFiles.length,
+        bytesTransferred,
+      },
+      {
+        sessionId: runtime.session.id,
+      },
+    );
 
     const savedResults = await Promise.all(
       downloadedFiles.map((file) =>
@@ -1083,11 +1277,17 @@ async function receiveDirectHttpTransfer({
       usedNativeClient,
     } satisfies TransferResult;
   } catch (error) {
-    logDirectTransferDebug("Receiver direct transfer failed", {
-      offerId: getSessionDebugId(offer.id),
-      createdFileCount: createdFiles.length,
-      ...getErrorDebugDetails(error),
-    });
+    logDirectTransferDebug(
+      "Receiver direct transfer failed",
+      {
+        offerId: getSessionDebugId(offer.id),
+        createdFileCount: createdFiles.length,
+        ...getErrorDebugDetails(error),
+      },
+      {
+        sessionId: runtime.session.id,
+      },
+    );
 
     for (const file of createdFiles) {
       try {
@@ -1124,10 +1324,14 @@ async function runReceiveTransfer(runtime: ReceiveRuntime) {
     receiverSessionId: getSessionDebugId(runtime.session.id),
   });
 
-  await postDirectEvent(offer.sender, {
-    kind: "accepted",
-    receiverDeviceName: runtime.session.discoveryRecord.deviceName,
-  });
+  await postDirectEvent(
+    offer.sender,
+    {
+      kind: "accepted",
+      receiverDeviceName: runtime.session.discoveryRecord.deviceName,
+    },
+    runtime.session.id,
+  );
 
   withReceiveSessionUpdate(runtime, {
     status: "connecting",
@@ -1293,10 +1497,14 @@ async function handleSendRegistrationInterrupted(runtime: SendRuntime, detail: s
   });
 
   if (runtime.offerDelivered) {
-    await postDirectEvent(buildPeerAccessFromDiscovery(runtime.target), {
-      kind: "failed",
-      message: detail,
-    }).catch(() => {});
+    await postDirectEvent(
+      buildPeerAccessFromDiscovery(runtime.target),
+      {
+        kind: "failed",
+        message: detail,
+      },
+      runtime.session.id,
+    ).catch(() => {});
   }
 
   await failSendSession(runtime, detail);
@@ -1325,7 +1533,7 @@ async function handleReceiveRegistrationInterrupted(runtime: ReceiveRuntime, det
             kind: "canceled",
             message: detail,
           };
-    await postDirectEvent(offer.sender, event).catch(() => {});
+    await postDirectEvent(offer.sender, event, runtime.session.id).catch(() => {});
   }
 
   await failReceiveSession(runtime, detail);
@@ -1348,42 +1556,60 @@ export async function startSendingTransfer({
   const transferPolicy = assertSelectedFilesTransferAllowed(files, isPremium, "send");
   ensureTransferPerfSnapshot(sessionId, "send");
 
-  logDirectTransferDebug("Starting sender transfer session", {
-    senderSessionId: getSessionDebugId(sessionId),
-    fileCount: files.length,
-    totalBytes: files.reduce((sum, file) => sum + file.sizeBytes, 0),
-    targetDeviceName: target.deviceName,
-    targetMethod: target.method,
-    targetHost: target.host,
-    targetPort: target.port,
-    targetSessionId: getSessionDebugId(target.sessionId),
-  });
+  logDirectTransferDebug(
+    "Starting sender transfer session",
+    {
+      senderSessionId: getSessionDebugId(sessionId),
+      fileCount: files.length,
+      totalBytes: files.reduce((sum, file) => sum + file.sizeBytes, 0),
+      targetDeviceName: target.deviceName,
+      targetMethod: target.method,
+      targetHost: target.host,
+      targetPort: target.port,
+      targetSessionId: getSessionDebugId(target.sessionId),
+    },
+    {
+      deviceName,
+    },
+  );
 
-  const refreshedTarget = await refreshDiscoveryTarget(target);
+  const refreshedTarget = await refreshDiscoveryTarget(target, sessionId, deviceName);
 
   if (refreshedTarget.port <= 0 || !refreshedTarget.token.trim()) {
-    logDirectTransferDebug("Sender target is no longer valid", {
-      senderSessionId: getSessionDebugId(sessionId),
-      targetPort: refreshedTarget.port,
-      hasToken: Boolean(refreshedTarget.token.trim()),
-      targetMethod: refreshedTarget.method,
-      targetHost: refreshedTarget.host,
-      targetDeviceName: refreshedTarget.deviceName,
-      targetSessionId: getSessionDebugId(refreshedTarget.sessionId),
-    });
+    logDirectTransferDebug(
+      "Sender target is no longer valid",
+      {
+        senderSessionId: getSessionDebugId(sessionId),
+        targetPort: refreshedTarget.port,
+        hasToken: Boolean(refreshedTarget.token.trim()),
+        targetMethod: refreshedTarget.method,
+        targetHost: refreshedTarget.host,
+        targetDeviceName: refreshedTarget.deviceName,
+        targetSessionId: getSessionDebugId(refreshedTarget.sessionId),
+      },
+      {
+        deviceName,
+      },
+    );
     throw new Error("That receiver is no longer available.");
   }
 
   const validatedTargetHost = resolveDiscoveryHost(refreshedTarget);
   if (!validatedTargetHost) {
-    logDirectTransferDebug("Sender target host could not be resolved", {
-      senderSessionId: getSessionDebugId(sessionId),
-      targetMethod: refreshedTarget.method,
-      targetHost: refreshedTarget.host,
-      targetPort: refreshedTarget.port,
-      targetDeviceName: refreshedTarget.deviceName,
-      targetSessionId: getSessionDebugId(refreshedTarget.sessionId),
-    });
+    logDirectTransferDebug(
+      "Sender target host could not be resolved",
+      {
+        senderSessionId: getSessionDebugId(sessionId),
+        targetMethod: refreshedTarget.method,
+        targetHost: refreshedTarget.host,
+        targetPort: refreshedTarget.port,
+        targetDeviceName: refreshedTarget.deviceName,
+        targetSessionId: getSessionDebugId(refreshedTarget.sessionId),
+      },
+      {
+        deviceName,
+      },
+    );
     throw new Error(
       refreshedTarget.method === "qr"
         ? "That QR code does not contain a usable local WiFi address."
@@ -1399,15 +1625,21 @@ export async function startSendingTransfer({
           host: validatedTargetHost,
         };
 
-  logDirectTransferDebug("Sender target resolved", {
-    senderSessionId: getSessionDebugId(sessionId),
-    originalHost: refreshedTarget.host,
-    resolvedHost: resolvedTarget.host,
-    targetMethod: resolvedTarget.method,
-    targetPort: resolvedTarget.port,
-    targetDeviceName: resolvedTarget.deviceName,
-    targetSessionId: getSessionDebugId(resolvedTarget.sessionId),
-  });
+  logDirectTransferDebug(
+    "Sender target resolved",
+    {
+      senderSessionId: getSessionDebugId(sessionId),
+      originalHost: refreshedTarget.host,
+      resolvedHost: resolvedTarget.host,
+      targetMethod: resolvedTarget.method,
+      targetPort: resolvedTarget.port,
+      targetDeviceName: resolvedTarget.deviceName,
+      targetSessionId: getSessionDebugId(resolvedTarget.sessionId),
+    },
+    {
+      deviceName,
+    },
+  );
 
   const manifest = createTransferManifest({
     files,
@@ -1443,6 +1675,7 @@ export async function startSendingTransfer({
     },
   });
 
+  rememberDebugDeviceName(sessionId, deviceName);
   logDirectTransferDebug("Sender local direct session registered", {
     sessionId: getSessionDebugId(sessionId),
     localHost: direct.host,
@@ -1492,10 +1725,14 @@ export async function stopSendingTransfer(sessionId: string) {
   });
 
   if (!isSendRuntimeSettled(runtime) && runtime.offerDelivered) {
-    await postDirectEvent(buildPeerAccessFromDiscovery(runtime.target), {
-      kind: "canceled",
-      message: "Sender canceled the transfer.",
-    }).catch(() => {});
+    await postDirectEvent(
+      buildPeerAccessFromDiscovery(runtime.target),
+      {
+        kind: "canceled",
+        message: "Sender canceled the transfer.",
+      },
+      runtime.session.id,
+    ).catch(() => {});
   }
 
   if (!isSendRuntimeSettled(runtime)) {
@@ -1504,6 +1741,7 @@ export async function stopSendingTransfer(sessionId: string) {
 
   await unregisterDirectSendSession(runtime.session.id).catch(() => {});
   activeSendRuntimes.delete(sessionId);
+  forgetDebugDeviceName(sessionId);
 }
 
 export async function startReceivingAvailability({
@@ -1526,10 +1764,16 @@ export async function startReceivingAvailability({
     snapshot.totalBytes = 0;
   });
 
-  logDirectTransferDebug("Starting receiver availability", {
-    sessionId: getSessionDebugId(sessionId),
-    deviceName,
-  });
+  logDirectTransferDebug(
+    "Starting receiver availability",
+    {
+      sessionId: getSessionDebugId(sessionId),
+      deviceName,
+    },
+    {
+      deviceName,
+    },
+  );
 
   const direct = await registerDirectReceiveSession({
     sessionId,
@@ -1540,11 +1784,17 @@ export async function startReceivingAvailability({
     onOffer: async (offer) => {
       const runtime = activeReceiveRuntimes.get(sessionId);
       if (!runtime) {
-        logDirectTransferDebug("Incoming offer arrived for missing receiver runtime", {
-          sessionId: getSessionDebugId(sessionId),
-          offerId: getSessionDebugId(offer.id),
-          senderDeviceName: offer.senderDeviceName,
-        });
+        logDirectTransferDebug(
+          "Incoming offer arrived for missing receiver runtime",
+          {
+            sessionId: getSessionDebugId(sessionId),
+            offerId: getSessionDebugId(offer.id),
+            senderDeviceName: offer.senderDeviceName,
+          },
+          {
+            deviceName,
+          },
+        );
         return {
           accepted: false,
           statusCode: 404,
@@ -1578,6 +1828,7 @@ export async function startReceivingAvailability({
     },
   });
 
+  rememberDebugDeviceName(sessionId, deviceName);
   logDirectTransferDebug("Receiver local direct session registered", {
     sessionId: getSessionDebugId(sessionId),
     deviceName,
@@ -1593,6 +1844,7 @@ export async function startReceivingAvailability({
       port: direct.port,
     });
   } catch (error) {
+    forgetDebugDeviceName(sessionId);
     await unregisterDirectReceiveSession(sessionId).catch(() => {});
     throw error;
   }
@@ -1646,15 +1898,23 @@ export async function stopReceivingAvailability(sessionId: string) {
 
   if (runtime.session.incomingOffer) {
     if (runtime.session.status === "waiting") {
-      await postDirectEvent(runtime.session.incomingOffer.sender, {
-        kind: "rejected",
-        message: "Receiver is no longer available.",
-      }).catch(() => {});
+      await postDirectEvent(
+        runtime.session.incomingOffer.sender,
+        {
+          kind: "rejected",
+          message: "Receiver is no longer available.",
+        },
+        runtime.session.id,
+      ).catch(() => {});
     } else if (runtime.session.status === "connecting" || runtime.session.status === "transferring") {
-      await postDirectEvent(runtime.session.incomingOffer.sender, {
-        kind: "canceled",
-        message: "Receiver canceled the transfer.",
-      }).catch(() => {});
+      await postDirectEvent(
+        runtime.session.incomingOffer.sender,
+        {
+          kind: "canceled",
+          message: "Receiver canceled the transfer.",
+        },
+        runtime.session.id,
+      ).catch(() => {});
       await cancelReceiveSession(runtime, "Receiver canceled the transfer.");
     }
   }
@@ -1662,6 +1922,7 @@ export async function stopReceivingAvailability(sessionId: string) {
   await runtime.stopZeroconfPublishing?.().catch(() => {});
   await unregisterDirectReceiveSession(sessionId).catch(() => {});
   activeReceiveRuntimes.delete(sessionId);
+  forgetDebugDeviceName(sessionId);
 }
 
 export async function acceptIncomingTransferOffer(sessionId: string) {
@@ -1679,10 +1940,14 @@ export async function acceptIncomingTransferOffer(sessionId: string) {
   try {
     const result = await runReceiveTransfer(runtime);
 
-    await postDirectEvent(runtime.session.incomingOffer.sender, {
-      kind: "completed",
-      detail: result.detail,
-    }).catch(() => {});
+    await postDirectEvent(
+      runtime.session.incomingOffer.sender,
+      {
+        kind: "completed",
+        detail: result.detail,
+      },
+      runtime.session.id,
+    ).catch(() => {});
 
     withReceiveSessionUpdate(runtime, {
       status: "completed",
@@ -1722,10 +1987,14 @@ export async function acceptIncomingTransferOffer(sessionId: string) {
     });
 
     if (!runtime.stopping && runtime.session.incomingOffer) {
-      await postDirectEvent(runtime.session.incomingOffer.sender, {
-        kind: "failed",
-        message: detail,
-      }).catch(() => {});
+      await postDirectEvent(
+        runtime.session.incomingOffer.sender,
+        {
+          kind: "failed",
+          message: detail,
+        },
+        runtime.session.id,
+      ).catch(() => {});
     }
 
     await failReceiveSession(runtime, detail);
@@ -1745,18 +2014,24 @@ export async function declineIncomingTransferOffer(sessionId: string) {
     offerId: getSessionDebugId(offer.id),
     senderDeviceName: offer.senderDeviceName,
   });
-  await postDirectEvent(offer.sender, {
-    kind: "rejected",
-    message: "Transfer declined.",
-  }).catch(() => {});
+  await postDirectEvent(
+    offer.sender,
+    {
+      kind: "rejected",
+      message: "Transfer declined.",
+    },
+    runtime.session.id,
+  ).catch(() => {});
   resetReceiveToDiscoverable(runtime);
   return true;
 }
 
 export async function startNearbyScan({
+  deviceName,
   onUpdate,
   onError,
 }: {
+  deviceName?: string;
   onUpdate: (records: DiscoveryRecord[]) => void;
   onError?: (error: Error) => void;
 }) {
@@ -1768,10 +2043,16 @@ export async function startNearbyScan({
   let syncToken = 0;
 
   function emitCurrentRecords() {
-    logDirectTransferDebug("Nearby discovery records updated", {
-      count: currentRecords.size,
-      sessionIds: Array.from(currentRecords.keys()).map((sessionId) => getSessionDebugId(sessionId)),
-    });
+    logDirectTransferDebug(
+      "Nearby discovery records updated",
+      {
+        count: currentRecords.size,
+        sessionIds: Array.from(currentRecords.keys()).map((sessionId) => getSessionDebugId(sessionId)),
+      },
+      {
+        deviceName,
+      },
+    );
     onUpdate(
       Array.from(currentRecords.values()).sort((left, right) => right.advertisedAt.localeCompare(left.advertisedAt)),
     );
@@ -1786,11 +2067,17 @@ export async function startNearbyScan({
         const host = getUsableLanHost(result.ipv4) ?? getUsableNearbyHost(result.hostname);
         const port = result.port ?? 0;
         if (!host || port <= 0) {
-          logDirectTransferDebug("Ignoring nearby service without usable host or port", {
-            serviceName: result.name ?? null,
-            host: result.ipv4 ?? result.hostname ?? null,
-            port: result.port ?? null,
-          });
+          logDirectTransferDebug(
+            "Ignoring nearby service without usable host or port",
+            {
+              serviceName: result.name ?? null,
+              host: result.ipv4 ?? result.hostname ?? null,
+              port: result.port ?? null,
+            },
+            {
+              deviceName,
+            },
+          );
           return [];
         }
 
@@ -1798,6 +2085,7 @@ export async function startNearbyScan({
           const resolvedRecords = await fetchNearbyDiscoveryRecords({
             host,
             port,
+            debugDeviceName: deviceName,
           });
 
           if (!result.name) {
@@ -1811,12 +2099,18 @@ export async function startNearbyScan({
 
           return resolvedRecords.length === 1 ? resolvedRecords : [];
         } catch (error) {
-          logDirectTransferDebug("Failed to hydrate nearby service metadata", {
-            serviceName: result.name ?? null,
-            host,
-            port,
-            ...getErrorDebugDetails(error),
-          });
+          logDirectTransferDebug(
+            "Failed to hydrate nearby service metadata",
+            {
+              serviceName: result.name ?? null,
+              host,
+              port,
+              ...getErrorDebugDetails(error),
+            },
+            {
+              deviceName,
+            },
+          );
           return [];
         }
       }),
@@ -1839,12 +2133,16 @@ export async function startNearbyScan({
     emitCurrentRecords();
   }
 
-  logDirectTransferDebug("Starting nearby discovery scan");
+  logDirectTransferDebug("Starting nearby discovery scan", undefined, {
+    deviceName,
+  });
   const resultsListener = scanner.listenForScanResults((results) => {
     void syncNearbyRecords(results);
   });
   const failListener = scanner.listenForScanFail((error) => {
-    logDirectTransferDebug("Nearby discovery scan error", getErrorDebugDetails(error));
+    logDirectTransferDebug("Nearby discovery scan error", getErrorDebugDetails(error), {
+      deviceName,
+    });
     const errorMessage =
       typeof error === "object" && error && "message" in (error as Record<string, unknown>)
         ? (error as { message?: unknown }).message
@@ -1859,22 +2157,32 @@ export async function startNearbyScan({
   return () => {
     stopped = true;
     syncToken += 1;
-    logDirectTransferDebug("Stopping nearby discovery scan", {
-      remainingRecords: currentRecords.size,
-    });
+    logDirectTransferDebug(
+      "Stopping nearby discovery scan",
+      {
+        remainingRecords: currentRecords.size,
+      },
+      {
+        deviceName,
+      },
+    );
     scanner.stop();
     resultsListener.remove();
     failListener.remove();
   };
 }
 
-export function parseDiscoveryQrPayload(value: string) {
+export function parseDiscoveryQrPayload(value: string, options?: { deviceName?: string }) {
   try {
     const record = parseDirectDiscoveryQrPayload(value);
-    logDirectTransferDebug("Parsed receiver QR payload", getDiscoveryDebugDetails(record));
+    logDirectTransferDebug("Parsed receiver QR payload", getDiscoveryDebugDetails(record), {
+      deviceName: options?.deviceName,
+    });
     return record;
   } catch (error) {
-    logDirectTransferDebug("Failed to parse receiver QR payload", getErrorDebugDetails(error));
+    logDirectTransferDebug("Failed to parse receiver QR payload", getErrorDebugDetails(error), {
+      deviceName: options?.deviceName,
+    });
     throw error;
   }
 }
