@@ -101,8 +101,6 @@ export default function getConfig({ config }: ConfigContext): ExpoConfig {
           android: {
             minSdkVersion: 28,
           },
-          buildReactNativeFromSource: true,
-          useHermesV1: true,
         },
       ],
       [
