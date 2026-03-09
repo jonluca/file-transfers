@@ -530,12 +530,17 @@ function createBrowserManifest(publicHost: string, browserSession: BrowserShareR
 }
 
 function createDirectManifest(runtime: SharedHttpRuntime, sendSession: DirectSendRuntime) {
-  const directBaseUrl = {
+  const runtimeBaseUrl = {
     sessionId: sendSession.sessionId,
     host: runtime.publicHost,
-    // Keep direct downloads on the shared fixed-port runtime so manifest, events,
-    // and file bytes all use the same transport across Android and iOS.
     port: LOCAL_HTTP_SERVER_PORT,
+  };
+  const fileBaseUrl = {
+    sessionId: sendSession.sessionId,
+    host: runtime.publicHost,
+    // Prefer the native payload server for file bytes when available so large
+    // direct-transfer chunks do not depend on Nitro's JS binary response path.
+    port: sendSession.payloadServerPort ?? LOCAL_HTTP_SERVER_PORT,
   };
 
   return {
@@ -544,7 +549,7 @@ function createDirectManifest(runtime: SharedHttpRuntime, sendSession: DirectSen
     sessionId: sendSession.sessionId,
     deviceName: sendSession.deviceName,
     startedAt: sendSession.startedAt,
-    shareUrl: buildDirectSessionBaseUrl(directBaseUrl),
+    shareUrl: buildDirectSessionBaseUrl(runtimeBaseUrl),
     totalBytes: sendSession.files.reduce((sum, file) => sum + file.sizeBytes, 0),
     downloadPolicy: {
       chunkBytes: sendSession.transferPolicy.chunkBytes,
@@ -562,7 +567,7 @@ function createDirectManifest(runtime: SharedHttpRuntime, sendSession: DirectSen
         mimeType: file.mimeType,
         sizeBytes: file.sizeBytes,
         downloadUrl: buildDirectSessionUrl(
-          directBaseUrl,
+          fileBaseUrl,
           `/files/${encodeURIComponent(file.id)}/${encodeURIComponent(file.name)}`,
         ),
       };
