@@ -107,6 +107,57 @@ const PEER_REQUEST_TIMEOUT_MS = 8000;
 const PROGRESS_UPDATE_INTERVAL_MS = 250;
 const PROGRESS_UPDATE_BYTES = 128 * 1024;
 const ZEROCONF_IMPL_TYPE = ImplType.DNSSD;
+const DIRECT_TRANSFER_DEBUG_PREFIX = "[DirectTransfer]";
+
+function logDirectTransferDebug(message: string, details?: Record<string, unknown>) {
+  if (!__DEV__) {
+    return;
+  }
+
+  if (details) {
+    console.debug(`${DIRECT_TRANSFER_DEBUG_PREFIX} ${message}`, details);
+    return;
+  }
+
+  console.debug(`${DIRECT_TRANSFER_DEBUG_PREFIX} ${message}`);
+}
+
+function getSessionDebugId(sessionId: string | null | undefined) {
+  return sessionId?.slice(0, 8) ?? null;
+}
+
+function getErrorDebugDetails(error: unknown) {
+  if (error instanceof Error) {
+    return {
+      name: error.name,
+      message: error.message,
+    };
+  }
+
+  return {
+    error: String(error),
+  };
+}
+
+function getDiscoveryDebugDetails(
+  record: Pick<DiscoveryRecord, "sessionId" | "method" | "deviceName" | "host" | "port">,
+) {
+  return {
+    sessionId: getSessionDebugId(record.sessionId),
+    method: record.method,
+    deviceName: record.deviceName,
+    host: record.host,
+    port: record.port,
+  };
+}
+
+function getPeerDebugDetails(peer: Pick<DirectPeerAccess, "sessionId" | "host" | "port">) {
+  return {
+    sessionId: getSessionDebugId(peer.sessionId),
+    host: peer.host,
+    port: peer.port,
+  };
+}
 
 function toTransferManifestFile(file: SelectedTransferFile): TransferManifestFile {
   return {
@@ -233,6 +284,13 @@ function createZeroconfPublisher({
   const serviceName = createServiceName(deviceName, sessionId);
   const zeroconf = new Zeroconf();
 
+  logDirectTransferDebug("Publishing nearby receiver service", {
+    sessionId: getSessionDebugId(sessionId),
+    deviceName,
+    port,
+    serviceName,
+  });
+
   zeroconf.publishService(
     LOCAL_TRANSFER_SERVICE_TYPE,
     LOCAL_TRANSFER_SERVICE_PROTOCOL,
@@ -250,6 +308,10 @@ function createZeroconfPublisher({
   return {
     serviceName,
     stop() {
+      logDirectTransferDebug("Stopping nearby receiver service", {
+        sessionId: getSessionDebugId(sessionId),
+        serviceName,
+      });
       zeroconf.unpublishService(serviceName, ZEROCONF_IMPL_TYPE);
       zeroconf.removeDeviceListeners();
     },
@@ -328,6 +390,12 @@ async function fetchDownloadableManifest({
   offer: IncomingTransferOffer;
   signal: AbortSignal;
 }) {
+  logDirectTransferDebug("Fetching sender manifest", {
+    offerId: getSessionDebugId(offer.id),
+    senderDeviceName: offer.senderDeviceName,
+    ...getPeerDebugDetails(peer),
+  });
+
   const response = await fetch(buildDirectSessionUrl(peer, "/manifest"), {
     method: "GET",
     headers: {
@@ -348,6 +416,12 @@ async function fetchDownloadableManifest({
   if (payload.sessionId !== offer.id) {
     throw new Error("The sender provided a manifest for a different transfer.");
   }
+
+  logDirectTransferDebug("Sender manifest loaded", {
+    offerId: getSessionDebugId(offer.id),
+    fileCount: payload.files.length,
+    totalBytes: payload.totalBytes,
+  });
 
   return payload;
 }
@@ -475,15 +549,29 @@ function failReceiveSession(runtime: ReceiveRuntime, detail: string) {
 function isReceiveRuntimeBusy(runtime: ReceiveRuntime) {
   return Boolean(
     runtime.session.incomingOffer ||
-      runtime.session.status === "connecting" ||
-      runtime.session.status === "transferring",
+    runtime.session.status === "connecting" ||
+    runtime.session.status === "transferring",
   );
 }
 
 function registerIncomingOffer(runtime: ReceiveRuntime, offer: IncomingTransferOffer) {
   if (isReceiveRuntimeBusy(runtime)) {
+    logDirectTransferDebug("Ignoring incoming offer because receiver is busy", {
+      offerId: getSessionDebugId(offer.id),
+      senderDeviceName: offer.senderDeviceName,
+      receiverSessionId: getSessionDebugId(runtime.session.id),
+      receiverStatus: runtime.session.status,
+    });
     return false;
   }
+
+  logDirectTransferDebug("Incoming offer registered", {
+    offerId: getSessionDebugId(offer.id),
+    senderDeviceName: offer.senderDeviceName,
+    fileCount: offer.fileCount,
+    totalBytes: offer.totalBytes,
+    receiverSessionId: getSessionDebugId(runtime.session.id),
+  });
 
   withReceiveSessionUpdate(runtime, {
     status: "waiting",
@@ -557,6 +645,15 @@ async function receiveDirectHttpTransfer({
   await activateKeepAwakeAsync(LOCAL_TRANSFER_KEEP_AWAKE_TAG).catch(() => {});
 
   try {
+    logDirectTransferDebug("Receiver starting direct transfer", {
+      offerId: getSessionDebugId(offer.id),
+      senderDeviceName: offer.senderDeviceName,
+      receiverSessionId: getSessionDebugId(runtime.session.id),
+      totalBytes: offer.totalBytes,
+      fileCount: offer.fileCount,
+      ...getPeerDebugDetails(offer.sender),
+    });
+
     onProgress(
       {
         phase: "connecting",
@@ -582,6 +679,13 @@ async function receiveDirectHttpTransfer({
     for (const file of manifest.files) {
       const outputFile = createTransferOutputFile(getReceivedFilesDirectory(), file.name);
       createdFiles.push(outputFile);
+
+      logDirectTransferDebug("Downloading file from sender", {
+        offerId: getSessionDebugId(offer.id),
+        fileName: file.name,
+        sizeBytes: file.sizeBytes,
+        destinationUri: outputFile.uri,
+      });
 
       const startedAt = Date.now();
       let fileBytesTransferred = 0;
@@ -639,7 +743,19 @@ async function receiveDirectHttpTransfer({
         sizeBytes: file.sizeBytes,
         receivedAt: nowIso(),
       });
+
+      logDirectTransferDebug("Finished downloading file from sender", {
+        offerId: getSessionDebugId(offer.id),
+        fileName: file.name,
+        bytesTransferred: fileBytesTransferred,
+      });
     }
+
+    logDirectTransferDebug("Receiver completed direct transfer", {
+      offerId: getSessionDebugId(offer.id),
+      receivedFileCount: receivedFiles.length,
+      bytesTransferred,
+    });
 
     return {
       receivedFiles,
@@ -647,6 +763,12 @@ async function receiveDirectHttpTransfer({
       detail: "Transfer complete.",
     } satisfies TransferResult;
   } catch (error) {
+    logDirectTransferDebug("Receiver direct transfer failed", {
+      offerId: getSessionDebugId(offer.id),
+      createdFileCount: createdFiles.length,
+      ...getErrorDebugDetails(error),
+    });
+
     for (const file of createdFiles) {
       try {
         if (file.exists) {
@@ -675,6 +797,12 @@ async function runReceiveTransfer(runtime: ReceiveRuntime) {
   if (!offer) {
     throw new Error("That transfer request is no longer available.");
   }
+
+  logDirectTransferDebug("Receiver accepted transfer offer", {
+    offerId: getSessionDebugId(offer.id),
+    senderDeviceName: offer.senderDeviceName,
+    receiverSessionId: getSessionDebugId(runtime.session.id),
+  });
 
   await postDirectEvent(offer.sender, {
     kind: "accepted",
@@ -708,6 +836,10 @@ function getPeerName(value: string | undefined) {
 
 async function handleSenderEvent(runtime: SendRuntime, event: ReceiverToSenderEvent) {
   if (event.kind === "accepted") {
+    logDirectTransferDebug("Sender received receiver acceptance", {
+      sessionId: getSessionDebugId(runtime.session.id),
+      receiverDeviceName: event.receiverDeviceName,
+    });
     const receiverName = getPeerName(event.receiverDeviceName ?? runtime.target.deviceName);
     withSendSessionUpdate(runtime, {
       status: "connecting",
@@ -727,6 +859,16 @@ async function handleSenderEvent(runtime: SendRuntime, event: ReceiverToSenderEv
   }
 
   if (event.kind === "progress") {
+    if (event.progress.phase !== runtime.session.progress.phase) {
+      logDirectTransferDebug("Sender observed receiver progress phase change", {
+        sessionId: getSessionDebugId(runtime.session.id),
+        phase: event.progress.phase,
+        bytesTransferred: event.progress.bytesTransferred,
+        totalBytes: event.progress.totalBytes,
+        currentFileName: event.progress.currentFileName,
+      });
+    }
+
     withSendSessionUpdate(runtime, {
       status: event.progress.phase === "transferring" ? "transferring" : "connecting",
       awaitingReceiverResponse: false,
@@ -739,20 +881,39 @@ async function handleSenderEvent(runtime: SendRuntime, event: ReceiverToSenderEv
   }
 
   if (event.kind === "completed") {
+    logDirectTransferDebug("Sender received transfer completion", {
+      sessionId: getSessionDebugId(runtime.session.id),
+      detail: event.detail,
+    });
     completeSendSession(runtime, event.detail ?? "Transfer complete.");
     return;
   }
 
   if (event.kind === "rejected") {
+    logDirectTransferDebug("Sender received transfer rejection", {
+      sessionId: getSessionDebugId(runtime.session.id),
+      message: event.message,
+    });
     failSendSession(runtime, event.message || "Transfer declined.");
     return;
   }
 
+  logDirectTransferDebug("Sender received terminal receiver event", {
+    sessionId: getSessionDebugId(runtime.session.id),
+    kind: event.kind,
+    message: event.message,
+  });
   failSendSession(runtime, event.message || "Transfer stopped.");
 }
 
 async function handleReceiverEvent(runtime: ReceiveRuntime, event: SenderToReceiverEvent) {
   const detail = event.message || "Sender stopped the transfer.";
+
+  logDirectTransferDebug("Receiver received sender event", {
+    sessionId: getSessionDebugId(runtime.session.id),
+    kind: event.kind,
+    detail,
+  });
 
   if (runtime.session.status === "waiting") {
     resetReceiveToDiscoverable(runtime, detail);
@@ -764,9 +925,28 @@ async function handleReceiverEvent(runtime: ReceiveRuntime, event: SenderToRecei
 
 async function startOffer(runtime: SendRuntime, offer: IncomingTransferOffer) {
   try {
+    logDirectTransferDebug("Sending offer to receiver", {
+      senderSessionId: getSessionDebugId(runtime.session.id),
+      targetDeviceName: runtime.target.deviceName,
+      fileCount: offer.fileCount,
+      totalBytes: offer.totalBytes,
+      targetMethod: runtime.target.method,
+      targetHost: runtime.target.host,
+      targetPort: runtime.target.port,
+      targetSessionId: getSessionDebugId(runtime.target.sessionId),
+    });
     await postIncomingOffer(runtime.target, offer);
     runtime.offerDelivered = true;
+    logDirectTransferDebug("Receiver offer delivered", {
+      sessionId: getSessionDebugId(runtime.session.id),
+      targetDeviceName: runtime.target.deviceName,
+    });
   } catch (error) {
+    logDirectTransferDebug("Failed to deliver receiver offer", {
+      sessionId: getSessionDebugId(runtime.session.id),
+      targetDeviceName: runtime.target.deviceName,
+      ...getErrorDebugDetails(error),
+    });
     failSendSession(runtime, error instanceof Error ? error.message : "Unable to reach that receiver.");
   }
 }
@@ -775,6 +955,12 @@ async function handleSendRegistrationInterrupted(runtime: SendRuntime, detail: s
   if (runtime.stopping || isSendRuntimeSettled(runtime)) {
     return;
   }
+
+  logDirectTransferDebug("Sender registration interrupted", {
+    sessionId: getSessionDebugId(runtime.session.id),
+    detail,
+    offerDelivered: runtime.offerDelivered,
+  });
 
   if (runtime.offerDelivered) {
     await postDirectEvent(buildPeerAccessFromDiscovery(runtime.target), {
@@ -790,6 +976,12 @@ async function handleReceiveRegistrationInterrupted(runtime: ReceiveRuntime, det
   if (runtime.stopping) {
     return;
   }
+
+  logDirectTransferDebug("Receiver registration interrupted", {
+    sessionId: getSessionDebugId(runtime.session.id),
+    detail,
+    status: runtime.session.status,
+  });
 
   const offer = runtime.session.incomingOffer;
   if (offer) {
@@ -822,12 +1014,40 @@ export async function startSendingTransfer({
 }) {
   const sessionId = Crypto.randomUUID();
 
+  logDirectTransferDebug("Starting sender transfer session", {
+    senderSessionId: getSessionDebugId(sessionId),
+    fileCount: files.length,
+    totalBytes: files.reduce((sum, file) => sum + file.sizeBytes, 0),
+    targetDeviceName: target.deviceName,
+    targetMethod: target.method,
+    targetHost: target.host,
+    targetPort: target.port,
+    targetSessionId: getSessionDebugId(target.sessionId),
+  });
+
   if (target.port <= 0 || !target.token.trim()) {
+    logDirectTransferDebug("Sender target is no longer valid", {
+      senderSessionId: getSessionDebugId(sessionId),
+      targetPort: target.port,
+      hasToken: Boolean(target.token.trim()),
+      targetMethod: target.method,
+      targetHost: target.host,
+      targetDeviceName: target.deviceName,
+      targetSessionId: getSessionDebugId(target.sessionId),
+    });
     throw new Error("That receiver is no longer available.");
   }
 
   const validatedTargetHost = resolveDiscoveryHost(target);
   if (!validatedTargetHost) {
+    logDirectTransferDebug("Sender target host could not be resolved", {
+      senderSessionId: getSessionDebugId(sessionId),
+      targetMethod: target.method,
+      targetHost: target.host,
+      targetPort: target.port,
+      targetDeviceName: target.deviceName,
+      targetSessionId: getSessionDebugId(target.sessionId),
+    });
     throw new Error(
       target.method === "qr"
         ? "That QR code does not contain a usable local WiFi address."
@@ -842,6 +1062,16 @@ export async function startSendingTransfer({
           ...target,
           host: validatedTargetHost,
         };
+
+  logDirectTransferDebug("Sender target resolved", {
+    senderSessionId: getSessionDebugId(sessionId),
+    originalHost: target.host,
+    resolvedHost: resolvedTarget.host,
+    targetMethod: resolvedTarget.method,
+    targetPort: resolvedTarget.port,
+    targetDeviceName: resolvedTarget.deviceName,
+    targetSessionId: getSessionDebugId(resolvedTarget.sessionId),
+  });
 
   const manifest = createTransferManifest({
     files,
@@ -873,6 +1103,12 @@ export async function startSendingTransfer({
     },
   });
 
+  logDirectTransferDebug("Sender local direct session registered", {
+    sessionId: getSessionDebugId(sessionId),
+    localHost: direct.host,
+    localPort: direct.port,
+  });
+
   const runtime: SendRuntime = {
     session: createInitialSendSession(manifest, resolvedTarget),
     target: resolvedTarget,
@@ -883,6 +1119,13 @@ export async function startSendingTransfer({
 
   activeSendRuntimes.set(sessionId, runtime);
   updateSession?.(runtime.session);
+
+  logDirectTransferDebug("Sender runtime is ready", {
+    sessionId: getSessionDebugId(sessionId),
+    targetDeviceName: runtime.target.deviceName,
+    targetHost: runtime.target.host,
+    targetPort: runtime.target.port,
+  });
 
   const offer = createIncomingTransferOffer({
     manifest,
@@ -900,6 +1143,12 @@ export async function stopSendingTransfer(sessionId: string) {
   }
 
   runtime.stopping = true;
+
+  logDirectTransferDebug("Stopping sender transfer session", {
+    sessionId: getSessionDebugId(sessionId),
+    offerDelivered: runtime.offerDelivered,
+    status: runtime.session.status,
+  });
 
   if (!isSendRuntimeSettled(runtime) && runtime.offerDelivered) {
     await postDirectEvent(buildPeerAccessFromDiscovery(runtime.target), {
@@ -922,6 +1171,11 @@ export async function startReceivingAvailability({
   const sessionId = Crypto.randomUUID();
   const receiverToken = Crypto.randomUUID().replace(/-/g, "");
 
+  logDirectTransferDebug("Starting receiver availability", {
+    sessionId: getSessionDebugId(sessionId),
+    deviceName,
+  });
+
   const direct = await registerDirectReceiveSession({
     sessionId,
     token: receiverToken,
@@ -929,6 +1183,11 @@ export async function startReceivingAvailability({
     onOffer: async (offer) => {
       const runtime = activeReceiveRuntimes.get(sessionId);
       if (!runtime) {
+        logDirectTransferDebug("Incoming offer arrived for missing receiver runtime", {
+          sessionId: getSessionDebugId(sessionId),
+          offerId: getSessionDebugId(offer.id),
+          senderDeviceName: offer.senderDeviceName,
+        });
         return {
           accepted: false,
           statusCode: 404,
@@ -962,6 +1221,13 @@ export async function startReceivingAvailability({
     },
   });
 
+  logDirectTransferDebug("Receiver local direct session registered", {
+    sessionId: getSessionDebugId(sessionId),
+    deviceName,
+    localHost: direct.host,
+    localPort: direct.port,
+  });
+
   const zeroconfPublisher = createZeroconfPublisher({
     sessionId,
     deviceName,
@@ -988,6 +1254,11 @@ export async function startReceivingAvailability({
 
   activeReceiveRuntimes.set(sessionId, runtime);
   updateSession?.(runtime.session);
+
+  logDirectTransferDebug("Receiver runtime is discoverable", {
+    qrReady: Boolean(runtime.session.qrPayload),
+    ...getDiscoveryDebugDetails(runtime.session.discoveryRecord),
+  });
   return runtime.session;
 }
 
@@ -999,6 +1270,12 @@ export async function stopReceivingAvailability(sessionId: string) {
 
   runtime.stopping = true;
   runtime.activeDownloadAbortController?.abort();
+
+  logDirectTransferDebug("Stopping receiver availability", {
+    sessionId: getSessionDebugId(sessionId),
+    status: runtime.session.status,
+    hasIncomingOffer: Boolean(runtime.session.incomingOffer),
+  });
 
   if (runtime.session.incomingOffer) {
     if (runtime.session.status === "waiting") {
@@ -1025,6 +1302,12 @@ export async function acceptIncomingTransferOffer(sessionId: string) {
     return false;
   }
 
+  logDirectTransferDebug("Accepting incoming transfer offer", {
+    sessionId: getSessionDebugId(sessionId),
+    offerId: getSessionDebugId(runtime.session.incomingOffer.id),
+    senderDeviceName: runtime.session.incomingOffer.senderDeviceName,
+  });
+
   try {
     const result = await runReceiveTransfer(runtime);
 
@@ -1046,9 +1329,22 @@ export async function acceptIncomingTransferOffer(sessionId: string) {
         updatedAt: nowIso(),
       },
     });
+    logDirectTransferDebug("Incoming transfer offer completed", {
+      sessionId: getSessionDebugId(sessionId),
+      offerId: getSessionDebugId(runtime.session.incomingOffer?.id),
+      receivedFileCount: result.receivedFiles.length,
+      bytesTransferred: result.bytesTransferred,
+    });
     return true;
   } catch (error) {
     const detail = error instanceof Error ? error.message : "The transfer could not be completed.";
+
+    logDirectTransferDebug("Incoming transfer offer failed", {
+      sessionId: getSessionDebugId(sessionId),
+      offerId: getSessionDebugId(runtime.session.incomingOffer?.id),
+      detail,
+      ...getErrorDebugDetails(error),
+    });
 
     if (!runtime.stopping && runtime.session.incomingOffer) {
       await postDirectEvent(runtime.session.incomingOffer.sender, {
@@ -1069,6 +1365,11 @@ export async function declineIncomingTransferOffer(sessionId: string) {
   }
 
   const offer = runtime.session.incomingOffer;
+  logDirectTransferDebug("Declining incoming transfer offer", {
+    sessionId: getSessionDebugId(sessionId),
+    offerId: getSessionDebugId(offer.id),
+    senderDeviceName: offer.senderDeviceName,
+  });
   await postDirectEvent(offer.sender, {
     kind: "rejected",
     message: "Transfer declined.",
@@ -1087,30 +1388,57 @@ export async function startNearbyScan({
   const currentRecords = new Map<string, DiscoveryRecord>();
 
   function emitCurrentRecords() {
+    logDirectTransferDebug("Nearby discovery records updated", {
+      count: currentRecords.size,
+      sessionIds: Array.from(currentRecords.keys()).map((sessionId) => getSessionDebugId(sessionId)),
+    });
     onUpdate(
       Array.from(currentRecords.values()).sort((left, right) => right.advertisedAt.localeCompare(left.advertisedAt)),
     );
   }
 
   const zeroconf = new Zeroconf();
+  logDirectTransferDebug("Starting nearby discovery scan");
   zeroconf.on("resolved", (service: ZeroconfService) => {
     const nextRecord = mapResolvedNearbyService(service);
     if (!nextRecord) {
+      logDirectTransferDebug("Ignoring nearby service without usable transfer details", {
+        serviceName: service.name ?? null,
+        host: service.host ?? null,
+        port: service.port ?? null,
+      });
       return;
     }
 
+    const existingRecord = currentRecords.get(nextRecord.sessionId);
     currentRecords.set(nextRecord.sessionId, nextRecord);
+    logDirectTransferDebug(existingRecord ? "Updated nearby receiver record" : "Discovered nearby receiver", {
+      serviceName: nextRecord.serviceName,
+      ...getDiscoveryDebugDetails(nextRecord),
+    });
     emitCurrentRecords();
   });
   zeroconf.on("remove", (serviceName: string) => {
+    let removed = false;
     for (const [sessionId, record] of currentRecords) {
       if (record.serviceName === serviceName && record.method === "nearby") {
         currentRecords.delete(sessionId);
+        removed = true;
+        logDirectTransferDebug("Removed nearby receiver from discovery", {
+          serviceName,
+          ...getDiscoveryDebugDetails(record),
+        });
       }
+    }
+    if (!removed) {
+      logDirectTransferDebug("Received nearby removal for unknown service", {
+        serviceName,
+      });
     }
     emitCurrentRecords();
   });
   zeroconf.on("error", (error: unknown) => {
+    logDirectTransferDebug("Nearby discovery scan error", getErrorDebugDetails(error));
     onError?.(error instanceof Error ? error : new Error("Nearby scanning failed."));
   });
   zeroconf.scan(
@@ -1121,6 +1449,9 @@ export async function startNearbyScan({
   );
 
   return () => {
+    logDirectTransferDebug("Stopping nearby discovery scan", {
+      remainingRecords: currentRecords.size,
+    });
     zeroconf.stop(ZEROCONF_IMPL_TYPE);
     zeroconf.removeAllListeners?.();
     zeroconf.removeDeviceListeners();
@@ -1128,5 +1459,12 @@ export async function startNearbyScan({
 }
 
 export function parseDiscoveryQrPayload(value: string) {
-  return parseDirectDiscoveryQrPayload(value);
+  try {
+    const record = parseDirectDiscoveryQrPayload(value);
+    logDirectTransferDebug("Parsed receiver QR payload", getDiscoveryDebugDetails(record));
+    return record;
+  } catch (error) {
+    logDirectTransferDebug("Failed to parse receiver QR payload", getErrorDebugDetails(error));
+    throw error;
+  }
 }

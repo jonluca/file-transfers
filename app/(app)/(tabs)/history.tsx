@@ -1,4 +1,3 @@
-import * as Linking from "expo-linking";
 import * as Sharing from "expo-sharing";
 import { router } from "expo-router";
 import React from "react";
@@ -19,7 +18,7 @@ import {
 } from "lucide-react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { designFonts, designTheme } from "@/lib/design/theme";
-import { formatBytes, type ReceivedFileRecord, type TransferHistoryEntry } from "@/lib/file-transfer";
+import { formatBytes, openReceivedFileAsync, type ReceivedFileRecord, type TransferHistoryEntry } from "@/lib/file-transfer";
 import { useRecentTransfers } from "@/store";
 
 function FilePreviewIcon({ type }: { type: string }) {
@@ -107,7 +106,7 @@ async function handleOpenReceivedFile(file: ReceivedFileRecord | undefined) {
     return;
   }
 
-  await Linking.openURL(file.uri);
+  await openReceivedFileAsync(file);
 }
 
 async function handleShareReceivedFile(file: ReceivedFileRecord | undefined) {

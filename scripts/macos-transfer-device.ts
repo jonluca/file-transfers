@@ -1078,6 +1078,16 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
         onProgress: createProgressReporter(),
       });
 
+      updateProgress({
+        phase: "completed",
+        totalBytes: offer.totalBytes,
+        bytesTransferred: result.bytesTransferred,
+        currentFileName: null,
+        speedBytesPerSecond: 0,
+        detail: result.detail,
+        updatedAt: nowIso(),
+      });
+
       state.lastTransfer = {
         startedAt: offer.createdAt,
         completedAt: nowIso(),
@@ -1098,6 +1108,17 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
       }
     } catch (error) {
       const detail = error instanceof Error ? error.message : "The transfer could not be completed.";
+
+      updateProgress({
+        phase: "failed",
+        totalBytes: offer.totalBytes,
+        bytesTransferred: state.progress.bytesTransferred,
+        currentFileName: null,
+        speedBytesPerSecond: 0,
+        detail,
+        updatedAt: nowIso(),
+      });
+
       state.lastTransfer = {
         startedAt: offer.createdAt,
         completedAt: nowIso(),

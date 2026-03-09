@@ -1,12 +1,16 @@
 import * as DocumentPicker from "expo-document-picker";
+import * as IntentLauncher from "expo-intent-launcher";
+import * as Linking from "expo-linking";
 import { Directory, File, Paths } from "expo-file-system";
 import * as Crypto from "expo-crypto";
 import type { DocumentPickerAsset } from "expo-document-picker";
+import { Platform } from "react-native";
 import type { ReceivedFileRecord, SelectedTransferFile } from "./types";
 import { RECEIVED_FILES_DIRECTORY_NAME } from "./constants";
 
 const ALWAYS_PLACEHOLDER_FILE_BASENAMES = new Set(["unknown", "untitled"]);
 const MAYBE_PLACEHOLDER_FILE_BASENAMES = new Set(["document", "file"]);
+const ANDROID_GRANT_READ_URI_PERMISSION_FLAG = 1;
 const MIME_TYPE_EXTENSION_OVERRIDES: Record<string, string> = {
   "application/json": "json",
   "application/pdf": "pdf",
@@ -192,6 +196,22 @@ export function createReceivedFileRecord({
     sizeBytes,
     receivedAt,
   };
+}
+
+export async function openReceivedFileAsync(file: Pick<ReceivedFileRecord, "uri" | "mimeType">) {
+  if (Platform.OS !== "android") {
+    await Linking.openURL(file.uri);
+    return;
+  }
+
+  // Android viewers need a content URI plus temporary read access for app-private files.
+  const contentUri = new File(file.uri).contentUri;
+
+  await IntentLauncher.startActivityAsync("android.intent.action.VIEW", {
+    data: contentUri,
+    flags: ANDROID_GRANT_READ_URI_PERMISSION_FLAG,
+    type: file.mimeType,
+  });
 }
 
 export function formatBytes(value: number) {
