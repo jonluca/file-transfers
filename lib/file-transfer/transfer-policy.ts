@@ -1,12 +1,13 @@
 import { getTransferChunkSettings } from "@/store";
 import { FILE_TRANSFERS_PRO_NAME } from "@/lib/subscriptions";
 import {
-  DIRECT_TRANSFER_MAX_CONCURRENT_CHUNKS,
-  FREE_TRANSFER_MAX_CONCURRENT_CHUNKS,
   FREE_TRANSFER_MAX_BYTES,
   FREE_TRANSFER_MAX_SPEED_BYTES_PER_SECOND,
 } from "./constants";
 import type { SelectedTransferFile } from "./types";
+
+const DIRECT_TRANSFER_MAX_CONCURRENT_CHUNKS = 2;
+const FREE_TRANSFER_MAX_CONCURRENT_CHUNKS = 1;
 
 export const FREE_TRANSFER_MAX_SIZE_LABEL = "100 MB";
 export const FREE_TRANSFER_MAX_SPEED_LABEL = "5 MB/s";

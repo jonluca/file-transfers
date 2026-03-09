@@ -13,7 +13,6 @@ import {
 import { LOCAL_HTTP_SERVER_PORT, LOCAL_HTTP_SHARE_KEEP_AWAKE_TAG } from "./constants";
 import { createAttachmentContentDisposition } from "./content-disposition";
 import {
-  DIRECT_TOKEN_HEADER,
   createDiscoveryRecord,
   createNearbyDiscoveryResponse,
   buildDirectSessionBaseUrl,
@@ -59,7 +58,6 @@ interface DirectOfferDecision {
 
 interface RegisterDirectReceiveSessionOptions {
   sessionId: string;
-  token: string;
   deviceName: string;
   serviceName: string | null;
   canAcceptOffer?: () => boolean;
@@ -70,7 +68,6 @@ interface RegisterDirectReceiveSessionOptions {
 
 interface RegisterDirectSendSessionOptions {
   sessionId: string;
-  token: string;
   deviceName: string;
   startedAt: string;
   files: SelectedTransferFile[];
@@ -103,7 +100,6 @@ interface DirectReceiveRuntime {
 
 interface DirectSendRuntime {
   sessionId: string;
-  token: string;
   deviceName: string;
   startedAt: string;
   files: SelectedTransferFile[];
@@ -147,10 +143,6 @@ function logLocalHttpDebug(message: string, details?: Record<string, unknown>) {
 
 function getSessionDebugId(sessionId: string | null | undefined) {
   return sessionId?.slice(0, 8) ?? null;
-}
-
-function getTokenDebugSuffix(token: string | null | undefined) {
-  return token?.slice(-6) ?? null;
 }
 
 declare global {
@@ -290,17 +282,15 @@ function buildBrowserHostedFiles(sessionId: string, files: SelectedTransferFile[
 
 function buildDirectHostedFiles({
   sessionId,
-  token,
   files,
 }: {
   sessionId: string;
-  token: string;
   files: SelectedTransferFile[];
 }) {
   return files.map((file) =>
     createHostedFileRoute({
       file,
-      mountPath: `${DIRECT_STATIC_FILES_PREFIX}/${encodeURIComponent(sessionId)}/${encodeURIComponent(token)}/${encodeURIComponent(file.id)}`,
+      mountPath: `${DIRECT_STATIC_FILES_PREFIX}/${encodeURIComponent(sessionId)}/${encodeURIComponent(file.id)}`,
     }),
   );
 }
@@ -409,13 +399,6 @@ function getRequestHeader(request: HttpRequest, headerName: string) {
   }
 
   return null;
-}
-
-function ensureDirectToken(request: HttpRequest, token: string) {
-  const provided = getRequestHeader(request, DIRECT_TOKEN_HEADER);
-  if (!provided || provided !== token) {
-    throw new Error("Unauthorized direct transfer request.");
-  }
 }
 
 function withBrowserSessionUpdate(browserSession: BrowserShareRuntime, patch: Partial<LocalHttpSession>) {
@@ -934,12 +917,11 @@ export async function ensureLocalHttpServerStarted() {
   return ensureRuntime("boot", { allowMissingHost: true });
 }
 
-function toDirectPeerAccess(sessionId: string, token: string, publicHost: string): DirectPeerAccess {
+function toDirectPeerAccess(sessionId: string, publicHost: string): DirectPeerAccess {
   return {
     sessionId,
     host: publicHost,
     port: LOCAL_HTTP_SERVER_PORT,
-    token,
   };
 }
 
@@ -1011,7 +993,6 @@ async function handleDirectRequest(runtime: SharedHttpRuntime, request: HttpRequ
     path: requestPath,
     host: runtime.publicHost,
     port: LOCAL_HTTP_SERVER_PORT,
-    hasDirectToken: Boolean(getRequestHeader(request, DIRECT_TOKEN_HEADER)),
     range: getRequestHeader(request, "Range"),
   });
 
@@ -1063,9 +1044,7 @@ async function handleDirectRequest(runtime: SharedHttpRuntime, request: HttpRequ
     if (pathSegments[3] === "offers" && method === "POST" && directReceiver) {
       logLocalHttpDebug("Handling direct transfer offer request", {
         sessionId: getSessionDebugId(sessionId),
-        tokenSuffix: getTokenDebugSuffix(directReceiver.discoveryRecord.token),
       });
-      ensureDirectToken(request, directReceiver.discoveryRecord.token);
       const payload = parseJsonBody<{ offer: IncomingTransferOffer }>(request);
       const decision = await directReceiver.onOffer(payload.offer);
 
@@ -1090,17 +1069,14 @@ async function handleDirectRequest(runtime: SharedHttpRuntime, request: HttpRequ
 
     if (pathSegments[3] === "events" && method === "POST") {
       const handler = directReceiver?.onEvent ?? directSender?.onEvent;
-      const token = directReceiver?.discoveryRecord.token ?? directSender?.token;
 
-      if (!handler || !token) {
+      if (!handler) {
         throw new Error("Direct transfer session not found.");
       }
 
       logLocalHttpDebug("Handling direct transfer event request", {
         sessionId: getSessionDebugId(sessionId),
-        tokenSuffix: getTokenDebugSuffix(token),
       });
-      ensureDirectToken(request, token);
       const payload = parseJsonBody<{ event: unknown }>(request);
       await handler(payload.event);
 
@@ -1116,9 +1092,7 @@ async function handleDirectRequest(runtime: SharedHttpRuntime, request: HttpRequ
     if (pathSegments[3] === "manifest" && ["GET", "HEAD"].includes(method) && directSender) {
       logLocalHttpDebug("Handling direct manifest request", {
         sessionId: getSessionDebugId(sessionId),
-        tokenSuffix: getTokenDebugSuffix(directSender.token),
       });
-      ensureDirectToken(request, directSender.token);
       return createJsonResponse({
         statusCode: 200,
         body: createDirectManifest(runtime, directSender),
@@ -1130,10 +1104,8 @@ async function handleDirectRequest(runtime: SharedHttpRuntime, request: HttpRequ
       logLocalHttpDebug("Handling direct file request", {
         sessionId: getSessionDebugId(sessionId),
         fileId: decodeURIComponent(pathSegments[4]),
-        tokenSuffix: getTokenDebugSuffix(directSender.token),
         range: getRequestHeader(request, "Range"),
       });
-      ensureDirectToken(request, directSender.token);
       const fileId = decodeURIComponent(pathSegments[4]);
       const hostedFile = directSender.filesById.get(fileId);
       if (!hostedFile) {
@@ -1307,7 +1279,6 @@ export async function stopLocalHttpSession(sessionId: string, detail = "Browser 
 
 export async function registerDirectReceiveSession({
   sessionId,
-  token,
   deviceName,
   serviceName,
   canAcceptOffer,
@@ -1322,7 +1293,6 @@ export async function registerDirectReceiveSession({
     host: runtime.publicHost,
     port: LOCAL_HTTP_SERVER_PORT,
     serviceName,
-    tokenSuffix: getTokenDebugSuffix(token),
   });
   runtime.directReceivers.set(sessionId, {
     discoveryRecord: createDiscoveryRecord({
@@ -1331,7 +1301,6 @@ export async function registerDirectReceiveSession({
       deviceName,
       host: runtime.publicHost,
       port: LOCAL_HTTP_SERVER_PORT,
-      token,
       serviceName,
     }),
     canAcceptOffer,
@@ -1340,7 +1309,7 @@ export async function registerDirectReceiveSession({
     onInterrupted,
   });
 
-  return toDirectPeerAccess(sessionId, token, runtime.publicHost);
+  return toDirectPeerAccess(sessionId, runtime.publicHost);
 }
 
 export async function unregisterDirectReceiveSession(sessionId: string) {
@@ -1371,7 +1340,6 @@ export async function updateDirectReceiveServiceName(sessionId: string, serviceN
 
 export async function registerDirectSendSession({
   sessionId,
-  token,
   deviceName,
   startedAt,
   files,
@@ -1390,16 +1358,14 @@ export async function registerDirectSendSession({
     port: LOCAL_HTTP_SERVER_PORT,
     fileCount: files.length,
     payloadServerPort: payloadServerInfo?.port ?? null,
-    tokenSuffix: getTokenDebugSuffix(token),
   });
   runtime.directSenders.set(sessionId, {
     sessionId,
-    token,
     deviceName,
     startedAt,
     files,
     filesById: new Map(
-      buildDirectHostedFiles({ sessionId, token, files }).map((hostedFile) => [hostedFile.source.id, hostedFile]),
+      buildDirectHostedFiles({ sessionId, files }).map((hostedFile) => [hostedFile.source.id, hostedFile]),
     ),
     payloadServerPort: payloadServerInfo?.port ?? null,
     transferPolicy,
@@ -1410,7 +1376,6 @@ export async function registerDirectSendSession({
   if (payloadServerInfo?.port) {
     await registerNativePayloadSession({
       sessionId,
-      token,
       files: files.map((file) => ({
         id: file.id,
         uri: file.uri,
@@ -1429,7 +1394,7 @@ export async function registerDirectSendSession({
     throw error;
   }
 
-  return toDirectPeerAccess(sessionId, token, runtime.publicHost);
+  return toDirectPeerAccess(sessionId, runtime.publicHost);
 }
 
 export async function unregisterDirectSendSession(sessionId: string) {

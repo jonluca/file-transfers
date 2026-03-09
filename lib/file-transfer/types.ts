@@ -63,7 +63,6 @@ export interface DiscoveryRecord {
   deviceName: string;
   host: string;
   port: number;
-  token: string;
   advertisedAt: string;
   serviceName: string | null;
 }
@@ -92,7 +91,6 @@ export interface DirectPeerAccess {
   sessionId: string;
   host: string;
   port: number;
-  token: string;
 }
 
 export interface IncomingTransferOffer {

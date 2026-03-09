@@ -278,7 +278,6 @@ class DirectTransferNativeModule : Module() {
           throw IllegalStateException("The sender returned an incomplete file chunk.")
         }
       } finally {
-        activeConnections -= connection
         synchronized(progressLock) {
           requestDurationMs += elapsedMillis(requestStartedAt)
           diskWriteDurationMs += localDiskWriteDurationMs

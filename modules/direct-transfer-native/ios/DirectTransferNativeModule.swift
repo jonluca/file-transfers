@@ -735,7 +735,7 @@ public final class DirectTransferNativeModule: Module {
         let headers = try requiredStringMap(options, key: "headers")
         let totalBytes = try requiredInt64(options, key: "totalBytes")
         let chunkBytes = try requiredInt(options, key: "chunkBytes")
-        let maxConcurrentChunks = try requiredInt(options, key: "maxConcurrentChunks")
+        let requestedMaxConcurrentChunks = try requiredInt(options, key: "maxConcurrentChunks")
         let maxBytesPerSecond = optionalInt64(options["maxBytesPerSecond"])
         let progress = DownloadTaskProgress(taskId: taskId, totalBytes: totalBytes)
         let urlValue = URL(string: url)
@@ -744,7 +744,7 @@ public final class DirectTransferNativeModule: Module {
           "taskId": getSessionDebugId(taskId),
           "totalBytes": totalBytes,
           "chunkBytes": chunkBytes,
-          "maxConcurrentChunks": maxConcurrentChunks,
+          "requestedMaxConcurrentChunks": requestedMaxConcurrentChunks,
           "destinationUri": destinationUri,
           "tokenHeaderSuffix": getTokenDebugSuffix(headers["x-direct-token"] ?? ""),
           "host": urlValue?.host ?? "",
@@ -773,7 +773,6 @@ public final class DirectTransferNativeModule: Module {
             headers: headers,
             totalBytes: totalBytes,
             chunkBytes: chunkBytes,
-            maxConcurrentChunks: maxConcurrentChunks,
             maxBytesPerSecond: maxBytesPerSecond,
             progress: progress
           )
@@ -866,7 +865,6 @@ public final class DirectTransferNativeModule: Module {
     headers: [String: String],
     totalBytes: Int64,
     chunkBytes: Int,
-    maxConcurrentChunks: Int,
     maxBytesPerSecond: Int64?,
     progress: DownloadTaskProgress
   ) async throws -> [String: Any] {
@@ -881,48 +879,37 @@ public final class DirectTransferNativeModule: Module {
       "destinationPath": destinationUrl.path,
       "totalBytes": totalBytes,
       "chunkBytes": chunkBytes,
-      "maxConcurrentChunks": maxConcurrentChunks,
     ])
 
     let writer = try FileWriter(url: destinationUrl, totalBytes: totalBytes)
     do {
       let totalChunkCount = Int(ceil(Double(totalBytes) / Double(chunkBytes)))
-      let allocator = ChunkAllocator(totalChunkCount: totalChunkCount)
-
-      try await withThrowingTaskGroup(of: Void.self) { group in
-        for _ in 0..<max(maxConcurrentChunks, 1) {
-          group.addTask {
-            while let chunkIndex = await allocator.next() {
-              try Task.checkCancellation()
-              let start = Int64(chunkIndex * chunkBytes)
-              let end = min(start + Int64(chunkBytes) - 1, totalBytes - 1)
-              try await self.downloadChunk(
-                url: url,
-                headers: headers,
-                start: start,
-                end: end,
-                totalBytes: totalBytes,
-                maxBytesPerSecond: maxBytesPerSecond,
-                writer: writer,
-                progress: progress
-              )
-            }
-          }
-        }
-
-        try await group.waitForAll()
+      for chunkIndex in 0..<totalChunkCount {
+        try Task.checkCancellation()
+        let start = Int64(chunkIndex * chunkBytes)
+        let end = min(start + Int64(chunkBytes) - 1, totalBytes - 1)
+        try await self.downloadChunk(
+          url: url,
+          headers: headers,
+          start: start,
+          end: end,
+          totalBytes: totalBytes,
+          maxBytesPerSecond: maxBytesPerSecond,
+          writer: writer,
+          progress: progress
+        )
       }
 
       var result = progress.snapshot()
       result["completedAtMs"] = Date().timeIntervalSince1970 * 1000
-      try await writer.close()
+      try writer.close()
       logDirectTransferNativeDebug("Native range download task finished", details: [
         "taskId": getSessionDebugId(taskId),
         "totalChunkCount": totalChunkCount,
       ])
       return result
     } catch {
-      try? await writer.close()
+      try? writer.close()
       logDirectTransferNativeDebug("Native range download task threw", details: [
         "taskId": getSessionDebugId(taskId),
         "error": error.localizedDescription
@@ -1008,7 +995,7 @@ public final class DirectTransferNativeModule: Module {
           pendingData.reserveCapacity(ioPageBytes)
           nextOffset += UInt64(bytesToWrite.count)
 
-          let diskWriteDurationMs = try await writer.write(data: bytesToWrite, at: writeOffset)
+          let diskWriteDurationMs = try writer.write(data: bytesToWrite, at: writeOffset)
           progress.add(
             bytes: Int64(bytesToWrite.count),
             requestDurationMs: 0,

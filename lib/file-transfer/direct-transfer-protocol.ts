@@ -13,8 +13,6 @@ export interface NearbyDiscoveryResponse {
   receivers: DiscoveryRecord[];
 }
 
-export const DIRECT_TOKEN_HEADER = "x-direct-token";
-
 export function nowIso() {
   return new Date().toISOString();
 }
@@ -88,7 +86,6 @@ export function createDiscoveryRecord({
   deviceName,
   host,
   port,
-  token,
   serviceName,
   advertisedAt,
 }: {
@@ -97,7 +94,6 @@ export function createDiscoveryRecord({
   deviceName: string;
   host: string;
   port: number;
-  token: string;
   serviceName: string | null;
   advertisedAt?: string;
 }) {
@@ -107,7 +103,6 @@ export function createDiscoveryRecord({
     deviceName,
     host,
     port,
-    token,
     advertisedAt: advertisedAt ?? nowIso(),
     serviceName,
   } satisfies DiscoveryRecord;
@@ -136,7 +131,6 @@ export function createDiscoveryQrPayload(record: DiscoveryRecord) {
     sessionId: record.sessionId,
     host,
     port: record.port,
-    token: record.token,
     deviceName: record.deviceName,
     advertisedAt: record.advertisedAt,
   });
@@ -147,13 +141,12 @@ export function parseDiscoveryQrPayload(value: string) {
     sessionId?: string;
     host?: string;
     port?: number;
-    token?: string;
     deviceName?: string;
     advertisedAt?: string;
   };
 
   const host = getUsableLanHost(parsed.host);
-  if (!parsed.sessionId || !host || !parsed.port || !parsed.token || !parsed.deviceName || !parsed.advertisedAt) {
+  if (!parsed.sessionId || !host || !parsed.port || !parsed.deviceName || !parsed.advertisedAt) {
     throw new Error("That QR code does not contain a valid receiver.");
   }
 
@@ -163,7 +156,6 @@ export function parseDiscoveryQrPayload(value: string) {
     deviceName: parsed.deviceName,
     host,
     port: parsed.port,
-    token: parsed.token,
     advertisedAt: parsed.advertisedAt,
     serviceName: null,
   } satisfies DiscoveryRecord;
@@ -195,11 +187,10 @@ export function parseNearbyDiscoveryResponse(value: unknown) {
     const host = getUsableNearbyHost(receiver?.host);
     const sessionId = receiver?.sessionId;
     const deviceName = receiver?.deviceName;
-    const token = receiver?.token;
     const port = typeof receiver?.port === "number" ? receiver.port : 0;
     const advertisedAt = receiver?.advertisedAt;
 
-    if (!sessionId || !deviceName || !token || !host || port <= 0 || !advertisedAt) {
+    if (!sessionId || !deviceName || !host || port <= 0 || !advertisedAt) {
       throw new Error("That nearby discovery response is missing receiver details.");
     }
 
@@ -209,7 +200,6 @@ export function parseNearbyDiscoveryResponse(value: unknown) {
       deviceName,
       host,
       port,
-      token,
       serviceName: receiver?.serviceName ?? null,
       advertisedAt,
     });
@@ -218,12 +208,11 @@ export function parseNearbyDiscoveryResponse(value: unknown) {
 
 export function mapResolvedNearbyService(service: ResolvedNearbyService) {
   const sessionId = service.txt?.sessionId;
-  const receiverToken = service.txt?.receiverToken;
   const host =
     service.addresses?.map((address) => getUsableLanHost(address)).find((address) => Boolean(address)) ??
     getUsableNearbyHost(service.host);
 
-  if (!sessionId || !receiverToken || !host) {
+  if (!sessionId || !host) {
     return null;
   }
 
@@ -233,7 +222,6 @@ export function mapResolvedNearbyService(service: ResolvedNearbyService) {
     deviceName: service.txt?.deviceName ?? service.name ?? "Nearby device",
     host,
     port: service.port ?? 0,
-    token: receiverToken,
     serviceName: service.name ?? null,
   });
 }
