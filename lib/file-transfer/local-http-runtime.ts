@@ -4,6 +4,14 @@ import * as Network from "expo-network";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 import { HttpServer, type HttpRequest, type HttpResponse } from "react-native-nitro-http-server";
 import { LOCAL_HTTP_SERVER_PORT, LOCAL_HTTP_SHARE_KEEP_AWAKE_TAG } from "./constants";
+import {
+  DIRECT_TOKEN_HEADER,
+  buildDirectSessionBaseUrl,
+  buildDirectSessionUrl,
+  isPrivateIpv4Address,
+  normalizeIpv4Address,
+  nowIso,
+} from "./direct-transfer-protocol";
 import { formatBytes } from "./files";
 import type {
   DirectPeerAccess,
@@ -96,36 +104,8 @@ interface SharedHttpRuntime {
 }
 
 const CACHE_CONTROL_HEADER = "no-store";
-const DIRECT_TOKEN_HEADER = "x-direct-token";
 
 let activeRuntime: SharedHttpRuntime | null = null;
-
-function nowIso() {
-  return new Date().toISOString();
-}
-
-function normalizeIpv4Address(value: string | null | undefined) {
-  if (!value) {
-    return null;
-  }
-
-  const normalized =
-    value
-      .trim()
-      .replace(/^\[|\]$/g, "")
-      .replace(/^::ffff:/i, "")
-      .split("%")[0] ?? "";
-
-  return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(normalized) ? normalized : null;
-}
-
-function isPrivateIpv4Address(value: string) {
-  return (
-    /^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(value) ||
-    /^192\.168\.\d{1,3}\.\d{1,3}$/.test(value) ||
-    /^172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}$/.test(value)
-  );
-}
 
 async function getLanShareHost() {
   const ipAddress = normalizeIpv4Address(await Network.getIpAddressAsync().catch(() => null));
@@ -399,10 +379,6 @@ function createBrowserManifest(publicHost: string, browserSession: BrowserShareR
   } satisfies DownloadableTransferManifest;
 }
 
-function createDirectFilePath(sessionId: string, file: SelectedTransferFile) {
-  return `/direct/sessions/${encodeURIComponent(sessionId)}/files/${encodeURIComponent(file.id)}/${encodeURIComponent(sanitizeFileName(file.name))}`;
-}
-
 function createDirectManifest(runtime: SharedHttpRuntime, sendSession: DirectSendRuntime) {
   return {
     version: 1,
@@ -410,14 +386,25 @@ function createDirectManifest(runtime: SharedHttpRuntime, sendSession: DirectSen
     sessionId: sendSession.sessionId,
     deviceName: sendSession.deviceName,
     startedAt: sendSession.startedAt,
-    shareUrl: `http://${runtime.publicHost}:${LOCAL_HTTP_SERVER_PORT}/direct/sessions/${sendSession.sessionId}/`,
+    shareUrl: buildDirectSessionBaseUrl({
+      sessionId: sendSession.sessionId,
+      host: runtime.publicHost,
+      port: LOCAL_HTTP_SERVER_PORT,
+    }),
     totalBytes: sendSession.files.reduce((sum, file) => sum + file.sizeBytes, 0),
     files: sendSession.files.map((file) => ({
       id: file.id,
       name: file.name,
       mimeType: file.mimeType,
       sizeBytes: file.sizeBytes,
-      downloadUrl: `http://${runtime.publicHost}:${LOCAL_HTTP_SERVER_PORT}${createDirectFilePath(sendSession.sessionId, file)}`,
+      downloadUrl: buildDirectSessionUrl(
+        {
+          sessionId: sendSession.sessionId,
+          host: runtime.publicHost,
+          port: LOCAL_HTTP_SERVER_PORT,
+        },
+        `/files/${encodeURIComponent(file.id)}/${encodeURIComponent(sanitizeFileName(file.name))}`,
+      ),
     })),
   } satisfies DownloadableTransferManifest;
 }

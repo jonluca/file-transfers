@@ -17,7 +17,6 @@ import {
   X,
 } from "lucide-react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { usePremiumAccess } from "@/hooks/use-premium-access";
 import { designFonts, designTheme } from "@/lib/design/theme";
 import {
   acceptIncomingTransferOffer,
@@ -246,7 +245,6 @@ export default function TransferScreen() {
   const bottomLinkPadding = insets.bottom + 16;
   const deviceName = useDeviceName();
   const upsertRecentTransfer = useAppStore((state) => state.upsertRecentTransfer);
-  const premiumAccess = usePremiumAccess();
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [mode, setMode] = useState<TransferMode>("idle");
   const [stagedFiles, setStagedFiles] = useState<SelectedTransferFile[]>([]);
@@ -406,8 +404,6 @@ export default function TransferScreen() {
   }, [activeHttpShareSession?.id]);
 
   const totalStagedBytes = useMemo(() => stagedFiles.reduce((sum, file) => sum + file.sizeBytes, 0), [stagedFiles]);
-  const isPremiumUser = premiumAccess.isPremium;
-
   function handleSendSessionUpdate(nextSession: TransferSession) {
     setActiveSendSession({ ...nextSession });
     setTransferProgress(nextSession.progress);
@@ -602,10 +598,6 @@ export default function TransferScreen() {
 
     setActiveReceiveSession(session);
     setTransferProgress(session.progress);
-
-    if (session.previewMode && !preserveNotice) {
-      setNotice("Nearby discovery is unavailable here. QR sharing still works when local sockets are available.");
-    }
   }
 
   async function handleStartReceiving() {
@@ -632,7 +624,6 @@ export default function TransferScreen() {
         files: stagedFiles,
         target: record,
         deviceName,
-        isPremium: isPremiumUser,
         updateSession: handleSendSessionUpdate,
       });
 

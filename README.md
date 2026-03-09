@@ -53,7 +53,7 @@ See [`.env.example`](/Users/jonlucadecaro/Documents/Other/file-transfers/.env.ex
 
 ## macOS Device Emulator
 
-Use [`scripts/macos-transfer-device.ts`](/Users/jonlucadecaro/Documents/Other/file-transfers/scripts/macos-transfer-device.ts) to emulate a nearby device from macOS for transfer debugging. The script now speaks the same fixed-port HTTP discovery/control/file protocol and relay endpoints as the app, so it can act as either side of a transfer.
+Use [`scripts/macos-transfer-device.ts`](/Users/jonlucadecaro/Documents/Other/file-transfers/scripts/macos-transfer-device.ts) to emulate a nearby device from macOS for transfer debugging. The script speaks the same fixed-port HTTP discovery/control/file protocol as the app, so it can act as either side of a transfer.
 
 Start a long-running receiver service:
 
@@ -92,12 +92,6 @@ Targeting options for `send`:
 - `--target-session-id <id>` discovers by receiver session ID
 - `--target-file <path>` reads discovery JSON or a receiver state file written by `receive`
 - `--target-qr <json>` accepts the raw discovery payload directly
-
-Transport options for both `send` and `receive`:
-
-- `--transport auto` tries direct WiFi first, then falls back to relay
-- `--transport direct` disables relay provisioning/fallback
-- `--transport relay` forces the local HTTP path to fail fast so relay is exercised immediately after acceptance
 
 Generate a launchd plist for a background receiver service:
 

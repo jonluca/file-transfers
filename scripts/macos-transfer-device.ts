@@ -2,27 +2,35 @@ import "dotenv/config";
 import { spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { networkInterfaces } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import {
+  DIRECT_TOKEN_HEADER,
+  buildDirectSessionBaseUrl,
+  buildDirectSessionUrl,
+  createDiscoveryQrPayload,
+  createDiscoveryRecord,
+  createServiceName,
+  getUsableLanHost,
+  mapResolvedNearbyService,
+  nowIso,
+  parseDiscoveryQrPayload,
+  resolveDiscoveryHost,
+} from "../lib/file-transfer/direct-transfer-protocol";
 import type {
   DirectPeerAccess,
   DiscoveryRecord,
   DownloadableTransferManifest,
   IncomingTransferOffer,
-  RelayAccess,
-  RelayCredentials,
   SelectedTransferFile,
-  SenderTransferAccess,
   TransferManifest,
   TransferManifestFile,
   TransferProgress,
 } from "../lib/file-transfer/types";
-
-type TransportMode = "auto" | "direct" | "relay";
 
 type ReceiverToSenderEvent =
   | {
@@ -42,10 +50,6 @@ type ReceiverToSenderEvent =
       detail: string | null;
     }
   | {
-      kind: "direct-http-failed";
-      message: string;
-    }
-  | {
       kind: "failed";
       message: string;
     }
@@ -56,14 +60,6 @@ type ReceiverToSenderEvent =
 
 type SenderToReceiverEvent =
   | {
-      kind: "relay-ready";
-      relay: RelayAccess;
-    }
-  | {
-      kind: "relay-failed";
-      message: string;
-    }
-  | {
       kind: "failed";
       message: string;
     }
@@ -72,38 +68,18 @@ type SenderToReceiverEvent =
       message: string;
     };
 
-interface RelaySessionState {
-  id: string;
-  receiverDeviceName: string | null;
-  status: "waiting_receiver" | "accepted" | "uploading" | "ready" | "rejected" | "completed" | "expired";
-  fileCount: number;
-  totalBytes: number;
-  files: Array<{
-    id: string;
-    name: string;
-    mimeType: string;
-    sizeBytes: number;
-    uploaded: boolean;
-  }>;
-  expiresAt: string;
-}
-
 interface ReceiveCommandOptions {
-  apiUrl: string;
   deviceName: string;
   outputDir: string;
   stateFile: string | null;
   acceptDelayMs: number;
-  transport: TransportMode;
   nearby: boolean;
   once: boolean;
   verbose: boolean;
 }
 
 interface SendCommandOptions {
-  apiUrl: string;
   deviceName: string;
-  transport: TransportMode;
   filePaths: string[];
   targetQr: string | null;
   targetFile: string | null;
@@ -115,31 +91,29 @@ interface SendCommandOptions {
 }
 
 interface LaunchAgentOptions {
-  apiUrl: string;
   deviceName: string;
   outputDir: string;
   stateFile: string | null;
   acceptDelayMs: number;
-  transport: TransportMode;
   nearby: boolean;
   label: string;
 }
 
-interface Deferred<T> {
-  promise: Promise<T>;
-  resolve(value: T): void;
-  reject(error: unknown): void;
+interface ReceivedFileOutput {
+  id: string;
+  name: string;
+  mimeType: string;
+  sizeBytes: number;
+  outputPath: string;
 }
 
 interface ReceiveServiceState {
   mode: "receive";
   deviceName: string;
-  transport: TransportMode;
-  apiUrl: string;
   outputDir: string;
   startedAt: string;
   discoveryRecord: DiscoveryRecord;
-  qrPayload: string;
+  qrPayload: string | null;
   nearbyAdvertising: boolean;
   currentStatus: "discoverable" | "waiting" | "connecting" | "transferring";
   currentOffer: IncomingTransferOffer | null;
@@ -151,49 +125,30 @@ interface ReceiveServiceState {
     detail: string;
     bytesTransferred: number;
     fileCount: number;
-    files: Array<{
-      id: string;
-      name: string;
-      mimeType: string;
-      sizeBytes: number;
-      outputPath: string;
-    }>;
+    files: ReceivedFileOutput[];
   };
 }
 
 interface SendState {
   mode: "send";
   deviceName: string;
-  transport: TransportMode;
   target: DiscoveryRecord;
   startedAt: string;
   progress: TransferProgress;
-  relay: RelayAccess | null;
 }
 
-interface ReceivedFileOutput {
-  id: string;
-  name: string;
-  mimeType: string;
-  sizeBytes: number;
-  outputPath: string;
-}
-
-interface DirectOfferResponse {
-  accepted: boolean;
-  message?: string;
-  statusCode?: number;
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve(value: T): void;
+  reject(error: unknown): void;
 }
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const LOCAL_TRANSFER_SERVICE_TYPE = "_filetransfer._tcp";
 const LOCAL_TRANSFER_SERVICE_DOMAIN = "local.";
 const LOCAL_HTTP_SERVER_PORT = 41000;
-const RELAY_POLL_INTERVAL_MS = 1500;
-const REQUEST_TIMEOUT_MS = 8000;
-const DEFAULT_API_URL = "http://127.0.0.1:3001";
 const DEFAULT_DISCOVER_TIMEOUT_MS = 5000;
-const DIRECT_TOKEN_HEADER = "x-direct-token";
+const REQUEST_TIMEOUT_MS = 8000;
 const MIME_TYPES: Record<string, string> = {
   ".aac": "audio/aac",
   ".csv": "text/csv",
@@ -215,6 +170,22 @@ const MIME_TYPES: Record<string, string> = {
   ".zip": "application/zip",
 };
 
+function randomToken() {
+  return randomBytes(16).toString("hex");
+}
+
+function sleep(milliseconds: number) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function safeName(value: string) {
+  return value.replace(/[^\w.\-() ]+/g, "_");
+}
+
+function logLine(message: string) {
+  console.log(`[${new Date().toLocaleTimeString()}] ${message}`);
+}
+
 function createDeferred<T>(): Deferred<T> {
   let deferredResolve!: (value: T) => void;
   let deferredReject!: (error: unknown) => void;
@@ -228,94 +199,6 @@ function createDeferred<T>(): Deferred<T> {
     resolve: deferredResolve,
     reject: deferredReject,
   };
-}
-
-function nowIso() {
-  return new Date().toISOString();
-}
-
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, "");
-}
-
-function randomToken() {
-  return randomBytes(16).toString("hex");
-}
-
-function safeName(value: string) {
-  return value.replace(/[^\w.\-() ]+/g, "_");
-}
-
-function logLine(message: string) {
-  console.log(`[${new Date().toLocaleTimeString()}] ${message}`);
-}
-
-function normalizeIpv4Address(value: string | null | undefined) {
-  if (!value) {
-    return null;
-  }
-
-  const normalized =
-    value
-      .trim()
-      .replace(/^\[|\]$/g, "")
-      .replace(/^::ffff:/i, "")
-      .split("%")[0] ?? "";
-
-  return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(normalized) ? normalized : null;
-}
-
-function isPrivateIpv4Address(value: string) {
-  return (
-    /^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(value) ||
-    /^192\.168\.\d{1,3}\.\d{1,3}$/.test(value) ||
-    /^172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}$/.test(value)
-  );
-}
-
-function getPreferredLanAddress() {
-  const interfaces = networkInterfaces();
-  const preferred = ["en0", "bridge0", "en1", "en2"];
-
-  for (const name of preferred) {
-    const candidates = interfaces[name];
-    const address = candidates?.find(
-      (candidate) =>
-        candidate.family === "IPv4" &&
-        !candidate.internal &&
-        !candidate.address.startsWith("169.254.") &&
-        candidate.netmask !== "255.255.255.255",
-    );
-
-    if (address) {
-      return address.address;
-    }
-  }
-
-  for (const candidates of Object.values(interfaces)) {
-    const address = candidates?.find(
-      (candidate) =>
-        candidate.family === "IPv4" &&
-        !candidate.internal &&
-        !candidate.address.startsWith("169.254.") &&
-        candidate.netmask !== "255.255.255.255",
-    );
-
-    if (address) {
-      return address.address;
-    }
-  }
-
-  return "127.0.0.1";
-}
-
-function getUsableLanHost(value: string | null | undefined) {
-  const normalized = normalizeIpv4Address(value);
-  if (!normalized) {
-    return null;
-  }
-
-  return isPrivateIpv4Address(normalized) ? normalized : null;
 }
 
 function createProgress(totalBytes: number, phase: TransferProgress["phase"], detail: string | null): TransferProgress {
@@ -343,12 +226,10 @@ function createTransferManifest({
   files,
   deviceName,
   sessionId,
-  isPremium,
 }: {
   files: SelectedTransferFile[];
   deviceName: string;
   sessionId: string;
-  isPremium: boolean;
 }): TransferManifest {
   const manifestFiles = files.map(toTransferManifestFile);
   const totalBytes = manifestFiles.reduce((sum, file) => sum + file.sizeBytes, 0);
@@ -359,206 +240,104 @@ function createTransferManifest({
     files: manifestFiles,
     fileCount: manifestFiles.length,
     totalBytes,
-    isPremiumSender: isPremium,
     createdAt: nowIso(),
-  };
-}
-
-function toRelayAccess(relay: RelayCredentials | null): RelayAccess | null {
-  if (!relay) {
-    return null;
-  }
-
-  return {
-    sessionId: relay.sessionId,
-    receiverToken: relay.receiverToken,
-    expiresAt: relay.expiresAt,
-  };
-}
-
-function createSenderTransferAccess({
-  manifest,
-  direct,
-  relay,
-}: {
-  manifest: TransferManifest;
-  direct: DirectPeerAccess;
-  relay: RelayCredentials | null;
-}): SenderTransferAccess {
-  return {
-    sessionId: manifest.sessionId,
-    direct,
-    relay: toRelayAccess(relay),
   };
 }
 
 function createIncomingTransferOffer({
   manifest,
   direct,
-  relay,
 }: {
   manifest: TransferManifest;
   direct: DirectPeerAccess;
-  relay: RelayCredentials | null;
 }): IncomingTransferOffer {
   return {
     id: manifest.sessionId,
     senderDeviceName: manifest.deviceName,
     fileCount: manifest.fileCount,
     totalBytes: manifest.totalBytes,
-    sender: createSenderTransferAccess({
-      manifest,
-      direct,
-      relay,
-    }),
+    sender: direct,
     createdAt: manifest.createdAt,
   };
 }
 
-function createDiscoveryRecord({
-  sessionId,
-  method,
-  deviceName,
-  host,
-  port,
-  token,
-  serviceName,
-}: {
-  sessionId: string;
-  method: DiscoveryRecord["method"];
-  deviceName: string;
-  host: string;
-  port: number;
-  token: string;
-  serviceName: string | null;
-}): DiscoveryRecord {
-  return {
-    sessionId,
-    method,
-    deviceName,
-    host,
-    port,
-    token,
-    advertisedAt: nowIso(),
-    serviceName,
-  };
+async function ensureDirectory(directoryPath: string) {
+  await mkdir(directoryPath, { recursive: true });
 }
 
-function buildQrPayload(record: DiscoveryRecord) {
-  return JSON.stringify({
-    version: 1,
-    sessionId: record.sessionId,
-    host: record.host,
-    port: record.port,
-    token: record.token,
-    deviceName: record.deviceName,
-    advertisedAt: record.advertisedAt,
-  });
+function createOutputPath(outputDir: string, fileName: string) {
+  return path.join(outputDir, `${Date.now()}-${safeName(fileName)}`);
 }
 
-function createServiceName(deviceName: string, sessionId: string) {
-  return `${deviceName.trim().slice(0, 24)}-${sessionId.slice(0, 6)}`;
-}
-
-function createOutputPath(directory: string, fileName: string) {
-  return path.join(directory, `${Date.now()}-${safeName(fileName)}`);
-}
-
-function inferMimeType(filePath: string) {
-  return MIME_TYPES[path.extname(filePath).toLowerCase()] ?? "application/octet-stream";
-}
-
-async function ensureDirectory(directory: string) {
-  await mkdir(directory, { recursive: true });
-}
-
-async function writeStateFile(stateFile: string | null, snapshot: unknown) {
-  if (!stateFile) {
+async function writeStateFile(filePath: string | null, payload: unknown) {
+  if (!filePath) {
     return;
   }
 
-  await ensureDirectory(path.dirname(stateFile));
-  await writeFile(stateFile, `${JSON.stringify(snapshot, null, 2)}\n`, "utf8");
+  await ensureDirectory(path.dirname(filePath));
+  await writeFile(filePath, JSON.stringify(payload, null, 2), "utf8");
 }
 
-async function buildSelectedFiles(filePaths: string[]) {
-  const files: SelectedTransferFile[] = [];
+function getPreferredLanAddress() {
+  const interfaces = networkInterfaces();
 
-  for (const inputPath of filePaths) {
-    const absolutePath = path.resolve(process.cwd(), inputPath);
-    const metadata = await stat(absolutePath);
-    if (!metadata.isFile()) {
-      throw new Error(`${absolutePath} is not a file.`);
+  for (const group of Object.values(interfaces)) {
+    for (const address of group ?? []) {
+      if (address.family !== "IPv4" || address.internal) {
+        continue;
+      }
+
+      const host = getUsableLanHost(address.address);
+      if (host) {
+        return host;
+      }
     }
-
-    files.push({
-      id: randomUUID(),
-      name: path.basename(absolutePath),
-      uri: absolutePath,
-      mimeType: inferMimeType(absolutePath),
-      sizeBytes: metadata.size,
-    });
   }
 
-  return files;
+  return null;
 }
 
-function sleep(milliseconds: number) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+function getHeader(request: IncomingMessage, name: string) {
+  const value = request.headers[name.toLowerCase()];
+  return Array.isArray(value) ? value[0] ?? null : value ?? null;
 }
 
-function getHeader(request: IncomingMessage, headerName: string) {
-  const value = request.headers[headerName.toLowerCase()];
-  if (Array.isArray(value)) {
-    return value[0] ?? null;
-  }
-
-  return value ?? null;
-}
-
-function buildDirectSessionUrl(peer: Pick<DirectPeerAccess, "host" | "port" | "sessionId">, suffix: string) {
-  return `http://${peer.host}:${peer.port}/direct/sessions/${encodeURIComponent(peer.sessionId)}${suffix}`;
-}
-
-function buildDirectSessionBaseUrl(peer: Pick<DirectPeerAccess, "host" | "port" | "sessionId">) {
-  return `http://${peer.host}:${peer.port}/direct/sessions/${encodeURIComponent(peer.sessionId)}/`;
-}
-
-async function readJsonBody<T>(request: IncomingMessage) {
+async function readRequestBody(request: IncomingMessage) {
   const chunks: Buffer[] = [];
   for await (const chunk of request) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
 
-  const body = Buffer.concat(chunks).toString("utf8");
-  if (!body.trim()) {
+  return Buffer.concat(chunks);
+}
+
+async function readJsonBody<T>(request: IncomingMessage) {
+  const payload = await readRequestBody(request);
+  if (payload.byteLength === 0) {
     throw new Error("Missing JSON request body.");
   }
 
-  return JSON.parse(body) as T;
+  return JSON.parse(payload.toString("utf8")) as T;
 }
 
-function sendJson(response: ServerResponse, statusCode: number, body: unknown) {
+function sendText(response: ServerResponse, statusCode: number, body: string, headers?: Record<string, string>) {
+  const payload = Buffer.from(body, "utf8");
+  response.writeHead(statusCode, {
+    "cache-control": "no-store",
+    "content-type": "text/plain; charset=utf-8",
+    "content-length": String(payload.byteLength),
+    ...headers,
+  });
+  response.end(payload);
+}
+
+function sendJson(response: ServerResponse, statusCode: number, body: unknown, headers?: Record<string, string>) {
   const payload = Buffer.from(JSON.stringify(body), "utf8");
   response.writeHead(statusCode, {
     "cache-control": "no-store",
     "content-type": "application/json; charset=utf-8",
     "content-length": String(payload.byteLength),
-  });
-  response.end(payload);
-}
-
-function sendText(
-  response: ServerResponse,
-  statusCode: number,
-  body: string,
-  contentType = "text/plain; charset=utf-8",
-) {
-  const payload = Buffer.from(body, "utf8");
-  response.writeHead(statusCode, {
-    "cache-control": "no-store",
-    "content-type": contentType,
-    "content-length": String(payload.byteLength),
+    ...headers,
   });
   response.end(payload);
 }
@@ -596,6 +375,36 @@ async function sendFile(response: ServerResponse, file: SelectedTransferFile, me
   }
 
   createReadStream(file.uri).pipe(response);
+}
+
+function inferMimeType(filePath: string) {
+  return MIME_TYPES[path.extname(filePath).toLowerCase()] ?? "application/octet-stream";
+}
+
+async function buildSelectedFiles(filePaths: string[]) {
+  if (filePaths.length === 0) {
+    throw new Error("Specify at least one file with --file.");
+  }
+
+  const selectedFiles: SelectedTransferFile[] = [];
+
+  for (const filePath of filePaths) {
+    const resolvedPath = path.resolve(filePath);
+    const metadata = await stat(resolvedPath).catch(() => null);
+    if (!metadata?.isFile()) {
+      throw new Error(`File not found: ${resolvedPath}`);
+    }
+
+    selectedFiles.push({
+      id: randomUUID(),
+      name: path.basename(resolvedPath),
+      uri: resolvedPath,
+      mimeType: inferMimeType(resolvedPath),
+      sizeBytes: metadata.size,
+    });
+  }
+
+  return selectedFiles;
 }
 
 function matchTarget(record: DiscoveryRecord, name: string | null, sessionId: string | null) {
@@ -665,16 +474,14 @@ async function resolveBonjourService(instanceName: string, timeoutMs: number) {
           continue;
         }
 
-        finish({
-          sessionId: txt.sessionId,
-          method: "nearby",
-          deviceName: txt.deviceName ?? instanceName,
-          host,
-          port,
-          token: txt.receiverToken,
-          advertisedAt: nowIso(),
-          serviceName: instanceName,
-        });
+        finish(
+          mapResolvedNearbyService({
+            name: instanceName,
+            host,
+            port,
+            txt,
+          }),
+        );
         return;
       }
     });
@@ -754,6 +561,12 @@ async function discoverNearbyReceivers(timeoutMs: number) {
 }
 
 function parseDiscoveryInput(raw: string): DiscoveryRecord {
+  try {
+    return parseDiscoveryQrPayload(raw);
+  } catch {
+    // Fall through to broader JSON parsing.
+  }
+
   const parsed = JSON.parse(raw) as
     | DiscoveryRecord
     | {
@@ -765,10 +578,14 @@ function parseDiscoveryInput(raw: string): DiscoveryRecord {
         deviceName?: string;
         advertisedAt?: string;
         serviceName?: string | null;
+        method?: string;
       };
 
   if ("discoveryRecord" in parsed && parsed.discoveryRecord) {
-    return parsed.discoveryRecord;
+    return {
+      ...parsed.discoveryRecord,
+      method: parsed.discoveryRecord.method === "nearby" ? "nearby" : "qr",
+    };
   }
 
   if (!parsed.sessionId || !parsed.host || typeof parsed.port !== "number" || !parsed.token || !parsed.deviceName) {
@@ -777,486 +594,37 @@ function parseDiscoveryInput(raw: string): DiscoveryRecord {
 
   return {
     sessionId: parsed.sessionId,
-    method: "method" in parsed && parsed.method ? parsed.method : "qr",
+    method: parsed.method === "nearby" ? "nearby" : "qr",
     deviceName: parsed.deviceName,
     host: parsed.host,
     port: parsed.port,
     token: parsed.token,
     advertisedAt: parsed.advertisedAt ?? nowIso(),
     serviceName: parsed.serviceName ?? null,
-  } satisfies DiscoveryRecord;
+  };
 }
 
-async function resolveTargetRecord(
-  options: Pick<SendCommandOptions, "targetQr" | "targetFile" | "targetName" | "targetSessionId" | "discoverTimeoutMs">,
-) {
+async function resolveTargetRecord(options: SendCommandOptions) {
   if (options.targetQr) {
-    return parseDiscoveryInput(options.targetQr);
+    return parseDiscoveryQrPayload(options.targetQr);
   }
 
   if (options.targetFile) {
-    return parseDiscoveryInput(await readFile(path.resolve(process.cwd(), options.targetFile), "utf8"));
+    return parseDiscoveryInput(await readFile(options.targetFile, "utf8"));
   }
 
-  const discovered = await discoverNearbyReceivers(options.discoverTimeoutMs);
-  const matches = discovered.filter((record) => matchTarget(record, options.targetName, options.targetSessionId));
+  const records = await discoverNearbyReceivers(options.discoverTimeoutMs);
+  const matched = records.filter((record) => matchTarget(record, options.targetName, options.targetSessionId));
 
-  if (matches.length === 1) {
-    return matches[0];
-  }
-
-  if (!matches.length) {
+  if (matched.length === 0) {
     throw new Error("No nearby receiver matched the requested target.");
   }
 
-  throw new Error(
-    `Multiple nearby receivers matched: ${matches.map((record) => `${record.deviceName} (${record.sessionId})`).join(", ")}`,
-  );
-}
-
-function relayUrl(apiUrl: string, route: string) {
-  return `${trimTrailingSlash(apiUrl)}${route}`;
-}
-
-async function parseRelayResponse<T>(response: Response) {
-  if (!response.ok) {
-    const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(payload?.error ?? `Relay request failed with status ${response.status}.`);
+  if (matched.length > 1 && !options.targetName && !options.targetSessionId) {
+    throw new Error("Multiple nearby receivers were found. Re-run with --target-name or --target-session-id.");
   }
 
-  return (await response.json()) as T;
-}
-
-async function createRelayTransferSession(apiUrl: string, senderDeviceName: string, files: SelectedTransferFile[]) {
-  const response = await fetch(relayUrl(apiUrl, "/relay/sessions"), {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      senderDeviceName,
-      files: files.map((file) => ({
-        id: file.id,
-        name: file.name,
-        mimeType: file.mimeType,
-        sizeBytes: file.sizeBytes,
-      })),
-    }),
-  });
-
-  const payload = await parseRelayResponse<{
-    session: RelaySessionState;
-    senderToken: string;
-    receiverToken: string;
-  }>(response);
-
-  return {
-    sessionId: payload.session.id,
-    senderToken: payload.senderToken,
-    receiverToken: payload.receiverToken,
-    expiresAt: payload.session.expiresAt,
-  } satisfies RelayCredentials;
-}
-
-async function getRelaySenderState(apiUrl: string, relay: RelayCredentials) {
-  const response = await fetch(relayUrl(apiUrl, `/relay/sessions/${relay.sessionId}/sender`), {
-    headers: {
-      "x-relay-token": relay.senderToken,
-    },
-  });
-
-  return parseRelayResponse<RelaySessionState>(response);
-}
-
-async function getRelayReceiverState(apiUrl: string, relay: RelayAccess) {
-  const response = await fetch(relayUrl(apiUrl, `/relay/sessions/${relay.sessionId}/receiver`), {
-    headers: {
-      "x-relay-token": relay.receiverToken,
-    },
-  });
-
-  return parseRelayResponse<RelaySessionState>(response);
-}
-
-async function acceptRelayTransferSession(apiUrl: string, relay: RelayAccess, receiverDeviceName: string) {
-  const response = await fetch(relayUrl(apiUrl, `/relay/sessions/${relay.sessionId}/accept`), {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-relay-token": relay.receiverToken,
-    },
-    body: JSON.stringify({
-      receiverDeviceName,
-    }),
-  });
-
-  return parseRelayResponse<RelaySessionState>(response);
-}
-
-async function declineRelayTransferSession(apiUrl: string, relay: RelayAccess) {
-  const response = await fetch(relayUrl(apiUrl, `/relay/sessions/${relay.sessionId}/decline`), {
-    method: "POST",
-    headers: {
-      "x-relay-token": relay.receiverToken,
-    },
-  });
-
-  return parseRelayResponse<RelaySessionState>(response);
-}
-
-async function completeRelayTransferSession(apiUrl: string, relay: RelayAccess) {
-  const response = await fetch(relayUrl(apiUrl, `/relay/sessions/${relay.sessionId}/complete`), {
-    method: "POST",
-    headers: {
-      "x-relay-token": relay.receiverToken,
-    },
-  });
-
-  return parseRelayResponse<RelaySessionState>(response);
-}
-
-async function deleteRelayTransferSession(apiUrl: string, relay: RelayCredentials) {
-  const response = await fetch(relayUrl(apiUrl, `/relay/sessions/${relay.sessionId}`), {
-    method: "DELETE",
-    headers: {
-      "x-relay-token": relay.senderToken,
-    },
-  });
-
-  if (response.status === 204) {
-    return;
-  }
-
-  await parseRelayResponse<RelaySessionState>(response);
-}
-
-async function uploadRelayTransferFile(apiUrl: string, relay: RelayCredentials, file: SelectedTransferFile) {
-  const payload = await readFile(file.uri);
-  const response = await fetch(relayUrl(apiUrl, `/relay/sessions/${relay.sessionId}/files/${file.id}`), {
-    method: "PUT",
-    headers: {
-      "content-type": file.mimeType,
-      "content-length": String(file.sizeBytes),
-      "x-relay-token": relay.senderToken,
-    },
-    body: payload,
-  });
-
-  return parseRelayResponse<RelaySessionState>(response);
-}
-
-async function fetchRelayTransferFile(apiUrl: string, relay: RelayAccess, fileId: string) {
-  const response = await fetch(relayUrl(apiUrl, `/relay/sessions/${relay.sessionId}/files/${fileId}`), {
-    headers: {
-      "x-relay-token": relay.receiverToken,
-    },
-  });
-
-  if (!response.ok) {
-    const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(payload?.error ?? `Relay download failed with status ${response.status}.`);
-  }
-
-  return response;
-}
-
-async function postJsonWithTimeout({ url, token, body }: { url: string; token: string; body: unknown }) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => {
-    controller.abort();
-  }, REQUEST_TIMEOUT_MS);
-
-  try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        [DIRECT_TOKEN_HEADER]: token,
-      },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-
-    if (!response.ok) {
-      const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-      throw new Error(payload?.error ?? `Direct transfer request failed with status ${response.status}.`);
-    }
-  } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new Error("Nearby device did not respond in time.", {
-        cause: error,
-      });
-    }
-
-    throw error;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function postDirectEvent(peer: DirectPeerAccess, event: ReceiverToSenderEvent | SenderToReceiverEvent) {
-  await postJsonWithTimeout({
-    url: buildDirectSessionUrl(peer, "/events"),
-    token: peer.token,
-    body: {
-      event,
-    },
-  });
-}
-
-async function postIncomingOffer(peer: DiscoveryRecord, offer: IncomingTransferOffer) {
-  await postJsonWithTimeout({
-    url: buildDirectSessionUrl(peer, "/offers"),
-    token: peer.token,
-    body: {
-      offer,
-    },
-  });
-}
-
-async function fetchDownloadableManifest({ peer, offer }: { peer: DirectPeerAccess; offer: IncomingTransferOffer }) {
-  const response = await fetch(buildDirectSessionUrl(peer, "/manifest"), {
-    headers: {
-      [DIRECT_TOKEN_HEADER]: peer.token,
-    },
-  });
-
-  if (!response.ok) {
-    throw new Error(`Unable to load the sender manifest (${response.status}).`);
-  }
-
-  const payload = (await response.json()) as DownloadableTransferManifest;
-  if (payload.kind !== "direct-http-transfer") {
-    throw new Error("The sender did not provide a valid direct-transfer manifest.");
-  }
-
-  if (payload.sessionId !== offer.id) {
-    throw new Error("The sender provided a manifest for a different transfer.");
-  }
-
-  return payload;
-}
-
-async function streamResponseToFile({
-  response,
-  destination,
-  onBytes,
-}: {
-  response: Response;
-  destination: string;
-  onBytes: (value: number) => void;
-}) {
-  const stream = createWriteStream(destination);
-
-  try {
-    if (!response.body) {
-      const payload = Buffer.from(await response.arrayBuffer());
-      stream.write(payload);
-      onBytes(payload.byteLength);
-      return;
-    }
-
-    const reader = response.body.getReader();
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
-        break;
-      }
-
-      if (!value?.byteLength) {
-        continue;
-      }
-
-      stream.write(Buffer.from(value));
-      onBytes(value.byteLength);
-    }
-  } finally {
-    stream.end();
-  }
-}
-
-async function receiveDirectHttpTransfer({
-  offer,
-  outputDir,
-  onProgress,
-}: {
-  offer: IncomingTransferOffer;
-  outputDir: string;
-  onProgress?: (progress: TransferProgress) => void;
-}) {
-  await ensureDirectory(outputDir);
-  const manifest = await fetchDownloadableManifest({
-    peer: offer.sender.direct,
-    offer,
-  });
-
-  const receivedFiles: ReceivedFileOutput[] = [];
-  let bytesTransferred = 0;
-
-  for (const file of manifest.files) {
-    const outputPath = createOutputPath(outputDir, file.name);
-    const startedAt = Date.now();
-    let fileBytesTransferred = 0;
-
-    onProgress?.({
-      phase: "transferring",
-      totalBytes: offer.totalBytes,
-      bytesTransferred,
-      currentFileName: file.name,
-      speedBytesPerSecond: 0,
-      detail: "Downloading files over local WiFi.",
-      updatedAt: nowIso(),
-    });
-
-    const response = await fetch(file.downloadUrl, {
-      headers: {
-        [DIRECT_TOKEN_HEADER]: offer.sender.direct.token,
-      },
-    });
-
-    if (!response.ok) {
-      throw new Error(`Unable to download "${file.name}" (${response.status}).`);
-    }
-
-    await streamResponseToFile({
-      response,
-      destination: outputPath,
-      onBytes: (chunkBytes) => {
-        fileBytesTransferred += chunkBytes;
-        bytesTransferred += chunkBytes;
-        const elapsedMilliseconds = Math.max(Date.now() - startedAt, 1);
-        const speedBytesPerSecond = Math.round((fileBytesTransferred / elapsedMilliseconds) * 1000);
-
-        onProgress?.({
-          phase: "transferring",
-          totalBytes: offer.totalBytes,
-          bytesTransferred,
-          currentFileName: file.name,
-          speedBytesPerSecond,
-          detail: "Downloading files over local WiFi.",
-          updatedAt: nowIso(),
-        });
-      },
-    });
-
-    receivedFiles.push({
-      id: file.id,
-      name: file.name,
-      mimeType: file.mimeType,
-      sizeBytes: file.sizeBytes,
-      outputPath,
-    });
-  }
-
-  return {
-    receivedFiles,
-    bytesTransferred,
-    detail: "Transfer complete.",
-  };
-}
-
-async function receiveRelayTransfer({
-  apiUrl,
-  offer,
-  deviceName,
-  outputDir,
-  onProgress,
-}: {
-  apiUrl: string;
-  offer: IncomingTransferOffer;
-  deviceName: string;
-  outputDir: string;
-  onProgress?: (progress: TransferProgress) => void;
-}) {
-  if (!offer.sender.relay) {
-    throw new Error("Relay access is not available for this transfer.");
-  }
-
-  await ensureDirectory(outputDir);
-  await acceptRelayTransferSession(apiUrl, offer.sender.relay, deviceName);
-
-  let state = await getRelayReceiverState(apiUrl, offer.sender.relay);
-
-  while (!["ready", "completed"].includes(state.status)) {
-    if (state.status === "rejected") {
-      throw new Error("Transfer declined.");
-    }
-
-    if (state.status === "expired") {
-      throw new Error("This relay transfer expired before it could start.");
-    }
-
-    onProgress?.({
-      phase: "connecting",
-      totalBytes: offer.totalBytes,
-      bytesTransferred: 0,
-      currentFileName: null,
-      speedBytesPerSecond: 0,
-      detail:
-        state.status === "accepted" ? "Waiting for the sender to prepare relay transfer." : "Connecting through relay.",
-      updatedAt: nowIso(),
-    });
-
-    await sleep(RELAY_POLL_INTERVAL_MS);
-    state = await getRelayReceiverState(apiUrl, offer.sender.relay);
-  }
-
-  const receivedFiles: ReceivedFileOutput[] = [];
-  let bytesTransferred = 0;
-
-  for (const file of state.files) {
-    const outputPath = createOutputPath(outputDir, file.name);
-    const startedAt = Date.now();
-    let fileBytesTransferred = 0;
-
-    onProgress?.({
-      phase: "transferring",
-      totalBytes: offer.totalBytes,
-      bytesTransferred,
-      currentFileName: file.name,
-      speedBytesPerSecond: 0,
-      detail: "Downloading files through relay.",
-      updatedAt: nowIso(),
-    });
-
-    const response = await fetchRelayTransferFile(apiUrl, offer.sender.relay, file.id);
-    await streamResponseToFile({
-      response,
-      destination: outputPath,
-      onBytes: (chunkBytes) => {
-        fileBytesTransferred += chunkBytes;
-        bytesTransferred += chunkBytes;
-        const elapsedMilliseconds = Math.max(Date.now() - startedAt, 1);
-        const speedBytesPerSecond = Math.round((fileBytesTransferred / elapsedMilliseconds) * 1000);
-
-        onProgress?.({
-          phase: "transferring",
-          totalBytes: offer.totalBytes,
-          bytesTransferred,
-          currentFileName: file.name,
-          speedBytesPerSecond,
-          detail: "Downloading files through relay.",
-          updatedAt: nowIso(),
-        });
-      },
-    });
-
-    receivedFiles.push({
-      id: file.id,
-      name: file.name,
-      mimeType: file.mimeType,
-      sizeBytes: file.sizeBytes,
-      outputPath,
-    });
-  }
-
-  await completeRelayTransferSession(apiUrl, offer.sender.relay).catch(() => {});
-
-  return {
-    receivedFiles,
-    bytesTransferred,
-    detail: "Transfer complete through relay.",
-  };
+  return matched[0]!;
 }
 
 async function startNearbyAdvertisement({
@@ -1327,10 +695,246 @@ async function closeServer(server: Server) {
   });
 }
 
+async function postJsonWithTimeout({ url, token, body }: { url: string; token: string; body: unknown }) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => {
+    controller.abort();
+  }, REQUEST_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        [DIRECT_TOKEN_HEADER]: token,
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+      throw new Error(payload?.error ?? `Direct transfer request failed with status ${response.status}.`);
+    }
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error("Nearby device did not respond in time.", {
+        cause: error,
+      });
+    }
+
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function postDirectEvent(peer: DirectPeerAccess, event: ReceiverToSenderEvent | SenderToReceiverEvent) {
+  await postJsonWithTimeout({
+    url: buildDirectSessionUrl(peer, "/events"),
+    token: peer.token,
+    body: {
+      event,
+    },
+  });
+}
+
+async function postIncomingOffer(peer: DiscoveryRecord, offer: IncomingTransferOffer) {
+  await postJsonWithTimeout({
+    url: buildDirectSessionUrl(peer, "/offers"),
+    token: peer.token,
+    body: {
+      offer,
+    },
+  });
+}
+
+async function fetchDownloadableManifest({
+  peer,
+  offer,
+  signal,
+}: {
+  peer: DirectPeerAccess;
+  offer: IncomingTransferOffer;
+  signal: AbortSignal;
+}) {
+  const response = await fetch(buildDirectSessionUrl(peer, "/manifest"), {
+    headers: {
+      [DIRECT_TOKEN_HEADER]: peer.token,
+    },
+    signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(`Unable to load the sender manifest (${response.status}).`);
+  }
+
+  const payload = (await response.json()) as DownloadableTransferManifest;
+  if (payload.kind !== "direct-http-transfer") {
+    throw new Error("The sender did not provide a valid direct-transfer manifest.");
+  }
+
+  if (payload.sessionId !== offer.id) {
+    throw new Error("The sender provided a manifest for a different transfer.");
+  }
+
+  return payload;
+}
+
+async function streamResponseToFile({
+  response,
+  destination,
+  signal,
+  onBytes,
+}: {
+  response: Response;
+  destination: string;
+  signal: AbortSignal;
+  onBytes: (value: number) => void;
+}) {
+  const stream = createWriteStream(destination);
+
+  try {
+    if (!response.body) {
+      const payload = Buffer.from(await response.arrayBuffer());
+      if (signal.aborted) {
+        throw new Error("Download canceled.");
+      }
+      stream.write(payload);
+      onBytes(payload.byteLength);
+      return;
+    }
+
+    const reader = response.body.getReader();
+    while (true) {
+      if (signal.aborted) {
+        throw new Error("Download canceled.");
+      }
+
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+
+      if (!value?.byteLength) {
+        continue;
+      }
+
+      stream.write(Buffer.from(value));
+      onBytes(value.byteLength);
+    }
+  } finally {
+    await new Promise<void>((resolve) => {
+      stream.end(() => resolve());
+    });
+  }
+}
+
+async function receiveDirectHttpTransfer({
+  offer,
+  outputDir,
+  signal,
+  onProgress,
+}: {
+  offer: IncomingTransferOffer;
+  outputDir: string;
+  signal: AbortSignal;
+  onProgress?: (progress: TransferProgress) => void;
+}) {
+  await ensureDirectory(outputDir);
+  const manifest = await fetchDownloadableManifest({
+    peer: offer.sender,
+    offer,
+    signal,
+  });
+
+  const createdFiles: string[] = [];
+  const receivedFiles: ReceivedFileOutput[] = [];
+  let bytesTransferred = 0;
+
+  try {
+    for (const file of manifest.files) {
+      const outputPath = createOutputPath(outputDir, file.name);
+      createdFiles.push(outputPath);
+      const startedAt = Date.now();
+      let fileBytesTransferred = 0;
+
+      onProgress?.({
+        phase: "transferring",
+        totalBytes: offer.totalBytes,
+        bytesTransferred,
+        currentFileName: file.name,
+        speedBytesPerSecond: 0,
+        detail: "Downloading files over local WiFi.",
+        updatedAt: nowIso(),
+      });
+
+      const response = await fetch(file.downloadUrl, {
+        headers: {
+          [DIRECT_TOKEN_HEADER]: offer.sender.token,
+        },
+        signal,
+      });
+
+      if (!response.ok) {
+        throw new Error(`Unable to download "${file.name}" (${response.status}).`);
+      }
+
+      await streamResponseToFile({
+        response,
+        destination: outputPath,
+        signal,
+        onBytes: (chunkBytes) => {
+          fileBytesTransferred += chunkBytes;
+          bytesTransferred += chunkBytes;
+          const elapsedMilliseconds = Math.max(Date.now() - startedAt, 1);
+          const speedBytesPerSecond = Math.round((fileBytesTransferred / elapsedMilliseconds) * 1000);
+
+          onProgress?.({
+            phase: "transferring",
+            totalBytes: offer.totalBytes,
+            bytesTransferred,
+            currentFileName: file.name,
+            speedBytesPerSecond,
+            detail: "Downloading files over local WiFi.",
+            updatedAt: nowIso(),
+          });
+        },
+      });
+
+      receivedFiles.push({
+        id: file.id,
+        name: file.name,
+        mimeType: file.mimeType,
+        sizeBytes: file.sizeBytes,
+        outputPath,
+      });
+    }
+  } catch (error) {
+    for (const outputPath of createdFiles) {
+      await stat(outputPath).then(() => unlink(outputPath)).catch(() => {});
+    }
+
+    if (error instanceof Error && error.message === "Download canceled.") {
+      throw new Error("Transfer canceled.", {
+        cause: error,
+      });
+    }
+
+    throw error;
+  }
+
+  return {
+    receivedFiles,
+    bytesTransferred,
+    detail: "Transfer complete.",
+  };
+}
+
 async function runReceiveCommand(options: ReceiveCommandOptions) {
   const sessionId = randomUUID();
   const receiverToken = randomToken();
-  const host = getUsableLanHost(getPreferredLanAddress());
+  const host = getPreferredLanAddress();
   if (!host) {
     throw new Error("No usable local WiFi address was found on this Mac.");
   }
@@ -1348,12 +952,10 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
   const state: ReceiveServiceState = {
     mode: "receive",
     deviceName: options.deviceName,
-    transport: options.transport,
-    apiUrl: options.apiUrl,
     outputDir: options.outputDir,
     startedAt: nowIso(),
     discoveryRecord,
-    qrPayload: buildQrPayload({
+    qrPayload: createDiscoveryQrPayload({
       ...discoveryRecord,
       method: "qr",
       serviceName: null,
@@ -1366,10 +968,10 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
   };
 
   let isBusy = false;
-  let nearbyAdvertisement: { stop(): void } | null = null;
   let shutdownRequested = false;
   let activeProcessPromise: Promise<void> | null = null;
-  let pendingRelayReady = createDeferred<IncomingTransferOffer>();
+  let activeDownloadAbortController: AbortController | null = null;
+  let nearbyAdvertisement: { stop(): void } | null = null;
 
   async function persistState() {
     await writeStateFile(options.stateFile, state);
@@ -1393,43 +995,26 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
     state.currentOffer = null;
     state.currentStatus = "discoverable";
     state.progress = createProgress(0, "discoverable", detail);
-    pendingRelayReady = createDeferred<IncomingTransferOffer>();
+    activeDownloadAbortController = null;
     void persistState();
   }
 
   async function notifySender(event: ReceiverToSenderEvent) {
-    const offer = state.currentOffer;
-    if (!offer) {
+    if (!state.currentOffer) {
       return;
     }
 
-    await postDirectEvent(offer.sender.direct, event);
+    await postDirectEvent(state.currentOffer.sender, event);
   }
 
-  function updateOfferRelay(relay: RelayAccess) {
-    if (!state.currentOffer) {
-      return null;
-    }
-
-    state.currentOffer = {
-      ...state.currentOffer,
-      sender: {
-        ...state.currentOffer.sender,
-        relay,
-      },
-    };
-    void persistState();
-    return state.currentOffer;
-  }
-
-  function createProgressReporter(mirrorToSender: boolean) {
+  function createProgressReporter() {
     let lastSentAt = 0;
     let lastSentBytes = 0;
 
     return (progress: TransferProgress, force = false) => {
       updateProgress(progress);
 
-      if (!mirrorToSender || !state.currentOffer) {
+      if (!state.currentOffer) {
         return;
       }
 
@@ -1483,65 +1068,14 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
       receiverDeviceName: options.deviceName,
     });
 
+    activeDownloadAbortController = new AbortController();
+
     try {
-      let result: { receivedFiles: ReceivedFileOutput[]; bytesTransferred: number; detail: string };
-
-      if (options.transport === "relay" && offer.sender.relay) {
-        result = await receiveRelayTransfer({
-          apiUrl: options.apiUrl,
-          offer,
-          deviceName: options.deviceName,
-          outputDir: options.outputDir,
-          onProgress: createProgressReporter(false),
-        });
-      } else if (options.transport === "relay") {
-        await notifySender({
-          kind: "direct-http-failed",
-          message: "Direct transfer disabled for this receiver.",
-        });
-        const relayOffer = await pendingRelayReady.promise;
-        result = await receiveRelayTransfer({
-          apiUrl: options.apiUrl,
-          offer: relayOffer,
-          deviceName: options.deviceName,
-          outputDir: options.outputDir,
-          onProgress: createProgressReporter(false),
-        });
-      } else {
-        try {
-          result = await receiveDirectHttpTransfer({
-            offer,
-            outputDir: options.outputDir,
-            onProgress: createProgressReporter(true),
-          });
-        } catch (error) {
-          if (options.transport !== "auto" || !(error instanceof Error)) {
-            throw error;
-          }
-
-          await notifySender({
-            kind: "direct-http-failed",
-            message: error.message,
-          });
-          const relayOffer = await pendingRelayReady.promise;
-          result = await receiveRelayTransfer({
-            apiUrl: options.apiUrl,
-            offer: relayOffer,
-            deviceName: options.deviceName,
-            outputDir: options.outputDir,
-            onProgress: createProgressReporter(false),
-          });
-        }
-      }
-
-      updateProgress({
-        phase: "discoverable",
-        totalBytes: 0,
-        bytesTransferred: 0,
-        currentFileName: null,
-        speedBytesPerSecond: 0,
-        detail: "Ready to receive files.",
-        updatedAt: nowIso(),
+      const result = await receiveDirectHttpTransfer({
+        offer,
+        outputDir: options.outputDir,
+        signal: activeDownloadAbortController.signal,
+        onProgress: createProgressReporter(),
       });
 
       state.lastTransfer = {
@@ -1553,6 +1087,7 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
         fileCount: result.receivedFiles.length,
         files: result.receivedFiles,
       };
+
       await notifySender({
         kind: "completed",
         detail: result.detail,
@@ -1572,23 +1107,17 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
         fileCount: 0,
         files: [],
       };
-      updateProgress({
-        phase: "discoverable",
-        totalBytes: 0,
-        bytesTransferred: 0,
-        currentFileName: null,
-        speedBytesPerSecond: 0,
-        detail: "Ready to receive files.",
-        updatedAt: nowIso(),
-      });
+
       await notifySender({
         kind: "failed",
         message: detail,
       }).catch(() => {});
+
       if (options.verbose) {
         logLine(`Receive failed: ${detail}`);
       }
     } finally {
+      activeDownloadAbortController = null;
       await persistState();
       if (options.once) {
         shutdownRequested = true;
@@ -1601,6 +1130,7 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
   const server = await startHttpServer(async (request, response) => {
     const url = new URL(request.url ?? "/", `http://${host}:${LOCAL_HTTP_SERVER_PORT}`);
     const pathSegments = url.pathname.split("/").filter(Boolean);
+    const method = request.method?.toUpperCase() ?? "GET";
 
     if (pathSegments[0] !== "direct" || pathSegments[1] !== "sessions" || pathSegments[2] !== sessionId) {
       sendText(response, 404, "Not found.");
@@ -1614,7 +1144,7 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
       return;
     }
 
-    if (pathSegments[3] === "offers" && request.method === "POST") {
+    if (pathSegments[3] === "offers" && method === "POST") {
       if (isBusy) {
         sendJson(response, 409, {
           error: "That receiver is busy right now.",
@@ -1623,17 +1153,6 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
       }
 
       const payload = await readJsonBody<{ offer: IncomingTransferOffer }>(request);
-      const decision: DirectOfferResponse = {
-        accepted: true,
-      };
-
-      if (!decision.accepted) {
-        sendJson(response, decision.statusCode ?? 409, {
-          error: decision.message ?? "That receiver is busy right now.",
-        });
-        return;
-      }
-
       sendJson(response, 200, {
         ok: true,
       });
@@ -1645,23 +1164,14 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
       return;
     }
 
-    if (pathSegments[3] === "events" && request.method === "POST") {
+    if (pathSegments[3] === "events" && method === "POST") {
       const payload = await readJsonBody<{ event: SenderToReceiverEvent }>(request);
-      const event = payload.event;
+      const detail = payload.event.message || "Sender stopped the transfer.";
 
-      if (event.kind === "relay-ready") {
-        const nextOffer = updateOfferRelay(event.relay);
-        if (nextOffer) {
-          pendingRelayReady.resolve(nextOffer);
-        }
-      } else if (event.kind === "relay-failed") {
-        pendingRelayReady.reject(new Error(event.message || "Unable to prepare relay fallback."));
-      } else if (event.kind === "failed" || event.kind === "canceled") {
-        pendingRelayReady.reject(new Error(event.message || "Sender stopped the transfer."));
-        if (options.verbose) {
-          logLine(event.message || "Sender stopped the transfer.");
-        }
-        resetToDiscoverable();
+      if (state.currentStatus === "waiting") {
+        resetToDiscoverable(detail);
+      } else if (state.currentStatus === "connecting" || state.currentStatus === "transferring") {
+        activeDownloadAbortController?.abort();
       }
 
       sendJson(response, 200, {
@@ -1671,7 +1181,7 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
     }
 
     sendEmpty(response, 405, {
-      allow: "POST",
+      Allow: "POST",
     });
   });
 
@@ -1688,9 +1198,22 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
   logLine(`Receiver listening on http://${host}:${LOCAL_HTTP_SERVER_PORT} (${discoveryRecord.sessionId})`);
 
   const shutdown = async () => {
-    if (state.currentOffer?.sender.relay) {
-      await declineRelayTransferSession(options.apiUrl, state.currentOffer.sender.relay).catch(() => {});
+    const offer = state.currentOffer;
+    if (offer) {
+      const event: ReceiverToSenderEvent =
+        state.currentStatus === "waiting"
+          ? {
+              kind: "rejected",
+              message: "Receiver is no longer available.",
+            }
+          : {
+              kind: "canceled",
+              message: "Receiver canceled the transfer.",
+            };
+      await postDirectEvent(offer.sender, event).catch(() => {});
     }
+
+    activeDownloadAbortController?.abort();
     nearbyAdvertisement?.stop();
     await closeServer(server).catch(() => {});
   };
@@ -1714,13 +1237,14 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
       // Ignore transfer errors while shutting down.
     }
   }
+
   await shutdown();
 }
 
 async function runSendCommand(options: SendCommandOptions) {
   const files = await buildSelectedFiles(options.filePaths);
   const target = await resolveTargetRecord(options);
-  const host = getUsableLanHost(getPreferredLanAddress());
+  const host = getPreferredLanAddress();
   if (!host) {
     throw new Error("No usable local WiFi address was found on this Mac.");
   }
@@ -1729,12 +1253,28 @@ async function runSendCommand(options: SendCommandOptions) {
     throw new Error("That receiver is no longer available.");
   }
 
+  const validatedTargetHost = resolveDiscoveryHost(target);
+  if (!validatedTargetHost) {
+    throw new Error(
+      target.method === "qr"
+        ? "That QR code does not contain a usable local WiFi address."
+        : "That receiver is not advertising a usable local WiFi address.",
+    );
+  }
+
+  const resolvedTarget =
+    validatedTargetHost === target.host
+      ? target
+      : {
+          ...target,
+          host: validatedTargetHost,
+        };
+
   const sessionId = randomUUID();
   const manifest = createTransferManifest({
     files,
     deviceName: options.deviceName,
     sessionId,
-    isPremium: true,
   });
   const direct: DirectPeerAccess = {
     sessionId,
@@ -1745,228 +1285,40 @@ async function runSendCommand(options: SendCommandOptions) {
   const state: SendState = {
     mode: "send",
     deviceName: options.deviceName,
-    transport: options.transport,
-    target,
+    target: resolvedTarget,
     startedAt: nowIso(),
-    progress: createProgress(manifest.totalBytes, "waiting", `Waiting for ${target.deviceName} to accept.`),
-    relay: null,
+    progress: createProgress(manifest.totalBytes, "waiting", `Waiting for ${resolvedTarget.deviceName} to accept.`),
   };
 
-  let relay: RelayCredentials | null = null;
-  let relayUploadStarted = false;
-  let relayPollTimer: ReturnType<typeof setInterval> | null = null;
   let settled = false;
-  let receiverName = target.deviceName;
-  const resultDeferred = createDeferred<{ detail: string }>();
+  let offerDelivered = false;
+  const resultDeferred = createDeferred<string>();
 
-  async function persistState() {
+  function settleSuccess(detail: string) {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    resultDeferred.resolve(detail);
+  }
+
+  function settleFailure(detail: string) {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    resultDeferred.reject(new Error(detail));
+  }
+
+  async function setProgress(progress: TransferProgress) {
+    state.progress = progress;
     await writeStateFile(options.stateFile, state);
   }
 
-  function setProgress(progress: TransferProgress) {
-    state.progress = progress;
-    void persistState();
-  }
-
-  async function settleSuccess(detail: string) {
-    if (settled) {
-      return;
-    }
-    settled = true;
-    if (relayPollTimer) {
-      clearInterval(relayPollTimer);
-      relayPollTimer = null;
-    }
-    resultDeferred.resolve({ detail });
-  }
-
-  async function settleFailure(error: Error) {
-    if (settled) {
-      return;
-    }
-    settled = true;
-    if (relayPollTimer) {
-      clearInterval(relayPollTimer);
-      relayPollTimer = null;
-    }
-    resultDeferred.reject(error);
-  }
-
-  async function handleReceiverEvent(event: ReceiverToSenderEvent) {
-    if (settled) {
-      return;
-    }
-
-    if (event.kind === "accepted") {
-      receiverName = event.receiverDeviceName || receiverName;
-      setProgress({
-        phase: "connecting",
-        totalBytes: manifest.totalBytes,
-        bytesTransferred: state.progress.bytesTransferred,
-        currentFileName: null,
-        speedBytesPerSecond: 0,
-        detail: `Waiting for ${receiverName} to download files over local WiFi.`,
-        updatedAt: nowIso(),
-      });
-
-      if (options.transport === "relay") {
-        await provisionRelayFallback();
-      }
-      return;
-    }
-
-    if (event.kind === "progress") {
-      setProgress(event.progress);
-      return;
-    }
-
-    if (event.kind === "completed") {
-      await settleSuccess(event.detail ?? "Transfer complete.");
-      return;
-    }
-
-    if (event.kind === "direct-http-failed") {
-      if (options.transport === "direct") {
-        await settleFailure(new Error(event.message || "Direct transfer failed."));
-        return;
-      }
-
-      await provisionRelayFallback();
-      return;
-    }
-
-    await settleFailure(new Error(event.message || "Transfer stopped."));
-  }
-
-  async function syncRelaySenderState() {
-    if (!relay || settled) {
-      return;
-    }
-
-    try {
-      const relayState = await getRelaySenderState(options.apiUrl, relay);
-
-      if (relayState.status === "accepted" && !relayUploadStarted) {
-        relayUploadStarted = true;
-        await uploadFilesToRelay({
-          apiUrl: options.apiUrl,
-          relay,
-          files,
-          totalBytes: manifest.totalBytes,
-          onProgress: (progress) => {
-            setProgress(progress);
-          },
-        });
-        setProgress({
-          phase: "transferring",
-          totalBytes: manifest.totalBytes,
-          bytesTransferred: manifest.totalBytes,
-          currentFileName: null,
-          speedBytesPerSecond: 0,
-          detail: "Waiting for the receiver to finish relay download.",
-          updatedAt: nowIso(),
-        });
-        return;
-      }
-
-      if (relayState.status === "rejected") {
-        await settleFailure(new Error("Relay transfer declined."));
-        return;
-      }
-
-      if (relayState.status === "completed") {
-        await settleSuccess("Transfer complete through relay.");
-        return;
-      }
-
-      if (relayState.status === "expired") {
-        await settleFailure(new Error("This relay transfer expired."));
-      }
-    } catch (error) {
-      if (options.verbose) {
-        logLine(`Unable to refresh relay state: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
-  }
-
-  async function uploadFilesToRelay({
-    apiUrl,
-    relay,
-    files,
-    totalBytes,
-    onProgress,
-  }: {
-    apiUrl: string;
-    relay: RelayCredentials;
-    files: SelectedTransferFile[];
-    totalBytes: number;
-    onProgress?: (progress: TransferProgress) => void;
-  }) {
-    let bytesTransferred = 0;
-
-    for (const file of files) {
-      const startedAt = Date.now();
-      await uploadRelayTransferFile(apiUrl, relay, file);
-      bytesTransferred += file.sizeBytes;
-      const elapsedMilliseconds = Math.max(Date.now() - startedAt, 1);
-      const speedBytesPerSecond = Math.round((file.sizeBytes / elapsedMilliseconds) * 1000);
-
-      onProgress?.({
-        phase: "transferring",
-        totalBytes,
-        bytesTransferred,
-        currentFileName: file.name,
-        speedBytesPerSecond,
-        detail: "Uploading files through relay.",
-        updatedAt: nowIso(),
-      });
-    }
-  }
-
-  async function provisionRelayFallback() {
-    if (relay) {
-      await postDirectEvent(
-        {
-          sessionId: target.sessionId,
-          host: target.host,
-          port: target.port,
-          token: target.token,
-        },
-        {
-          kind: "relay-ready",
-          relay: toRelayAccess(relay)!,
-        },
-      );
-      return;
-    }
-
-    relay = await createRelayTransferSession(options.apiUrl, options.deviceName, files);
-    state.relay = toRelayAccess(relay);
-    await persistState();
-
-    await postDirectEvent(
-      {
-        sessionId: target.sessionId,
-        host: target.host,
-        port: target.port,
-        token: target.token,
-      },
-      {
-        kind: "relay-ready",
-        relay: toRelayAccess(relay)!,
-      },
-    );
-
-    relayPollTimer = setInterval(() => {
-      void syncRelaySenderState();
-    }, RELAY_POLL_INTERVAL_MS);
-    await syncRelaySenderState();
-  }
-
-  const directEnabled = options.transport !== "relay";
   const server = await startHttpServer(async (request, response) => {
     const url = new URL(request.url ?? "/", `http://${host}:${LOCAL_HTTP_SERVER_PORT}`);
     const pathSegments = url.pathname.split("/").filter(Boolean);
+    const method = request.method?.toUpperCase() ?? "GET";
 
     if (pathSegments[0] !== "direct" || pathSegments[1] !== "sessions" || pathSegments[2] !== sessionId) {
       sendText(response, 404, "Not found.");
@@ -1980,23 +1332,38 @@ async function runSendCommand(options: SendCommandOptions) {
       return;
     }
 
-    if (pathSegments[3] === "events" && request.method === "POST") {
+    if (pathSegments[3] === "events" && method === "POST") {
       const payload = await readJsonBody<{ event: ReceiverToSenderEvent }>(request);
-      await handleReceiverEvent(payload.event);
+      const event = payload.event;
+
+      if (event.kind === "accepted") {
+        const receiverName = event.receiverDeviceName.trim() ? event.receiverDeviceName : resolvedTarget.deviceName;
+        await setProgress({
+          phase: "connecting",
+          totalBytes: manifest.totalBytes,
+          bytesTransferred: state.progress.bytesTransferred,
+          currentFileName: null,
+          speedBytesPerSecond: 0,
+          detail: `Waiting for ${receiverName} to download files over local WiFi.`,
+          updatedAt: nowIso(),
+        });
+      } else if (event.kind === "progress") {
+        await setProgress(event.progress);
+      } else if (event.kind === "completed") {
+        settleSuccess(event.detail ?? "Transfer complete.");
+      } else if (event.kind === "rejected") {
+        settleFailure(event.message || "Transfer declined.");
+      } else {
+        settleFailure(event.message || "Transfer stopped.");
+      }
+
       sendJson(response, 200, {
         ok: true,
       });
       return;
     }
 
-    if (!directEnabled) {
-      sendJson(response, 404, {
-        error: "Direct transfer unavailable.",
-      });
-      return;
-    }
-
-    if (pathSegments[3] === "manifest" && request.method === "GET") {
+    if (pathSegments[3] === "manifest" && ["GET", "HEAD"].includes(method)) {
       const manifestPayload: DownloadableTransferManifest = {
         version: 1,
         kind: "direct-http-transfer",
@@ -2020,42 +1387,56 @@ async function runSendCommand(options: SendCommandOptions) {
       return;
     }
 
-    if (pathSegments[3] === "files" && pathSegments[4] && ["GET", "HEAD"].includes(request.method ?? "")) {
+    if (pathSegments[3] === "files" && pathSegments[4] && ["GET", "HEAD"].includes(method)) {
       const file = files.find((candidate) => candidate.id === decodeURIComponent(pathSegments[4] ?? ""));
       if (!file) {
         sendText(response, 404, "File not found.");
         return;
       }
 
-      await sendFile(response, file, request.method ?? "GET");
+      await sendFile(response, file, method);
       return;
     }
 
     sendEmpty(response, 405, {
-      allow: "GET, HEAD, POST",
+      Allow: "GET, HEAD, POST",
     });
   });
 
-  const offer = createIncomingTransferOffer({
-    manifest,
-    direct,
-    relay: null,
+  const shutdown = async () => {
+    if (!settled && offerDelivered) {
+      await postDirectEvent(
+        {
+          sessionId: resolvedTarget.sessionId,
+          host: resolvedTarget.host,
+          port: resolvedTarget.port,
+          token: resolvedTarget.token,
+        },
+        {
+          kind: "canceled",
+          message: "Sender canceled the transfer.",
+        },
+      ).catch(() => {});
+    }
+    await closeServer(server).catch(() => {});
+  };
+
+  process.once("SIGINT", () => {
+    settleFailure("Sender canceled the transfer.");
+  });
+  process.once("SIGTERM", () => {
+    settleFailure("Sender canceled the transfer.");
   });
 
   try {
-    await persistState();
-    await postIncomingOffer(target, offer);
-    logLine(`Offer sent to ${target.deviceName}.`);
-    const result = await resultDeferred.promise;
-    logLine(result.detail);
+    await writeStateFile(options.stateFile, state);
+    await postIncomingOffer(resolvedTarget, createIncomingTransferOffer({ manifest, direct }));
+    offerDelivered = true;
+    logLine(`Offer sent to ${resolvedTarget.deviceName}.`);
+    const detail = await resultDeferred.promise;
+    logLine(detail);
   } finally {
-    if (relayPollTimer) {
-      clearInterval(relayPollTimer);
-    }
-    await closeServer(server).catch(() => {});
-    if (relay) {
-      await deleteRelayTransferSession(options.apiUrl, relay).catch(() => {});
-    }
+    await shutdown();
   }
 }
 
@@ -2071,8 +1452,6 @@ function buildLaunchAgentPlist(options: LaunchAgentOptions) {
     ...(options.stateFile ? ["--state-file", options.stateFile] : []),
     "--accept-delay-ms",
     String(options.acceptDelayMs),
-    "--transport",
-    options.transport,
     ...(options.nearby ? [] : ["--no-nearby"]),
   ];
 
@@ -2112,7 +1491,6 @@ Receive options:
   --output-dir <dir>
   --state-file <path>
   --accept-delay-ms <ms>
-  --transport <auto|direct|relay>
   --no-nearby
   --once
   --verbose
@@ -2124,7 +1502,6 @@ Send options:
   --target-session-id <id>
   --target-file <path>
   --target-qr <json>
-  --transport <auto|direct|relay>
   --discover-timeout-ms <ms>
   --state-file <path>
   --verbose`);
@@ -2153,20 +1530,17 @@ async function main() {
       "accept-delay-ms": {
         type: "string",
       },
-      transport: {
-        type: "string",
-      },
       nearby: {
         type: "boolean",
-        default: true,
+      },
+      "no-nearby": {
+        type: "boolean",
       },
       once: {
         type: "boolean",
-        default: false,
       },
       verbose: {
         type: "boolean",
-        default: false,
       },
       file: {
         type: "string",
@@ -2192,76 +1566,98 @@ async function main() {
       },
       json: {
         type: "boolean",
-        default: false,
       },
       label: {
         type: "string",
       },
     },
+    strict: false,
   });
 
+  const values = parsed.values;
+  const readString = (value: string | boolean | undefined) => (typeof value === "string" ? value : null);
+  const readStringList = (value: Array<string | boolean> | undefined) =>
+    (value?.filter((entry): entry is string => typeof entry === "string") ?? []);
+  const readBoolean = (value: string | boolean | undefined) => value === true;
+
+  const nearby = readBoolean(values["no-nearby"]) ? false : !("nearby" in values) || readBoolean(values.nearby);
+
+  if (command === "discover") {
+    const timeoutMs = Number(readString(values["timeout-ms"]) ?? DEFAULT_DISCOVER_TIMEOUT_MS);
+    const records = await discoverNearbyReceivers(timeoutMs);
+
+    if (readBoolean(values.json)) {
+      console.log(JSON.stringify(records, null, 2));
+      return;
+    }
+
+    if (records.length === 0) {
+      console.log("No nearby receivers found.");
+      return;
+    }
+
+    for (const record of records) {
+      console.log(`${record.deviceName}  ${record.host}:${record.port}  ${record.sessionId}`);
+    }
+    return;
+  }
+
   if (command === "receive") {
+    const deviceName = readString(values.name);
+    const outputDir = readString(values["output-dir"]);
+    if (!deviceName || !outputDir) {
+      throw new Error("receive requires --name and --output-dir.");
+    }
+
     await runReceiveCommand({
-      apiUrl: process.env.API_URL ?? DEFAULT_API_URL,
-      deviceName: parsed.values.name ?? "Mac Debug Receiver",
-      outputDir: parsed.values["output-dir"] ?? path.join(REPO_ROOT, "tmp/macos-device-received"),
-      stateFile: parsed.values["state-file"] ?? null,
-      acceptDelayMs: Number(parsed.values["accept-delay-ms"] ?? 0),
-      transport: (parsed.values.transport ?? "auto") as TransportMode,
-      nearby: parsed.values.nearby ?? true,
-      once: parsed.values.once ?? false,
-      verbose: parsed.values.verbose ?? false,
+      deviceName,
+      outputDir,
+      stateFile: readString(values["state-file"]),
+      acceptDelayMs: Number(readString(values["accept-delay-ms"]) ?? 0),
+      nearby,
+      once: readBoolean(values.once),
+      verbose: readBoolean(values.verbose),
     });
     return;
   }
 
   if (command === "send") {
-    const filePaths = parsed.values.file ?? [];
-    if (!filePaths.length) {
-      throw new Error("Provide at least one --file argument.");
+    const deviceName = readString(values.name);
+    if (!deviceName) {
+      throw new Error("send requires --name.");
     }
 
     await runSendCommand({
-      apiUrl: process.env.API_URL ?? DEFAULT_API_URL,
-      deviceName: parsed.values.name ?? "Mac Debug Sender",
-      transport: (parsed.values.transport ?? "auto") as TransportMode,
-      filePaths,
-      targetQr: parsed.values["target-qr"] ?? null,
-      targetFile: parsed.values["target-file"] ?? null,
-      targetName: parsed.values["target-name"] ?? null,
-      targetSessionId: parsed.values["target-session-id"] ?? null,
-      discoverTimeoutMs: Number(parsed.values["discover-timeout-ms"] ?? DEFAULT_DISCOVER_TIMEOUT_MS),
-      stateFile: parsed.values["state-file"] ?? null,
-      verbose: parsed.values.verbose ?? false,
+      deviceName,
+      filePaths: readStringList(values.file),
+      targetQr: readString(values["target-qr"]),
+      targetFile: readString(values["target-file"]),
+      targetName: readString(values["target-name"]),
+      targetSessionId: readString(values["target-session-id"]),
+      discoverTimeoutMs: Number(readString(values["discover-timeout-ms"]) ?? DEFAULT_DISCOVER_TIMEOUT_MS),
+      stateFile: readString(values["state-file"]),
+      verbose: readBoolean(values.verbose),
     });
-    return;
-  }
-
-  if (command === "discover") {
-    const records = await discoverNearbyReceivers(Number(parsed.values["timeout-ms"] ?? DEFAULT_DISCOVER_TIMEOUT_MS));
-    if (parsed.values.json) {
-      console.log(JSON.stringify(records, null, 2));
-      return;
-    }
-
-    for (const record of records) {
-      console.log(`${record.deviceName} ${record.host}:${record.port} ${record.sessionId}`);
-    }
     return;
   }
 
   if (command === "print-launch-agent") {
-    const plist = buildLaunchAgentPlist({
-      apiUrl: process.env.API_URL ?? DEFAULT_API_URL,
-      deviceName: parsed.values.name ?? "Mac Debug Receiver",
-      outputDir: parsed.values["output-dir"] ?? path.join(REPO_ROOT, "tmp/macos-device-received"),
-      stateFile: parsed.values["state-file"] ?? null,
-      acceptDelayMs: Number(parsed.values["accept-delay-ms"] ?? 0),
-      transport: (parsed.values.transport ?? "auto") as TransportMode,
-      nearby: parsed.values.nearby ?? true,
-      label: parsed.values.label ?? "com.filetransfers.macos-device",
-    });
-    console.log(plist);
+    const deviceName = readString(values.name);
+    const outputDir = readString(values["output-dir"]);
+    if (!deviceName || !outputDir) {
+      throw new Error("print-launch-agent requires --name and --output-dir.");
+    }
+
+    console.log(
+      buildLaunchAgentPlist({
+        deviceName,
+        outputDir,
+        stateFile: readString(values["state-file"]),
+        acceptDelayMs: Number(readString(values["accept-delay-ms"]) ?? 0),
+        nearby,
+        label: readString(values.label) ?? "com.filetransfers.macos-device",
+      }),
+    );
     return;
   }
 
@@ -2269,6 +1665,7 @@ async function main() {
 }
 
 void main().catch((error) => {
-  console.error(error instanceof Error ? error.message : error);
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(message);
   process.exitCode = 1;
 });

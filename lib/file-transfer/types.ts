@@ -33,7 +33,6 @@ export interface TransferManifest {
   files: TransferManifestFile[];
   fileCount: number;
   totalBytes: number;
-  isPremiumSender: boolean;
   createdAt: string;
 }
 
@@ -54,7 +53,7 @@ export interface DownloadableTransferManifest {
 
 export interface DiscoveryRecord {
   sessionId: string;
-  method: "nearby" | "qr" | "preview";
+  method: "nearby" | "qr";
   deviceName: string;
   host: string;
   port: number;
@@ -78,10 +77,8 @@ export interface TransferSession {
   direction: TransferDirection;
   status: TransferStatus;
   manifest: TransferManifest;
-  previewMode: boolean;
   peerDeviceName: string | null;
   awaitingReceiverResponse: boolean;
-  relay: RelayCredentials | null;
   progress: TransferProgress;
 }
 
@@ -92,18 +89,12 @@ export interface DirectPeerAccess {
   token: string;
 }
 
-export interface SenderTransferAccess {
-  sessionId: string;
-  direct: DirectPeerAccess;
-  relay: RelayAccess | null;
-}
-
 export interface IncomingTransferOffer {
   id: string;
   senderDeviceName: string;
   fileCount: number;
   totalBytes: number;
-  sender: SenderTransferAccess;
+  sender: DirectPeerAccess;
   createdAt: string;
 }
 
@@ -112,7 +103,6 @@ export interface ReceiveSession {
   status: TransferStatus;
   discoveryRecord: DiscoveryRecord;
   qrPayload: string | null;
-  previewMode: boolean;
   incomingOffer: IncomingTransferOffer | null;
   peerDeviceName: string | null;
   receivedFiles: ReceivedFileRecord[];
@@ -181,14 +171,4 @@ export interface EntitlementStatus {
 export interface HostedUploadDraft {
   file: SelectedTransferFile;
   passcode: string | null;
-}
-
-export interface RelayAccess {
-  sessionId: string;
-  receiverToken: string;
-  expiresAt: string;
-}
-
-export interface RelayCredentials extends RelayAccess {
-  senderToken: string;
 }
