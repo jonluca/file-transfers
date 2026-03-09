@@ -34,7 +34,7 @@ import { useCompleteHostedUpload, useCreateHostedUpload, useDeleteHostedFile, us
 import { usePremiumAccess } from "@/hooks/use-premium-access";
 import { useAppleSignIn } from "@/hooks/use-apple-sign-in";
 import { signOut, useSession } from "@/lib/auth-client";
-import { getTabScreenTopInset } from "@/lib/design/tab-screen-insets";
+import { getTabScreenBottomPadding, getTabScreenTopInset } from "@/lib/design/tab-screen-insets";
 import { designFonts, designTheme } from "@/lib/design/theme";
 import { pickTransferFiles } from "@/lib/file-transfer";
 import { getPaywallResultMessage, mapCustomerInfoToEntitlement, REVENUECAT_PAYWALL_RESULT } from "@/lib/purchases";
@@ -212,6 +212,7 @@ function formatExpirationCopy(expiresAt: string | null) {
 export default function SettingsScreen() {
   const insets = useSafeAreaInsets();
   const topInset = getTabScreenTopInset(insets.top);
+  const bottomPadding = getTabScreenBottomPadding(insets.bottom);
   const deviceName = useDeviceName();
   const autoAcceptKnownDevices = useAutoAcceptKnownDevices();
   const devPremiumOverrideEnabled = useDevPremiumOverrideEnabled();
@@ -401,7 +402,7 @@ export default function SettingsScreen() {
   return (
     <>
       <ScrollView
-        contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 24) + 16 }}
+        contentContainerStyle={{ paddingBottom: bottomPadding }}
         showsVerticalScrollIndicator={false}
         style={[styles.root, { paddingTop: topInset + 16 }]}
       >
