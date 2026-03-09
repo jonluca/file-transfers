@@ -125,8 +125,8 @@ const activeSendRuntimes = new Map<string, SendRuntime>();
 const activeReceiveRuntimes = new Map<string, ReceiveRuntime>();
 const PEER_REQUEST_TIMEOUT_MS = 8000;
 const NEARBY_DISCOVERY_REQUEST_TIMEOUT_MS = 2500;
-const NEARBY_DISCOVERY_RESCAN_INTERVAL_MS = 10_000;
-const NEARBY_DISCOVERY_RETRY_DELAY_MS = 1_500;
+const NEARBY_DISCOVERY_RESCAN_INTERVAL_MS = 5_000;
+const NEARBY_DISCOVERY_RETRY_DELAY_MS = 1_000;
 const NEARBY_DISCOVERY_STOP_WAIT_TIMEOUT_MS = 2_000;
 const NEARBY_DISCOVERY_STOP_WAIT_POLL_INTERVAL_MS = 100;
 const PROGRESS_UPDATE_INTERVAL_MS = 250;
@@ -1580,6 +1580,11 @@ export async function stopReceivingAvailability(sessionId: string) {
   await runtime.stopZeroconfPublishing?.().catch(() => {});
   await unregisterDirectReceiveSession(sessionId).catch(() => {});
   activeReceiveRuntimes.delete(sessionId);
+}
+
+export function isReceivingAvailabilityActive(sessionId: string) {
+  const runtime = activeReceiveRuntimes.get(sessionId);
+  return Boolean(runtime && !runtime.stopping);
 }
 
 export async function acceptIncomingTransferOffer(sessionId: string) {

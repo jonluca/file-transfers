@@ -3,7 +3,7 @@ import AsyncStorage from "expo-sqlite/kv-store";
 import { Platform } from "react-native";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
-import type { TransferHistoryEntry } from "@/lib/file-transfer";
+import type { DiscoveryRecord, TransferHistoryEntry } from "@/lib/file-transfer";
 import {
   DEFAULT_DIRECT_TRANSFER_CHUNK_BYTES,
   DEFAULT_FREE_TRANSFER_CHUNK_BYTES,
@@ -94,6 +94,7 @@ interface AppState {
   devPremiumOverrideEnabled: boolean;
   directTransferChunkBytes: number;
   freeTransferChunkBytes: number;
+  pendingScannedReceiver: DiscoveryRecord | null;
   recentTransfers: TransferHistoryEntry[];
   setHasHydrated: (value: boolean) => void;
   setDeviceName: (value: string) => void;
@@ -101,6 +102,7 @@ interface AppState {
   setDevPremiumOverrideEnabled: (value: boolean) => void;
   setDirectTransferChunkBytes: (value: number) => void;
   setFreeTransferChunkBytes: (value: number) => void;
+  setPendingScannedReceiver: (value: DiscoveryRecord | null) => void;
   resetTransferChunkBytes: () => void;
   upsertRecentTransfer: (value: TransferHistoryEntry) => void;
   clearRecentTransfers: () => void;
@@ -137,6 +139,7 @@ export const useAppStore = create<AppState>()(
     (set) => ({
       hasHydrated: false,
       ...defaultState,
+      pendingScannedReceiver: null,
       setHasHydrated: (value) => set({ hasHydrated: value }),
       setDeviceName: (value) =>
         set((state) => ({
@@ -157,6 +160,10 @@ export const useAppStore = create<AppState>()(
       setFreeTransferChunkBytes: (value) =>
         set({
           freeTransferChunkBytes: normalizeTransferChunkBytes(value, DEFAULT_FREE_TRANSFER_CHUNK_BYTES),
+        }),
+      setPendingScannedReceiver: (value) =>
+        set({
+          pendingScannedReceiver: value,
         }),
       resetTransferChunkBytes: () =>
         set({

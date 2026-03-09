@@ -1,4 +1,4 @@
-import { CameraView, useCameraPermissions } from "expo-camera";
+import { router } from "expo-router";
 import { useIsFocused } from "@react-navigation/native";
 import * as Burnt from "burnt";
 import React, { startTransition, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
@@ -27,9 +27,9 @@ import {
   assertSelectedFilesTransferAllowed,
   declineIncomingTransferOffer,
   formatBytes,
+  isReceivingAvailabilityActive,
   isTransferSizeLimitError,
   startHttpShareSession,
-  parseDiscoveryQrPayload,
   pickTransferFiles,
   startReceivingAvailability,
   startSendingTransfer,
@@ -116,6 +116,26 @@ function getDebugErrorDetails(error: unknown) {
   return {
     error: String(error),
   };
+}
+
+function hasUsableReceiveAvailabilitySession({
+  activeReceiveSession,
+  receiveAvailabilityKey,
+  expectedKey,
+}: {
+  activeReceiveSession: ReceiveSession | null;
+  receiveAvailabilityKey: string | null;
+  expectedKey: string;
+}) {
+  if (!activeReceiveSession) {
+    return false;
+  }
+
+  return (
+    !["completed", "failed", "canceled"].includes(activeReceiveSession.status) &&
+    receiveAvailabilityKey === expectedKey &&
+    isReceivingAvailabilityActive(activeReceiveSession.id)
+  );
 }
 
 function MimeIcon({ type }: { type: string }) {
@@ -356,7 +376,6 @@ export default function TransferScreen() {
   const serviceInstanceId = useServiceInstanceId();
   const premiumAccess = usePremiumAccess();
   const upsertRecentTransfer = useAppStore((state) => state.upsertRecentTransfer);
-  const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [mode, setMode] = useState<TransferMode>("idle");
   const [stagedFiles, setStagedFiles] = useState<SelectedTransferFile[]>([]);
   const [activeSendSession, setActiveSendSession] = useState<TransferSession | null>(null);
@@ -366,15 +385,15 @@ export default function TransferScreen() {
   const [transferProgress, setTransferProgress] = useState<TransferProgress | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [selectionError, setSelectionError] = useState<TransferSizeLimitNotice | null>(null);
-  const [showQrScanner, setShowQrScanner] = useState(false);
   const [showQrCode, setShowQrCode] = useState(false);
   const completionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handledFinalizedSendSessionIds = useRef(new Set<string>());
   const handledFinalizedReceiveSessionIds = useRef(new Set<string>());
   const stoppingHttpShareSessionIdRef = useRef<string | null>(null);
-  const scannedQrRef = useRef(false);
   const isStartingReceiveAvailabilityRef = useRef(false);
   const receiveAvailabilityKeyRef = useRef<string | null>(null);
+  const pendingScannedReceiver = useAppStore((state) => state.pendingScannedReceiver);
+  const setPendingScannedReceiver = useAppStore((state) => state.setPendingScannedReceiver);
   const ensureReceiveAvailabilityRef = useRef<
     (options?: { preserveNotice?: boolean; showReceivingScreen?: boolean; surfaceErrors?: boolean }) => Promise<boolean>
   >(async () => false);
@@ -469,7 +488,6 @@ export default function TransferScreen() {
       setActiveHttpShareSession((current) => (current?.id === sessionId ? null : current));
       setMode((current) => (current === "sharing" ? nextMode : current));
       setShowQrCode(false);
-      setShowQrScanner(false);
 
       if (noticeMessage !== undefined) {
         setNotice(noticeMessage);
@@ -508,7 +526,6 @@ export default function TransferScreen() {
       setActiveReceiveSession(null);
       setTransferProgress(null);
       setNotice(null);
-      setShowQrScanner(false);
       setShowQrCode(false);
       if (clearFiles) {
         setStagedFiles([]);
@@ -644,20 +661,29 @@ export default function TransferScreen() {
       }
 
       const nextReceiveAvailabilityKey = `${deviceName}|${serviceInstanceId}|${premiumAccess.isPremium ? "premium" : "free"}`;
-      const hasUsableSession =
-        Boolean(activeReceiveSession) &&
-        !["completed", "failed", "canceled"].includes(activeReceiveSession?.status ?? "") &&
-        receiveAvailabilityKeyRef.current === nextReceiveAvailabilityKey;
+      const hasUsableSession = hasUsableReceiveAvailabilitySession({
+        activeReceiveSession,
+        receiveAvailabilityKey: receiveAvailabilityKeyRef.current,
+        expectedKey: nextReceiveAvailabilityKey,
+      });
 
       if (hasUsableSession) {
         if (showReceivingScreen && activeReceiveSession) {
           setNotice(null);
           setTransferProgress(activeReceiveSession.progress);
-          setShowQrScanner(false);
           setShowQrCode(false);
           setMode("receiving");
         }
         return true;
+      }
+
+      if (activeReceiveSession && !isReceivingAvailabilityActive(activeReceiveSession.id)) {
+        logTransferScreenDebug("Stored receive session is missing a live runtime; recreating availability", {
+          sessionId: getDebugSessionId(activeReceiveSession.id),
+          status: activeReceiveSession.status,
+          receiveAvailabilityKey: receiveAvailabilityKeyRef.current,
+          expectedReceiveAvailabilityKey: nextReceiveAvailabilityKey,
+        });
       }
 
       if (isStartingReceiveAvailabilityRef.current) {
@@ -671,7 +697,6 @@ export default function TransferScreen() {
 
       if (showReceivingScreen) {
         setTransferProgress(null);
-        setShowQrScanner(false);
         setShowQrCode(false);
         setMode("receiving");
       }
@@ -730,10 +755,11 @@ export default function TransferScreen() {
     }
 
     const nextReceiveAvailabilityKey = `${deviceName}|${serviceInstanceId}|${premiumAccess.isPremium ? "premium" : "free"}`;
-    const hasUsableSession =
-      Boolean(activeReceiveSession) &&
-      !["completed", "failed", "canceled"].includes(activeReceiveSession?.status ?? "") &&
-      receiveAvailabilityKeyRef.current === nextReceiveAvailabilityKey;
+    const hasUsableSession = hasUsableReceiveAvailabilitySession({
+      activeReceiveSession,
+      receiveAvailabilityKey: receiveAvailabilityKeyRef.current,
+      expectedKey: nextReceiveAvailabilityKey,
+    });
 
     if (hasUsableSession || isStartingReceiveAvailabilityRef.current) {
       return;
@@ -914,7 +940,6 @@ export default function TransferScreen() {
     setSelectionError(null);
     setNotice(null);
     setShowQrCode(false);
-    setShowQrScanner(false);
     setStagedFiles(nextFiles);
     setMode("sending");
   }
@@ -956,7 +981,6 @@ export default function TransferScreen() {
     setTransferProgress(null);
     setNotice(null);
     setSelectionError(null);
-    setShowQrScanner(false);
     setShowQrCode(false);
     setMode(stagedFiles.length > 0 ? "sending" : "idle");
   }
@@ -970,7 +994,6 @@ export default function TransferScreen() {
     });
 
     if (ready) {
-      setShowQrScanner(false);
       setShowQrCode(false);
       setMode("receiving");
     }
@@ -997,7 +1020,6 @@ export default function TransferScreen() {
     setNotice(null);
     setSelectionError(null);
     setTransferProgress(null);
-    setShowQrScanner(false);
     setMode("waiting");
 
     try {
@@ -1059,7 +1081,6 @@ export default function TransferScreen() {
       setSelectionError(null);
       setTransferProgress(null);
       setShowQrCode(false);
-      setShowQrScanner(false);
 
       const session = await startHttpShareSession({
         files: stagedFiles,
@@ -1103,43 +1124,30 @@ export default function TransferScreen() {
     setNotice(null);
   }
 
-  async function handleScanQrPress() {
-    setNotice(null);
-    setSelectionError(null);
+  const handlePendingScannedReceiver = useEffectEvent(async (record: DiscoveryRecord) => {
+    setPendingScannedReceiver(null);
 
-    if (!cameraPermission?.granted) {
-      const permission = await requestCameraPermission();
-      if (!permission.granted) {
-        setNotice("Camera access is required to scan a QR code.");
-        return;
-      }
-    }
-
-    scannedQrRef.current = false;
-    setShowQrScanner((current) => !current);
-  }
-
-  function handleQrCodeValue(value: string) {
-    if (scannedQrRef.current) {
+    if (stagedFiles.length === 0) {
+      setNotice("Pick files first.");
       return;
     }
 
-    scannedQrRef.current = true;
+    await handleSendToReceiver(record);
+  });
 
-    try {
-      const record = parseDiscoveryQrPayload(value);
-      logTransferScreenDebug("Parsed receiver QR code", {
-        targetSessionId: getDebugSessionId(record.sessionId),
-        targetDeviceName: record.deviceName,
-        targetHost: record.host,
-        targetPort: record.port,
-      });
-      void handleSendToReceiver(record);
-    } catch (error) {
-      logTransferScreenDebug("QR code parse failed", getDebugErrorDetails(error));
-      setNotice("That QR code does not contain a valid receiver.");
-      scannedQrRef.current = false;
+  useEffect(() => {
+    if (!isFocused || !pendingScannedReceiver) {
+      return;
     }
+
+    void handlePendingScannedReceiver(pendingScannedReceiver);
+  }, [isFocused, pendingScannedReceiver]);
+
+  function handleScanQrPress() {
+    setNotice(null);
+    setSelectionError(null);
+    setPendingScannedReceiver(null);
+    router.push("/scan-receiver-qr");
   }
 
   const currentProgress = transferProgress ?? activeSendSession?.progress ?? activeReceiveSession?.progress ?? null;
@@ -1266,20 +1274,6 @@ export default function TransferScreen() {
               <Text style={styles.emptySearchLabel}>Looking for receivers...</Text>
             </View>
           )}
-
-          {showQrScanner ? (
-            <View style={styles.scannerCard}>
-              <Text style={styles.scannerTitle}>Scan a receiver QR code</Text>
-              <View style={styles.cameraWrap}>
-                <CameraView
-                  style={styles.camera}
-                  barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
-                  onBarcodeScanned={({ data }) => handleQrCodeValue(data)}
-                />
-              </View>
-              <Text style={styles.scannerHint}>Point the camera at the receiver&apos;s QR code.</Text>
-            </View>
-          ) : null}
         </ScrollView>
 
         <View style={[styles.footerArea, { paddingBottom: footerBottomPadding }]}>
@@ -1287,9 +1281,9 @@ export default function TransferScreen() {
             {stagedFiles.length} file{stagedFiles.length === 1 ? "" : "s"} · {formatBytes(totalStagedBytes)}
           </Text>
           <OutlineButton
-            label={showQrScanner ? "Hide QR scanner" : "Scan receiver QR code"}
+            label={"Scan receiver QR code"}
             icon={<QrCode color={designTheme.primary} size={16} strokeWidth={2} />}
-            onPress={() => void handleScanQrPress()}
+            onPress={handleScanQrPress}
           />
           {notice ? <Text style={styles.footerNotice}>{notice}</Text> : null}
         </View>
@@ -1909,35 +1903,6 @@ const styles = StyleSheet.create({
     color: designTheme.mutedForeground,
     fontFamily: designFonts.regular,
     fontSize: 15,
-  },
-  scannerCard: {
-    backgroundColor: designTheme.muted,
-    borderColor: designTheme.border,
-    borderRadius: 18,
-    borderWidth: 1,
-    gap: 12,
-    marginTop: 24,
-    padding: 16,
-  },
-  scannerTitle: {
-    color: designTheme.foreground,
-    fontFamily: designFonts.semibold,
-    fontSize: 16,
-  },
-  cameraWrap: {
-    borderRadius: 14,
-    overflow: "hidden",
-  },
-  camera: {
-    aspectRatio: 1,
-    backgroundColor: "#000000",
-    width: "100%",
-  },
-  scannerHint: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 13,
-    lineHeight: 20,
   },
   receivingNotice: {
     color: designTheme.mutedForeground,
