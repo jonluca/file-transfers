@@ -125,6 +125,10 @@ const activeSendRuntimes = new Map<string, SendRuntime>();
 const activeReceiveRuntimes = new Map<string, ReceiveRuntime>();
 const PEER_REQUEST_TIMEOUT_MS = 8000;
 const NEARBY_DISCOVERY_REQUEST_TIMEOUT_MS = 2500;
+const NEARBY_DISCOVERY_RESCAN_INTERVAL_MS = 10_000;
+const NEARBY_DISCOVERY_RETRY_DELAY_MS = 1_500;
+const NEARBY_DISCOVERY_STOP_WAIT_TIMEOUT_MS = 2_000;
+const NEARBY_DISCOVERY_STOP_WAIT_POLL_INTERVAL_MS = 100;
 const PROGRESS_UPDATE_INTERVAL_MS = 250;
 const PROGRESS_UPDATE_BYTES = 256 * 1024;
 const DIRECT_TRANSFER_DEBUG_PREFIX = "[DirectTransfer]";
@@ -321,6 +325,24 @@ function getNearbyBonjourServiceType() {
 
 function getNearbyBonjourDomain() {
   return LOCAL_TRANSFER_SERVICE_DOMAIN.replace(/\.+$/, "") || "local";
+}
+
+function wait(milliseconds: number) {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, milliseconds);
+  });
+}
+
+async function waitForNearbyScannerToStop(scanner: BonjourScanner) {
+  const startedAt = Date.now();
+
+  while (scanner.isScanning && Date.now() - startedAt < NEARBY_DISCOVERY_STOP_WAIT_TIMEOUT_MS) {
+    await wait(NEARBY_DISCOVERY_STOP_WAIT_POLL_INTERVAL_MS);
+  }
+}
+
+function toNearbyScanError(error: unknown, fallbackMessage = "Nearby scanning failed.") {
+  return error instanceof Error ? error : new Error(fallbackMessage);
 }
 
 async function createNearbyAdvertiser({
@@ -1662,6 +1684,8 @@ export async function startNearbyScan({
   });
   let stopped = false;
   let syncToken = 0;
+  let restartTimer: ReturnType<typeof setTimeout> | null = null;
+  let restarting = false;
 
   function emitCurrentRecords() {
     logDirectTransferDebug("Nearby discovery records updated", {
@@ -1735,7 +1759,74 @@ export async function startNearbyScan({
     emitCurrentRecords();
   }
 
-  logDirectTransferDebug("Starting nearby discovery scan");
+  function clearRestartTimer() {
+    if (restartTimer) {
+      clearTimeout(restartTimer);
+      restartTimer = null;
+    }
+  }
+
+  function scheduleRestart(delayMs: number, reason: "scheduled" | "failure") {
+    if (stopped) {
+      return;
+    }
+
+    clearRestartTimer();
+    restartTimer = setTimeout(() => {
+      restartTimer = null;
+      void restartScan(reason);
+    }, delayMs);
+  }
+
+  function startScanner() {
+    if (stopped) {
+      return;
+    }
+
+    logDirectTransferDebug("Starting nearby discovery scan", {
+      currentRecordCount: currentRecords.size,
+    });
+
+    try {
+      scanner.scan(getNearbyBonjourServiceType(), getNearbyBonjourDomain(), {
+        addressResolveTimeout: NEARBY_DISCOVERY_REQUEST_TIMEOUT_MS,
+      });
+    } catch (error) {
+      const nextError = toNearbyScanError(error, "Unable to start nearby scanning.");
+      logDirectTransferDebug("Nearby discovery scan start failed", getErrorDebugDetails(nextError));
+      onError?.(nextError);
+      scheduleRestart(NEARBY_DISCOVERY_RETRY_DELAY_MS, "failure");
+    }
+  }
+
+  async function restartScan(reason: "scheduled" | "failure") {
+    if (stopped || restarting) {
+      return;
+    }
+
+    restarting = true;
+    syncToken += 1;
+
+    logDirectTransferDebug("Restarting nearby discovery scan", {
+      reason,
+      currentRecordCount: currentRecords.size,
+    });
+
+    try {
+      scanner.stop();
+      await waitForNearbyScannerToStop(scanner);
+    } finally {
+      restarting = false;
+    }
+
+    if (stopped) {
+      return;
+    }
+
+    startScanner();
+    scheduleRestart(NEARBY_DISCOVERY_RESCAN_INTERVAL_MS, "scheduled");
+  }
+
   const resultsListener = scanner.listenForScanResults((results) => {
     void syncNearbyRecords(results);
   });
@@ -1747,14 +1838,16 @@ export async function startNearbyScan({
         : null;
     const nextError = typeof errorMessage === "string" ? new Error(errorMessage) : new Error("Nearby scanning failed.");
     onError?.(nextError);
+    scheduleRestart(NEARBY_DISCOVERY_RETRY_DELAY_MS, "failure");
   });
-  scanner.scan(getNearbyBonjourServiceType(), getNearbyBonjourDomain(), {
-    addressResolveTimeout: NEARBY_DISCOVERY_REQUEST_TIMEOUT_MS,
-  });
+
+  startScanner();
+  scheduleRestart(NEARBY_DISCOVERY_RESCAN_INTERVAL_MS, "scheduled");
 
   return () => {
     stopped = true;
     syncToken += 1;
+    clearRestartTimer();
     logDirectTransferDebug("Stopping nearby discovery scan", {
       remainingRecords: currentRecords.size,
     });

@@ -150,7 +150,10 @@ function createSelectedFile(asset: DocumentPickerAsset): SelectedTransferFile {
 export async function pickTransferFiles() {
   const result = await DocumentPicker.getDocumentAsync({
     multiple: true,
-    copyToCacheDirectory: true,
+    // iOS already imports a readable copy from the document picker, and Android
+    // can stream large content:// URIs directly. Avoid an extra cache copy on
+    // both platforms so selection does not duplicate multi-GB files up front.
+    copyToCacheDirectory: false,
   });
 
   if (result.canceled) {
