@@ -50,8 +50,12 @@ function getCurrentDevHost() {
 }
 
 export function getApiBaseUrl() {
+  if (!__DEV__) {
+    return PRODUCTION_API_URL;
+  }
+
   const configuredUrl = normalizeUrl(process.env.EXPO_PUBLIC_API_URL);
-  const devHost = __DEV__ ? getCurrentDevHost() : null;
+  const devHost = getCurrentDevHost();
 
   if (configuredUrl) {
     if (!devHost) {
