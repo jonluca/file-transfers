@@ -6,6 +6,8 @@ import { HttpServer, type HttpRequest, type HttpResponse } from "react-native-ni
 import { LOCAL_HTTP_SERVER_PORT, LOCAL_HTTP_SHARE_KEEP_AWAKE_TAG } from "./constants";
 import {
   DIRECT_TOKEN_HEADER,
+  createDiscoveryRecord,
+  createNearbyDiscoveryResponse,
   buildDirectSessionBaseUrl,
   buildDirectSessionUrl,
   isPrivateIpv4Address,
@@ -15,6 +17,7 @@ import {
 import { formatBytes } from "./files";
 import type {
   DirectPeerAccess,
+  DiscoveryRecord,
   DownloadableTransferManifest,
   HttpShareStatus,
   IncomingTransferOffer,
@@ -47,6 +50,7 @@ interface RegisterDirectReceiveSessionOptions {
   sessionId: string;
   token: string;
   deviceName: string;
+  serviceName: string | null;
   onOffer: (offer: IncomingTransferOffer) => Promise<DirectOfferDecision> | DirectOfferDecision;
   onEvent: (event: unknown) => Promise<void> | void;
   onInterrupted?: (detail: string) => Promise<void> | void;
@@ -76,9 +80,7 @@ interface BrowserShareRuntime {
 }
 
 interface DirectReceiveRuntime {
-  sessionId: string;
-  token: string;
-  deviceName: string;
+  discoveryRecord: DiscoveryRecord;
   onOffer: RegisterDirectReceiveSessionOptions["onOffer"];
   onEvent: RegisterDirectReceiveSessionOptions["onEvent"];
   onInterrupted?: RegisterDirectReceiveSessionOptions["onInterrupted"];
@@ -618,7 +620,21 @@ async function handleDirectRequest(runtime: SharedHttpRuntime, request: HttpRequ
   const method = request.method.toUpperCase();
   const pathSegments = getRequestPath(request.path).split("/").filter(Boolean);
 
-  if (pathSegments[0] !== "direct" || pathSegments[1] !== "sessions" || !pathSegments[2]) {
+  if (pathSegments[0] !== "direct") {
+    return null;
+  }
+
+  if (pathSegments[1] === "discovery" && ["GET", "HEAD"].includes(method)) {
+    return createJsonResponse({
+      statusCode: 200,
+      body: createNearbyDiscoveryResponse(
+        Array.from(runtime.directReceivers.values(), (value) => value.discoveryRecord),
+      ),
+      method,
+    });
+  }
+
+  if (pathSegments[1] !== "sessions" || !pathSegments[2]) {
     return null;
   }
 
@@ -637,7 +653,7 @@ async function handleDirectRequest(runtime: SharedHttpRuntime, request: HttpRequ
 
   try {
     if (pathSegments[3] === "offers" && method === "POST" && directReceiver) {
-      ensureDirectToken(request, directReceiver.token);
+      ensureDirectToken(request, directReceiver.discoveryRecord.token);
       const payload = parseJsonBody<{ offer: IncomingTransferOffer }>(request);
       const decision = await directReceiver.onOffer(payload.offer);
 
@@ -662,7 +678,7 @@ async function handleDirectRequest(runtime: SharedHttpRuntime, request: HttpRequ
 
     if (pathSegments[3] === "events" && method === "POST") {
       const handler = directReceiver?.onEvent ?? directSender?.onEvent;
-      const token = directReceiver?.token ?? directSender?.token;
+      const token = directReceiver?.discoveryRecord.token ?? directSender?.token;
 
       if (!handler || !token) {
         throw new Error("Direct transfer session not found.");
@@ -835,15 +851,22 @@ export async function registerDirectReceiveSession({
   sessionId,
   token,
   deviceName,
+  serviceName,
   onOffer,
   onEvent,
   onInterrupted,
 }: RegisterDirectReceiveSessionOptions) {
   const runtime = await ensureRuntime("direct");
   runtime.directReceivers.set(sessionId, {
-    sessionId,
-    token,
-    deviceName,
+    discoveryRecord: createDiscoveryRecord({
+      sessionId,
+      method: "nearby",
+      deviceName,
+      host: runtime.publicHost,
+      port: LOCAL_HTTP_SERVER_PORT,
+      token,
+      serviceName,
+    }),
     onOffer,
     onEvent,
     onInterrupted,
@@ -860,6 +883,22 @@ export async function unregisterDirectReceiveSession(sessionId: string) {
 
   runtime.directReceivers.delete(sessionId);
   await maybeStopIdleRuntime(runtime);
+}
+
+export async function updateDirectReceiveServiceName(sessionId: string, serviceName: string | null) {
+  const runtime = activeRuntime;
+  const receiver = runtime?.directReceivers.get(sessionId);
+  if (!runtime || !receiver) {
+    return;
+  }
+
+  runtime.directReceivers.set(sessionId, {
+    ...receiver,
+    discoveryRecord: {
+      ...receiver.discoveryRecord,
+      serviceName,
+    },
+  });
 }
 
 export async function registerDirectSendSession({

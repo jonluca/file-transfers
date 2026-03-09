@@ -8,6 +8,11 @@ export interface ResolvedNearbyService {
   txt?: Record<string, string | null | undefined> | null;
 }
 
+export interface NearbyDiscoveryResponse {
+  version: 1;
+  receivers: DiscoveryRecord[];
+}
+
 export const DIRECT_TOKEN_HEADER = "x-direct-token";
 
 export function nowIso() {
@@ -85,6 +90,7 @@ export function createDiscoveryRecord({
   port,
   token,
   serviceName,
+  advertisedAt,
 }: {
   sessionId: string;
   method: DiscoveryRecord["method"];
@@ -93,6 +99,7 @@ export function createDiscoveryRecord({
   port: number;
   token: string;
   serviceName: string | null;
+  advertisedAt?: string;
 }) {
   return {
     sessionId,
@@ -101,9 +108,13 @@ export function createDiscoveryRecord({
     host,
     port,
     token,
-    advertisedAt: nowIso(),
+    advertisedAt: advertisedAt ?? nowIso(),
     serviceName,
   } satisfies DiscoveryRecord;
+}
+
+export function buildNearbyDiscoveryUrl(host: string, port: number) {
+  return `http://${host}:${port}/direct/discovery`;
 }
 
 export function buildDirectSessionBaseUrl(peer: Pick<DirectPeerAccess, "host" | "port" | "sessionId">) {
@@ -156,6 +167,53 @@ export function parseDiscoveryQrPayload(value: string) {
     advertisedAt: parsed.advertisedAt,
     serviceName: null,
   } satisfies DiscoveryRecord;
+}
+
+export function createNearbyDiscoveryResponse(records: DiscoveryRecord[]): NearbyDiscoveryResponse {
+  return {
+    version: 1,
+    receivers: records
+      .filter((record) => record.method === "nearby")
+      .map((record) => ({
+        ...record,
+        method: "nearby",
+      })),
+  };
+}
+
+export function parseNearbyDiscoveryResponse(value: unknown) {
+  const parsed = value as {
+    version?: number;
+    receivers?: Array<Partial<DiscoveryRecord> | null | undefined>;
+  };
+
+  if (parsed.version !== 1 || !Array.isArray(parsed.receivers)) {
+    throw new Error("That nearby discovery response is not valid.");
+  }
+
+  return parsed.receivers.map((receiver) => {
+    const host = getUsableNearbyHost(receiver?.host);
+    const sessionId = receiver?.sessionId;
+    const deviceName = receiver?.deviceName;
+    const token = receiver?.token;
+    const port = typeof receiver?.port === "number" ? receiver.port : 0;
+    const advertisedAt = receiver?.advertisedAt;
+
+    if (!sessionId || !deviceName || !token || !host || port <= 0 || !advertisedAt) {
+      throw new Error("That nearby discovery response is missing receiver details.");
+    }
+
+    return createDiscoveryRecord({
+      sessionId,
+      method: "nearby",
+      deviceName,
+      host,
+      port,
+      token,
+      serviceName: receiver?.serviceName ?? null,
+      advertisedAt,
+    });
+  });
 }
 
 export function mapResolvedNearbyService(service: ResolvedNearbyService) {

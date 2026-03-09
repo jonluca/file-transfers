@@ -1,15 +1,19 @@
 import * as Crypto from "expo-crypto";
+import { BonjourScanner, type ScanResult } from "@dawidzawada/bonjour-zeroconf";
 import { File, type Directory } from "expo-file-system";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
-import Zeroconf, { ImplType, type ZeroconfService } from "react-native-zeroconf";
+import NearbyAdvertiser from "@/modules/nearby-advertiser";
 import {
   DIRECT_TOKEN_HEADER,
+  buildNearbyDiscoveryUrl,
   buildDirectSessionUrl,
   createDiscoveryQrPayload,
   createDiscoveryRecord,
   createServiceName,
-  mapResolvedNearbyService,
+  getUsableLanHost,
+  getUsableNearbyHost,
   nowIso,
+  parseNearbyDiscoveryResponse,
   parseDiscoveryQrPayload as parseDirectDiscoveryQrPayload,
   resolveDiscoveryHost,
 } from "./direct-transfer-protocol";
@@ -25,6 +29,7 @@ import {
   registerDirectSendSession,
   unregisterDirectReceiveSession,
   unregisterDirectSendSession,
+  updateDirectReceiveServiceName,
 } from "./local-http-runtime";
 import type {
   DirectPeerAccess,
@@ -91,7 +96,7 @@ interface ReceiveRuntime {
   session: ReceiveSession;
   updateSession?: ReceiveRuntimeUpdate;
   activeDownloadAbortController?: AbortController;
-  stopZeroconfPublishing?: () => void;
+  stopZeroconfPublishing?: () => Promise<void>;
   stopping: boolean;
 }
 
@@ -104,9 +109,9 @@ interface TransferResult {
 const activeSendRuntimes = new Map<string, SendRuntime>();
 const activeReceiveRuntimes = new Map<string, ReceiveRuntime>();
 const PEER_REQUEST_TIMEOUT_MS = 8000;
+const NEARBY_DISCOVERY_REQUEST_TIMEOUT_MS = 2500;
 const PROGRESS_UPDATE_INTERVAL_MS = 250;
 const PROGRESS_UPDATE_BYTES = 128 * 1024;
-const ZEROCONF_IMPL_TYPE = ImplType.DNSSD;
 const DIRECT_TRANSFER_DEBUG_PREFIX = "[DirectTransfer]";
 
 function logDirectTransferDebug(message: string, details?: Record<string, unknown>) {
@@ -270,52 +275,72 @@ function createTransferOutputFile(directory: Directory, fileName: string) {
   return outputFile;
 }
 
-function createZeroconfPublisher({
-  deviceName,
+function getNearbyBonjourServiceType() {
+  return `_${LOCAL_TRANSFER_SERVICE_TYPE}._${LOCAL_TRANSFER_SERVICE_PROTOCOL}`;
+}
+
+function getNearbyBonjourDomain() {
+  return LOCAL_TRANSFER_SERVICE_DOMAIN.replace(/\.+$/, "") || "local";
+}
+
+async function createNearbyAdvertiser({
+  requestedServiceName,
   port,
-  receiverToken,
   sessionId,
 }: {
-  deviceName: string;
+  requestedServiceName: string;
   port: number;
-  receiverToken: string;
   sessionId: string;
 }) {
-  const serviceName = createServiceName(deviceName, sessionId);
-  const zeroconf = new Zeroconf();
-
   logDirectTransferDebug("Publishing nearby receiver service", {
     sessionId: getSessionDebugId(sessionId),
-    deviceName,
     port,
-    serviceName,
+    requestedServiceName,
   });
 
-  zeroconf.publishService(
-    LOCAL_TRANSFER_SERVICE_TYPE,
-    LOCAL_TRANSFER_SERVICE_PROTOCOL,
+  const result = await NearbyAdvertiser.startAdvertising(
+    requestedServiceName,
+    getNearbyBonjourServiceType(),
     LOCAL_TRANSFER_SERVICE_DOMAIN,
-    serviceName,
     port,
-    {
-      sessionId,
-      receiverToken,
-      deviceName,
-    },
-    ZEROCONF_IMPL_TYPE,
   );
+  const serviceName = result.serviceName || requestedServiceName;
 
   return {
     serviceName,
-    stop() {
+    async stop() {
       logDirectTransferDebug("Stopping nearby receiver service", {
         sessionId: getSessionDebugId(sessionId),
         serviceName,
       });
-      zeroconf.unpublishService(serviceName, ZEROCONF_IMPL_TYPE);
-      zeroconf.removeDeviceListeners();
+      await NearbyAdvertiser.stopAdvertising(serviceName);
     },
   };
+}
+
+async function fetchNearbyDiscoveryRecords({ host, port }: { host: string; port: number }) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => {
+    controller.abort();
+  }, NEARBY_DISCOVERY_REQUEST_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(buildNearbyDiscoveryUrl(host, port), {
+      method: "GET",
+      headers: {
+        accept: "application/json",
+      },
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(`Nearby discovery returned ${response.status}.`);
+    }
+
+    return parseNearbyDiscoveryResponse(await response.json());
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function buildPeerAccessFromDiscovery(record: DiscoveryRecord): DirectPeerAccess {
@@ -1170,6 +1195,7 @@ export async function startReceivingAvailability({
 }) {
   const sessionId = Crypto.randomUUID();
   const receiverToken = Crypto.randomUUID().replace(/-/g, "");
+  const requestedServiceName = createServiceName(deviceName, sessionId);
 
   logDirectTransferDebug("Starting receiver availability", {
     sessionId: getSessionDebugId(sessionId),
@@ -1180,6 +1206,7 @@ export async function startReceivingAvailability({
     sessionId,
     token: receiverToken,
     deviceName,
+    serviceName: requestedServiceName,
     onOffer: async (offer) => {
       const runtime = activeReceiveRuntimes.get(sessionId);
       if (!runtime) {
@@ -1228,12 +1255,21 @@ export async function startReceivingAvailability({
     localPort: direct.port,
   });
 
-  const zeroconfPublisher = createZeroconfPublisher({
-    sessionId,
-    deviceName,
-    port: direct.port,
-    receiverToken,
-  });
+  let nearbyAdvertiser: Awaited<ReturnType<typeof createNearbyAdvertiser>>;
+  try {
+    nearbyAdvertiser = await createNearbyAdvertiser({
+      sessionId,
+      requestedServiceName,
+      port: direct.port,
+    });
+  } catch (error) {
+    await unregisterDirectReceiveSession(sessionId).catch(() => {});
+    throw error;
+  }
+
+  if (nearbyAdvertiser.serviceName !== requestedServiceName) {
+    await updateDirectReceiveServiceName(sessionId, nearbyAdvertiser.serviceName);
+  }
 
   const runtime: ReceiveRuntime = {
     session: createInitialReceiveSession(
@@ -1244,11 +1280,11 @@ export async function startReceivingAvailability({
         host: direct.host,
         port: direct.port,
         token: direct.token,
-        serviceName: zeroconfPublisher.serviceName,
+        serviceName: nearbyAdvertiser.serviceName,
       }),
     ),
     updateSession,
-    stopZeroconfPublishing: zeroconfPublisher.stop,
+    stopZeroconfPublishing: nearbyAdvertiser.stop,
     stopping: false,
   };
 
@@ -1291,7 +1327,7 @@ export async function stopReceivingAvailability(sessionId: string) {
     }
   }
 
-  runtime.stopZeroconfPublishing?.();
+  await runtime.stopZeroconfPublishing?.().catch(() => {});
   await unregisterDirectReceiveSession(sessionId).catch(() => {});
   activeReceiveRuntimes.delete(sessionId);
 }
@@ -1386,6 +1422,11 @@ export async function startNearbyScan({
   onError?: (error: Error) => void;
 }) {
   const currentRecords = new Map<string, DiscoveryRecord>();
+  const scanner = new BonjourScanner({
+    id: "direct-transfer-nearby",
+  });
+  let stopped = false;
+  let syncToken = 0;
 
   function emitCurrentRecords() {
     logDirectTransferDebug("Nearby discovery records updated", {
@@ -1397,64 +1438,94 @@ export async function startNearbyScan({
     );
   }
 
-  const zeroconf = new Zeroconf();
-  logDirectTransferDebug("Starting nearby discovery scan");
-  zeroconf.on("resolved", (service: ZeroconfService) => {
-    const nextRecord = mapResolvedNearbyService(service);
-    if (!nextRecord) {
-      logDirectTransferDebug("Ignoring nearby service without usable transfer details", {
-        serviceName: service.name ?? null,
-        host: service.host ?? null,
-        port: service.port ?? null,
-      });
+  async function syncNearbyRecords(results: ScanResult[]) {
+    const currentSyncToken = ++syncToken;
+    const nextRecords = new Map<string, DiscoveryRecord>();
+
+    const groups = await Promise.all(
+      results.map(async (result) => {
+        const host = getUsableLanHost(result.ipv4) ?? getUsableNearbyHost(result.hostname);
+        const port = result.port ?? 0;
+        if (!host || port <= 0) {
+          logDirectTransferDebug("Ignoring nearby service without usable host or port", {
+            serviceName: result.name ?? null,
+            host: result.ipv4 ?? result.hostname ?? null,
+            port: result.port ?? null,
+          });
+          return [];
+        }
+
+        try {
+          const resolvedRecords = await fetchNearbyDiscoveryRecords({
+            host,
+            port,
+          });
+
+          if (!result.name) {
+            return resolvedRecords;
+          }
+
+          const exactMatches = resolvedRecords.filter((record) => record.serviceName === result.name);
+          if (exactMatches.length > 0) {
+            return exactMatches;
+          }
+
+          return resolvedRecords.length === 1 ? resolvedRecords : [];
+        } catch (error) {
+          logDirectTransferDebug("Failed to hydrate nearby service metadata", {
+            serviceName: result.name ?? null,
+            host,
+            port,
+            ...getErrorDebugDetails(error),
+          });
+          return [];
+        }
+      }),
+    );
+
+    if (stopped || currentSyncToken !== syncToken) {
       return;
     }
 
-    const existingRecord = currentRecords.get(nextRecord.sessionId);
-    currentRecords.set(nextRecord.sessionId, nextRecord);
-    logDirectTransferDebug(existingRecord ? "Updated nearby receiver record" : "Discovered nearby receiver", {
-      serviceName: nextRecord.serviceName,
-      ...getDiscoveryDebugDetails(nextRecord),
-    });
-    emitCurrentRecords();
-  });
-  zeroconf.on("remove", (serviceName: string) => {
-    let removed = false;
-    for (const [sessionId, record] of currentRecords) {
-      if (record.serviceName === serviceName && record.method === "nearby") {
-        currentRecords.delete(sessionId);
-        removed = true;
-        logDirectTransferDebug("Removed nearby receiver from discovery", {
-          serviceName,
-          ...getDiscoveryDebugDetails(record),
-        });
+    for (const group of groups) {
+      for (const record of group) {
+        nextRecords.set(record.sessionId, record);
       }
     }
-    if (!removed) {
-      logDirectTransferDebug("Received nearby removal for unknown service", {
-        serviceName,
-      });
-    }
+
+    currentRecords.clear();
+    nextRecords.forEach((record, sessionId) => {
+      currentRecords.set(sessionId, record);
+    });
     emitCurrentRecords();
+  }
+
+  logDirectTransferDebug("Starting nearby discovery scan");
+  const resultsListener = scanner.listenForScanResults((results) => {
+    void syncNearbyRecords(results);
   });
-  zeroconf.on("error", (error: unknown) => {
+  const failListener = scanner.listenForScanFail((error) => {
     logDirectTransferDebug("Nearby discovery scan error", getErrorDebugDetails(error));
-    onError?.(error instanceof Error ? error : new Error("Nearby scanning failed."));
+    const errorMessage =
+      typeof error === "object" && error && "message" in (error as Record<string, unknown>)
+        ? (error as { message?: unknown }).message
+        : null;
+    const nextError = typeof errorMessage === "string" ? new Error(errorMessage) : new Error("Nearby scanning failed.");
+    onError?.(nextError);
   });
-  zeroconf.scan(
-    LOCAL_TRANSFER_SERVICE_TYPE,
-    LOCAL_TRANSFER_SERVICE_PROTOCOL,
-    LOCAL_TRANSFER_SERVICE_DOMAIN,
-    ZEROCONF_IMPL_TYPE,
-  );
+  scanner.scan(getNearbyBonjourServiceType(), getNearbyBonjourDomain(), {
+    addressResolveTimeout: NEARBY_DISCOVERY_REQUEST_TIMEOUT_MS,
+  });
 
   return () => {
+    stopped = true;
+    syncToken += 1;
     logDirectTransferDebug("Stopping nearby discovery scan", {
       remainingRecords: currentRecords.size,
     });
-    zeroconf.stop(ZEROCONF_IMPL_TYPE);
-    zeroconf.removeAllListeners?.();
-    zeroconf.removeDeviceListeners();
+    scanner.stop();
+    resultsListener.remove();
+    failListener.remove();
   };
 }
 

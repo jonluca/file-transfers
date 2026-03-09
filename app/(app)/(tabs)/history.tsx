@@ -1,7 +1,7 @@
 import * as Sharing from "expo-sharing";
 import { router } from "expo-router";
 import React from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import {
   Check,
   Download,
@@ -18,7 +18,12 @@ import {
 } from "lucide-react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { designFonts, designTheme } from "@/lib/design/theme";
-import { formatBytes, openReceivedFileAsync, type ReceivedFileRecord, type TransferHistoryEntry } from "@/lib/file-transfer";
+import {
+  formatBytes,
+  openReceivedFileAsync,
+  type ReceivedFileRecord,
+  type TransferHistoryEntry,
+} from "@/lib/file-transfer";
 import { useRecentTransfers } from "@/store";
 
 function FilePreviewIcon({ type }: { type: string }) {
@@ -106,7 +111,12 @@ async function handleOpenReceivedFile(file: ReceivedFileRecord | undefined) {
     return;
   }
 
-  await openReceivedFileAsync(file);
+  try {
+    await openReceivedFileAsync(file);
+  } catch (error) {
+    console.error("Unable to open received file", error);
+    Alert.alert("Unable to open file", "Try sharing it to another app instead.");
+  }
 }
 
 async function handleShareReceivedFile(file: ReceivedFileRecord | undefined) {
@@ -119,7 +129,12 @@ async function handleShareReceivedFile(file: ReceivedFileRecord | undefined) {
     return;
   }
 
-  await Sharing.shareAsync(file.uri);
+  try {
+    await Sharing.shareAsync(file.uri);
+  } catch (error) {
+    console.error("Unable to share received file", error);
+    Alert.alert("Unable to share file", "Please try again in a moment.");
+  }
 }
 
 function HistoryRow({ entry }: { entry: TransferHistoryEntry }) {

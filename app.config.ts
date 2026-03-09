@@ -74,7 +74,7 @@ export default function getConfig({ config }: ConfigContext): ExpoConfig {
           ITSAppUsesNonExemptEncryption: false,
           NSCameraUsageDescription: "Scan a nearby device QR code to connect to a transfer.",
           NSLocalNetworkUsageDescription: "Discover nearby devices on your local WiFi so files can transfer directly.",
-          NSBonjourServices: ["_filetransfer._tcp."],
+          NSBonjourServices: ["_bonjour._tcp", "_lnp._tcp", "_filetransfer._tcp."],
         },
       },
       android: {

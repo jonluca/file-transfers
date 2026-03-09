@@ -1,0 +1,9 @@
+{
+  "platforms": ["apple", "android", "web"],
+  "apple": {
+    "modules": ["NearbyAdvertiserModule"]
+  },
+  "android": {
+    "modules": ["expo.modules.nearbyadvertiser.NearbyAdvertiserModule"]
+  }
+}

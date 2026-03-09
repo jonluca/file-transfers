@@ -10,14 +10,16 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import {
   DIRECT_TOKEN_HEADER,
+  buildNearbyDiscoveryUrl,
   buildDirectSessionBaseUrl,
   buildDirectSessionUrl,
   createDiscoveryQrPayload,
   createDiscoveryRecord,
+  createNearbyDiscoveryResponse,
   createServiceName,
   getUsableLanHost,
-  mapResolvedNearbyService,
   nowIso,
+  parseNearbyDiscoveryResponse,
   parseDiscoveryQrPayload,
   resolveDiscoveryHost,
 } from "../lib/file-transfer/direct-transfer-protocol";
@@ -299,7 +301,7 @@ function getPreferredLanAddress() {
 
 function getHeader(request: IncomingMessage, name: string) {
   const value = request.headers[name.toLowerCase()];
-  return Array.isArray(value) ? value[0] ?? null : value ?? null;
+  return Array.isArray(value) ? (value[0] ?? null) : (value ?? null);
 }
 
 async function readRequestBody(request: IncomingMessage) {
@@ -424,15 +426,29 @@ function matchTarget(record: DiscoveryRecord, name: string | null, sessionId: st
   );
 }
 
-function parseTxtLine(line: string) {
-  const entries: Record<string, string> = {};
-  const matcher = /(\w+)=([^=]+?)(?=\s+\w+=|$)/g;
+async function fetchNearbyDiscoveryRecords(host: string, port: number) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => {
+    controller.abort();
+  }, REQUEST_TIMEOUT_MS);
 
-  for (const match of line.matchAll(matcher)) {
-    entries[match[1]] = match[2].trim().replace(/\\(.)/g, "$1");
+  try {
+    const response = await fetch(buildNearbyDiscoveryUrl(host, port), {
+      method: "GET",
+      headers: {
+        accept: "application/json",
+      },
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(`Nearby discovery returned ${response.status}.`);
+    }
+
+    return parseNearbyDiscoveryResponse(await response.json());
+  } finally {
+    clearTimeout(timer);
   }
-
-  return entries;
 }
 
 async function resolveBonjourService(instanceName: string, timeoutMs: number) {
@@ -442,15 +458,17 @@ async function resolveBonjourService(instanceName: string, timeoutMs: number) {
     });
 
     let buffered = "";
-    let host: string | null = null;
-    let port = 0;
+    let finished = false;
 
     const timer = setTimeout(() => {
-      child.kill("SIGINT");
-      resolve(null);
+      finish(null);
     }, timeoutMs);
 
     function finish(record: DiscoveryRecord | null) {
+      if (finished) {
+        return;
+      }
+      finished = true;
       clearTimeout(timer);
       child.kill("SIGINT");
       resolve(record);
@@ -464,25 +482,19 @@ async function resolveBonjourService(instanceName: string, timeoutMs: number) {
       for (const line of lines) {
         const hostMatch = line.match(/ can be reached at ([^:]+):(\d+)/);
         if (hostMatch) {
-          host = hostMatch[1].replace(/\.$/, "");
-          port = Number(hostMatch[2]);
+          const host = hostMatch[1].replace(/\.$/, "");
+          const port = Number(hostMatch[2]);
+          void (async () => {
+            try {
+              const resolvedRecords = await fetchNearbyDiscoveryRecords(host, port);
+              const exactMatches = resolvedRecords.filter((record) => record.serviceName === instanceName);
+              finish(exactMatches[0] ?? resolvedRecords[0] ?? null);
+            } catch {
+              finish(null);
+            }
+          })();
           continue;
         }
-
-        const txt = parseTxtLine(line);
-        if (!host || !port || !txt.sessionId || !txt.receiverToken) {
-          continue;
-        }
-
-        finish(
-          mapResolvedNearbyService({
-            name: instanceName,
-            host,
-            port,
-            txt,
-          }),
-        );
-        return;
       }
     });
 
@@ -912,7 +924,9 @@ async function receiveDirectHttpTransfer({
     }
   } catch (error) {
     for (const outputPath of createdFiles) {
-      await stat(outputPath).then(() => unlink(outputPath)).catch(() => {});
+      await stat(outputPath)
+        .then(() => unlink(outputPath))
+        .catch(() => {});
     }
 
     if (error instanceof Error && error.message === "Download canceled.") {
@@ -1152,6 +1166,11 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
     const url = new URL(request.url ?? "/", `http://${host}:${LOCAL_HTTP_SERVER_PORT}`);
     const pathSegments = url.pathname.split("/").filter(Boolean);
     const method = request.method?.toUpperCase() ?? "GET";
+
+    if (pathSegments[0] === "direct" && pathSegments[1] === "discovery" && ["GET", "HEAD"].includes(method)) {
+      sendJson(response, 200, createNearbyDiscoveryResponse([discoveryRecord]));
+      return;
+    }
 
     if (pathSegments[0] !== "direct" || pathSegments[1] !== "sessions" || pathSegments[2] !== sessionId) {
       sendText(response, 404, "Not found.");
@@ -1598,7 +1617,7 @@ async function main() {
   const values = parsed.values;
   const readString = (value: string | boolean | undefined) => (typeof value === "string" ? value : null);
   const readStringList = (value: Array<string | boolean> | undefined) =>
-    (value?.filter((entry): entry is string => typeof entry === "string") ?? []);
+    value?.filter((entry): entry is string => typeof entry === "string") ?? [];
   const readBoolean = (value: string | boolean | undefined) => value === true;
 
   const nearby = readBoolean(values["no-nearby"]) ? false : !("nearby" in values) || readBoolean(values.nearby);
