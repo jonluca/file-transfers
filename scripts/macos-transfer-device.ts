@@ -23,6 +23,7 @@ import {
   parseDiscoveryQrPayload,
   resolveDiscoveryHost,
 } from "../lib/file-transfer/direct-transfer-protocol";
+import { resolveDirectByteRange } from "../lib/file-transfer/direct-transfer-range";
 import type {
   DirectPeerAccess,
   DiscoveryRecord,
@@ -357,18 +358,37 @@ function encodeHeaderFilename(value: string) {
   return `attachment; filename="${safe}"; filename*=UTF-8''${encodeURIComponent(value)}`;
 }
 
-async function sendFile(response: ServerResponse, file: SelectedTransferFile, method: string) {
+async function sendFile(
+  response: ServerResponse,
+  file: SelectedTransferFile,
+  method: string,
+  rangeHeader: string | null,
+) {
   const metadata = await stat(file.uri).catch(() => null);
   if (!metadata?.isFile()) {
     sendText(response, 410, "The selected file is no longer available on this device.");
     return;
   }
 
-  response.writeHead(200, {
+  const fileSize = metadata.size;
+  const range = resolveDirectByteRange(rangeHeader, fileSize);
+  if ("error" in range) {
+    const errorMessage = range.error ?? "Invalid Range header.";
+    sendText(response, errorMessage === "Requested range is not satisfiable." ? 416 : 400, errorMessage, {
+      "accept-ranges": "bytes",
+      "content-range": `bytes */${fileSize}`,
+    });
+    return;
+  }
+
+  const contentLength = fileSize === 0 ? 0 : range.end - range.start + 1;
+  response.writeHead(range.partial ? 206 : 200, {
     "cache-control": "no-store",
     "content-type": file.mimeType || "application/octet-stream",
-    "content-length": String(metadata.size),
+    "content-length": String(contentLength),
     "content-disposition": encodeHeaderFilename(file.name),
+    "accept-ranges": "bytes",
+    ...(range.partial && fileSize > 0 ? { "content-range": `bytes ${range.start}-${range.end}/${fileSize}` } : {}),
   });
 
   if (method === "HEAD") {
@@ -376,7 +396,28 @@ async function sendFile(response: ServerResponse, file: SelectedTransferFile, me
     return;
   }
 
-  createReadStream(file.uri).pipe(response);
+  if (contentLength === 0) {
+    response.end();
+    return;
+  }
+
+  createReadStream(file.uri, {
+    start: range.start,
+    end: range.end,
+  }).pipe(response);
+}
+
+async function writeStreamChunk(stream: ReturnType<typeof createWriteStream>, chunk: Buffer) {
+  await new Promise<void>((resolve, reject) => {
+    stream.write(chunk, (error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+
+      resolve();
+    });
+  });
 }
 
 function inferMimeType(filePath: string) {
@@ -812,7 +853,7 @@ async function streamResponseToFile({
       if (signal.aborted) {
         throw new Error("Download canceled.");
       }
-      stream.write(payload);
+      await writeStreamChunk(stream, payload);
       onBytes(payload.byteLength);
       return;
     }
@@ -832,7 +873,7 @@ async function streamResponseToFile({
         continue;
       }
 
-      stream.write(Buffer.from(value));
+      await writeStreamChunk(stream, Buffer.from(value));
       onBytes(value.byteLength);
     }
   } finally {
@@ -1434,7 +1475,7 @@ async function runSendCommand(options: SendCommandOptions) {
         return;
       }
 
-      await sendFile(response, file, method);
+      await sendFile(response, file, method, getHeader(request, "Range"));
       return;
     }
 
