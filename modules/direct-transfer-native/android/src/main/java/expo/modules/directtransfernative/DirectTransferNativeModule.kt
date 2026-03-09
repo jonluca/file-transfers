@@ -31,12 +31,9 @@ import java.net.URL
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import java.util.concurrent.Future
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.ceil
 import kotlin.math.min
 
@@ -131,17 +128,16 @@ class DirectTransferNativeModule : Module() {
     private val destinationUri: String,
     private val headers: Map<String, String>,
     private val maxBytesPerSecond: Long?,
-    private val maxConcurrentChunks: Int,
     private val taskId: String,
     private val totalBytes: Long,
     private val url: String,
   ) {
     private val cancelled = AtomicBoolean(false)
-    private val chunkIndex = AtomicInteger(0)
-    private val activeConnections = CopyOnWriteArrayList<HttpURLConnection>()
     private val progressLock = Any()
     private val startedAtMs = System.currentTimeMillis().toDouble()
 
+    @Volatile
+    private var activeConnection: HttpURLConnection? = null
     @Volatile
     private var bytesTransferred = 0L
     @Volatile
@@ -151,10 +147,8 @@ class DirectTransferNativeModule : Module() {
 
     fun cancel() {
       cancelled.set(true)
-      activeConnections.forEach { connection ->
-        runCatching {
-          connection.disconnect()
-        }
+      runCatching {
+        activeConnection?.disconnect()
       }
     }
 
@@ -182,28 +176,16 @@ class DirectTransferNativeModule : Module() {
       }
 
       val chunkCount = ceil(totalBytes.toDouble() / chunkBytes.toDouble()).toInt()
-      val workerCount = maxConcurrentChunks.coerceAtLeast(1)
-      val futures = mutableListOf<Future<*>>()
-
-      repeat(workerCount) {
-        futures += ioExecutor.submit {
-          RandomAccessFile(outputFile, "rw").use { file ->
-            while (!cancelled.get()) {
-              val currentChunkIndex = chunkIndex.getAndIncrement()
-              if (currentChunkIndex >= chunkCount) {
-                break
-              }
-
-              val start = currentChunkIndex.toLong() * chunkBytes.toLong()
-              val end = min(start + chunkBytes - 1L, totalBytes - 1L)
-              downloadChunk(file, start, end)
-            }
+      RandomAccessFile(outputFile, "rw").use { file ->
+        for (currentChunkIndex in 0 until chunkCount) {
+          if (cancelled.get()) {
+            break
           }
-        }
-      }
 
-      futures.forEach { future ->
-        future.get()
+          val start = currentChunkIndex.toLong() * chunkBytes.toLong()
+          val end = min(start + chunkBytes - 1L, totalBytes - 1L)
+          downloadChunk(file, start, end)
+        }
       }
 
       if (cancelled.get()) {
@@ -240,7 +222,7 @@ class DirectTransferNativeModule : Module() {
           setRequestProperty(key, value)
         }
       }
-      activeConnections += connection
+      activeConnection = connection
 
       val requestStartedAt = SystemClock.elapsedRealtimeNanos()
       var localDiskWriteDurationMs = 0.0
@@ -301,6 +283,7 @@ class DirectTransferNativeModule : Module() {
           requestDurationMs += elapsedMillis(requestStartedAt)
           diskWriteDurationMs += localDiskWriteDurationMs
         }
+        activeConnection = null
         connection.disconnect()
       }
     }
@@ -389,7 +372,6 @@ class DirectTransferNativeModule : Module() {
           headers = options.requiredStringMap("headers"),
           totalBytes = options.requiredLong("totalBytes"),
           chunkBytes = options.requiredInt("chunkBytes"),
-          maxConcurrentChunks = options.requiredInt("maxConcurrentChunks"),
           maxBytesPerSecond = options.optionalLong("maxBytesPerSecond"),
         )
 

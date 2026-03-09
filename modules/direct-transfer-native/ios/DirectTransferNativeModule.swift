@@ -517,25 +517,7 @@ private final class DownloadTaskProgress {
   }
 }
 
-private actor ChunkAllocator {
-  private var nextChunkIndex = 0
-  private let totalChunkCount: Int
-
-  init(totalChunkCount: Int) {
-    self.totalChunkCount = totalChunkCount
-  }
-
-  func next() -> Int? {
-    guard nextChunkIndex < totalChunkCount else {
-      return nil
-    }
-    let current = nextChunkIndex
-    nextChunkIndex += 1
-    return current
-  }
-}
-
-private actor FileWriter {
+private final class FileWriter {
   private let handle: FileHandle
 
   init(url: URL, totalBytes: Int64) throws {

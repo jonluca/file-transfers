@@ -409,6 +409,11 @@ export default function TransferScreen() {
   >(async () => false);
 
   useEffect(() => {
+    const shouldScanNearby = mode === "sending" && !activeHttpShareSession;
+    if (!shouldScanNearby) {
+      return;
+    }
+
     let cancelled = false;
     let cleanup: (() => void) | undefined;
 
@@ -434,7 +439,7 @@ export default function TransferScreen() {
       cancelled = true;
       cleanup?.();
     };
-  }, [activeReceiveSession?.id, deviceName]);
+  }, [activeHttpShareSession, activeReceiveSession?.id, deviceName, mode]);
 
   useEffect(() => {
     return () => {
