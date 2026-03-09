@@ -1,7 +1,7 @@
 import { CameraView, useCameraPermissions } from "expo-camera";
 import { useIsFocused } from "@react-navigation/native";
 import * as Burnt from "burnt";
-import React, { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
+import React, { startTransition, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, AppState, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import QRCode from "react-native-qrcode-svg";
 import {
@@ -47,6 +47,7 @@ import {
   type TransferProgress,
   type TransferSession,
 } from "@/lib/file-transfer";
+import { noteTransferScreenRender } from "@/lib/file-transfer/transfer-perf";
 import { useAppStore, useDeviceName, useServiceInstanceId } from "@/store";
 
 type TransferMode = "idle" | "sending" | "waiting" | "receiving" | "transferring" | "sharing";
@@ -414,6 +415,17 @@ export default function TransferScreen() {
   }, []);
 
   useEffect(() => {
+    if (activeSendSession?.id) {
+      noteTransferScreenRender(activeSendSession.id, "send");
+      return;
+    }
+
+    if (activeReceiveSession?.id) {
+      noteTransferScreenRender(activeReceiveSession.id, "receive");
+    }
+  });
+
+  useEffect(() => {
     const sessionId = activeReceiveSession?.id;
     return () => {
       if (sessionId) {
@@ -470,7 +482,7 @@ export default function TransferScreen() {
   );
 
   const handleHttpShareSessionUpdate = useEffectEvent((nextSession: HttpShareSession) => {
-    setActiveHttpShareSession({ ...nextSession });
+    setActiveHttpShareSession(nextSession);
 
     if (nextSession.status === "sharing") {
       setMode("sharing");
@@ -507,7 +519,7 @@ export default function TransferScreen() {
   }
 
   function handleReceiveSessionUpdate(nextSession: ReceiveSession) {
-    setActiveReceiveSession({ ...nextSession });
+    setActiveReceiveSession(nextSession);
     if (nextSession.status === "discoverable") {
       if (mode === "receiving") {
         setTransferProgress(nextSession.progress);
@@ -532,14 +544,18 @@ export default function TransferScreen() {
       !handledFinalizedReceiveSessionIds.current.has(nextSession.id)
     ) {
       handledFinalizedReceiveSessionIds.current.add(nextSession.id);
-      upsertRecentTransfer(createHistoryEntryFromReceiveSession(nextSession));
+      startTransition(() => {
+        upsertRecentTransfer(createHistoryEntryFromReceiveSession(nextSession));
+      });
     }
 
     receiveAvailabilityKeyRef.current = null;
     setActiveReceiveSession(null);
 
     if (nextSession.status === "completed") {
-      setNotice(getTransferDetail(nextSession.progress.detail, "Transfer complete."));
+      startTransition(() => {
+        setNotice(getTransferDetail(nextSession.progress.detail, "Transfer complete."));
+      });
       setMode("transferring");
       scheduleReset({ clearFiles: false, nextMode: "idle" });
       void (async () => {
@@ -560,7 +576,9 @@ export default function TransferScreen() {
         !activeHttpShareSession && detail !== "Local transfer stopped because browser sharing started.";
 
       if (shouldSurfaceError) {
-        setNotice(detail);
+        startTransition(() => {
+          setNotice(detail);
+        });
       }
 
       setMode((current) => {
@@ -784,7 +802,7 @@ export default function TransferScreen() {
       currentMode: mode,
     });
 
-    setActiveSendSession({ ...nextSession });
+    setActiveSendSession(nextSession);
     setTransferProgress(nextSession.progress);
 
     if (["waiting", "connecting"].includes(nextSession.status)) {
@@ -802,7 +820,9 @@ export default function TransferScreen() {
       !handledFinalizedSendSessionIds.current.has(nextSession.id)
     ) {
       handledFinalizedSendSessionIds.current.add(nextSession.id);
-      upsertRecentTransfer(createHistoryEntryFromSendSession(nextSession));
+      startTransition(() => {
+        upsertRecentTransfer(createHistoryEntryFromSendSession(nextSession));
+      });
     }
 
     void stopSendingTransfer(nextSession.id);
@@ -812,7 +832,9 @@ export default function TransferScreen() {
         sessionId: getDebugSessionId(nextSession.id),
         detail: nextSession.progress.detail,
       });
-      setNotice(getTransferDetail(nextSession.progress.detail, "Transfer complete."));
+      startTransition(() => {
+        setNotice(getTransferDetail(nextSession.progress.detail, "Transfer complete."));
+      });
       setMode("transferring");
       scheduleReset({ clearFiles: true, nextMode: "idle" });
       return;
@@ -824,7 +846,9 @@ export default function TransferScreen() {
         detail: nextSession.progress.detail,
         peerDeviceName: nextSession.peerDeviceName,
       });
-      setNotice(getTransferDetail(nextSession.progress.detail, "The transfer could not be completed."));
+      startTransition(() => {
+        setNotice(getTransferDetail(nextSession.progress.detail, "The transfer could not be completed."));
+      });
       setActiveSendSession(null);
       setTransferProgress(null);
       setMode("sending");

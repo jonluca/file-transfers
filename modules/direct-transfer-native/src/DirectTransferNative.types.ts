@@ -57,7 +57,9 @@ export interface DirectTransferNativeModuleType {
   ensurePayloadServerStarted(): Promise<DirectTransferNativePayloadServerInfo>;
   getRangeDownloadProgress(taskId: string): Promise<DirectTransferNativeRangeDownloadProgress | null>;
   registerPayloadSession(options: DirectTransferNativePayloadSessionOptions): Promise<void>;
-  startRangeDownload(options: DirectTransferNativeRangeDownloadOptions): Promise<DirectTransferNativeRangeDownloadResult>;
+  startRangeDownload(
+    options: DirectTransferNativeRangeDownloadOptions,
+  ): Promise<DirectTransferNativeRangeDownloadResult>;
   stopPayloadServer(): Promise<void>;
   unregisterPayloadSession(sessionId: string): Promise<void>;
 }

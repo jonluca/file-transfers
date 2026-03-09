@@ -54,6 +54,25 @@ private struct ParsedHttpRequest {
   let path: String
 }
 
+private final class ContinuationGate: @unchecked Sendable {
+  private let lock = NSLock()
+  private var isClaimed = false
+
+  func claim() -> Bool {
+    lock.lock()
+    defer {
+      lock.unlock()
+    }
+
+    guard !isClaimed else {
+      return false
+    }
+
+    isClaimed = true
+    return true
+  }
+}
+
 private final class PayloadServer {
   private let queue = DispatchQueue(label: "DirectTransferNative.PayloadServer")
   private let resolveSession: (String) -> PayloadSession?
@@ -70,24 +89,22 @@ private final class PayloadServer {
       return port
     }
 
-    return try await withCheckedThrowingContinuation { continuation in
+    return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<UInt16, Error>) in
+      let gate = ContinuationGate()
       do {
         let listener = try NWListener(using: .tcp, on: .any)
-        var resumed = false
         listener.stateUpdateHandler = { [weak self] state in
           switch state {
           case .ready:
-            guard !resumed else {
+            guard gate.claim() else {
               return
             }
-            resumed = true
             self?.listener = listener
             continuation.resume(returning: listener.port?.rawValue ?? 0)
           case .failed(let error):
-            guard !resumed else {
+            guard gate.claim() else {
               return
             }
-            resumed = true
             continuation.resume(throwing: error)
           default:
             break
@@ -98,6 +115,9 @@ private final class PayloadServer {
         }
         listener.start(queue: queue)
       } catch {
+        guard gate.claim() else {
+          return
+        }
         continuation.resume(throwing: error)
       }
     }
@@ -289,7 +309,7 @@ private final class PayloadServer {
   }
 
   private func sendRaw(on connection: NWConnection, data: Data?) async throws {
-    try await withCheckedThrowingContinuation { continuation in
+    try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
       connection.send(content: data, completion: .contentProcessed { error in
         if let error {
           continuation.resume(throwing: error)
@@ -693,40 +713,42 @@ public final class DirectTransferNativeModule: Module {
     )
 
     let writer = try FileWriter(url: destinationUrl, totalBytes: totalBytes)
-    defer {
-      try? writer.close()
-    }
+    do {
+      let totalChunkCount = Int(ceil(Double(totalBytes) / Double(chunkBytes)))
+      let allocator = ChunkAllocator(totalChunkCount: totalChunkCount)
 
-    let totalChunkCount = Int(ceil(Double(totalBytes) / Double(chunkBytes)))
-    let allocator = ChunkAllocator(totalChunkCount: totalChunkCount)
-
-    try await withThrowingTaskGroup(of: Void.self) { group in
-      for _ in 0..<max(maxConcurrentChunks, 1) {
-        group.addTask {
-          while let chunkIndex = await allocator.next() {
-            try Task.checkCancellation()
-            let start = Int64(chunkIndex * chunkBytes)
-            let end = min(start + Int64(chunkBytes) - 1, totalBytes - 1)
-            try await self.downloadChunk(
-              url: url,
-              headers: headers,
-              start: start,
-              end: end,
-              totalBytes: totalBytes,
-              maxBytesPerSecond: maxBytesPerSecond,
-              writer: writer,
-              progress: progress
-            )
+      try await withThrowingTaskGroup(of: Void.self) { group in
+        for _ in 0..<max(maxConcurrentChunks, 1) {
+          group.addTask {
+            while let chunkIndex = await allocator.next() {
+              try Task.checkCancellation()
+              let start = Int64(chunkIndex * chunkBytes)
+              let end = min(start + Int64(chunkBytes) - 1, totalBytes - 1)
+              try await self.downloadChunk(
+                url: url,
+                headers: headers,
+                start: start,
+                end: end,
+                totalBytes: totalBytes,
+                maxBytesPerSecond: maxBytesPerSecond,
+                writer: writer,
+                progress: progress
+              )
+            }
           }
         }
+
+        try await group.waitForAll()
       }
 
-      try await group.waitForAll()
+      var result = progress.snapshot()
+      result["completedAtMs"] = Date().timeIntervalSince1970 * 1000
+      try await writer.close()
+      return result
+    } catch {
+      try? await writer.close()
+      throw error
     }
-
-    var result = progress.snapshot()
-    result["completedAtMs"] = Date().timeIntervalSince1970 * 1000
-    return result
   }
 
   private func downloadChunk(

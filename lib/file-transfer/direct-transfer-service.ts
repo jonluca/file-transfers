@@ -3,6 +3,7 @@ import { BonjourScanner, type ScanResult } from "@dawidzawada/bonjour-zeroconf";
 import { File, type Directory } from "expo-file-system";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 import NearbyAdvertiser from "@/modules/nearby-advertiser";
+import { downloadFileWithBestAvailableAdapter } from "./direct-transfer-adapters";
 import {
   DIRECT_TOKEN_HEADER,
   buildNearbyDiscoveryUrl,
@@ -26,12 +27,19 @@ import {
 import { assertSelectedFilesTransferAllowed, getTransferPolicy, type TransferPolicy } from "./transfer-policy";
 import { getReceivedFilesDirectory } from "./files";
 import {
+  collectDirectSendPayloadMetrics,
   registerDirectReceiveSession,
   registerDirectSendSession,
   unregisterDirectReceiveSession,
   unregisterDirectSendSession,
   updateDirectReceiveServiceName,
 } from "./local-http-runtime";
+import {
+  ensureTransferPerfSnapshot,
+  finalizeTransferPerfSnapshot,
+  noteTransferPerfProgressEvent,
+  updateTransferPerfSnapshot,
+} from "./transfer-perf";
 import type {
   DirectPeerAccess,
   DiscoveryRecord,
@@ -104,9 +112,13 @@ interface ReceiveRuntime {
 }
 
 interface TransferResult {
+  diskWriteDurationMs: number;
   receivedFiles: ReceivedFileRecord[];
   bytesTransferred: number;
   detail: string | null;
+  fallbackReason: string | null;
+  requestDurationMs: number;
+  usedNativeClient: boolean;
 }
 
 const activeSendRuntimes = new Map<string, SendRuntime>();
@@ -114,7 +126,7 @@ const activeReceiveRuntimes = new Map<string, ReceiveRuntime>();
 const PEER_REQUEST_TIMEOUT_MS = 8000;
 const NEARBY_DISCOVERY_REQUEST_TIMEOUT_MS = 2500;
 const PROGRESS_UPDATE_INTERVAL_MS = 250;
-const PROGRESS_UPDATE_BYTES = 128 * 1024;
+const PROGRESS_UPDATE_BYTES = 256 * 1024;
 const DIRECT_TRANSFER_DEBUG_PREFIX = "[DirectTransfer]";
 
 function logDirectTransferDebug(message: string, details?: Record<string, unknown>) {
@@ -165,33 +177,6 @@ function getPeerDebugDetails(peer: Pick<DirectPeerAccess, "sessionId" | "host" |
     host: peer.host,
     port: peer.port,
   };
-}
-
-function sleep(milliseconds: number) {
-  return new Promise((resolve) => {
-    setTimeout(resolve, milliseconds);
-  });
-}
-
-async function throttleTransferBytes({
-  bytesTransferred,
-  maxBytesPerSecond,
-  startedAt,
-}: {
-  bytesTransferred: number;
-  maxBytesPerSecond: number | null;
-  startedAt: number;
-}) {
-  if (!maxBytesPerSecond || bytesTransferred <= 0) {
-    return;
-  }
-
-  const minimumDurationMs = Math.ceil((bytesTransferred / maxBytesPerSecond) * 1000);
-  const elapsedMs = Date.now() - startedAt;
-  const remainingMs = minimumDurationMs - elapsedMs;
-  if (remainingMs > 0) {
-    await sleep(remainingMs);
-  }
 }
 
 function toTransferManifestFile(file: SelectedTransferFile): TransferManifestFile {
@@ -266,6 +251,7 @@ function withSendSessionUpdate(runtime: SendRuntime, patch: Partial<TransferSess
     });
   }
 
+  noteTransferPerfProgressEvent(runtime.session.id, "send");
   runtime.updateSession?.(runtime.session);
 }
 
@@ -276,6 +262,7 @@ function withReceiveSessionUpdate(runtime: ReceiveRuntime, patch: Partial<Receiv
     progress: patch.progress ?? runtime.session.progress,
     receivedFiles: patch.receivedFiles ?? runtime.session.receivedFiles,
   };
+  noteTransferPerfProgressEvent(runtime.session.id, "receive");
   runtime.updateSession?.(runtime.session);
 }
 
@@ -544,10 +531,12 @@ async function postIncomingOffer(peer: DiscoveryRecord, offer: IncomingTransferO
 async function fetchDownloadableManifest({
   peer,
   offer,
+  sessionId,
   signal,
 }: {
   peer: DirectPeerAccess;
   offer: IncomingTransferOffer;
+  sessionId: string;
   signal: AbortSignal;
 }) {
   logDirectTransferDebug("Fetching sender manifest", {
@@ -556,6 +545,7 @@ async function fetchDownloadableManifest({
     ...getPeerDebugDetails(peer),
   });
 
+  const startedAt = Date.now();
   const response = await fetch(buildDirectSessionUrl(peer, "/manifest"), {
     method: "GET",
     headers: {
@@ -583,162 +573,38 @@ async function fetchDownloadableManifest({
     totalBytes: payload.totalBytes,
   });
 
+  updateTransferPerfSnapshot(sessionId, "receive", (snapshot) => {
+    snapshot.manifestLatencyMs = Date.now() - startedAt;
+    snapshot.totalBytes = payload.totalBytes;
+  });
+
   return payload;
-}
-
-function parseContentRangeHeader(value: string | null) {
-  if (!value) {
-    return null;
-  }
-
-  const match = /^bytes (\d+)-(\d+)\/(\d+|\*)$/i.exec(value.trim());
-  if (!match) {
-    return null;
-  }
-
-  const start = Number(match[1]);
-  const end = Number(match[2]);
-  const total = match[3] === "*" ? null : Number(match[3]);
-
-  if (!Number.isFinite(start) || !Number.isFinite(end) || (total !== null && !Number.isFinite(total))) {
-    return null;
-  }
-
-  return {
-    start,
-    end,
-    total,
-  };
-}
-
-async function downloadFileInChunks({
-  url,
-  destination,
-  chunkBytes,
-  maxBytesPerSecond,
-  totalBytes,
-  headers,
-  signal,
-  onBytes,
-}: {
-  chunkBytes: number;
-  url: string;
-  destination: File;
-  maxBytesPerSecond: number | null;
-  totalBytes: number;
-  headers: Record<string, string>;
-  signal: AbortSignal;
-  onBytes: (value: number) => void;
-}) {
-  destination.create({ overwrite: true, intermediates: true });
-  if (totalBytes === 0) {
-    return;
-  }
-
-  const handle = destination.open();
-  try {
-    let bytesDownloaded = 0;
-
-    while (bytesDownloaded < totalBytes) {
-      if (signal.aborted) {
-        throw new Error("Download canceled.");
-      }
-
-      const chunkStartedAt = Date.now();
-      const chunkEnd = Math.min(bytesDownloaded + chunkBytes - 1, totalBytes - 1);
-      const response = await fetch(url, {
-        method: "GET",
-        headers: {
-          ...headers,
-          Range: `bytes=${bytesDownloaded}-${chunkEnd}`,
-        },
-        signal,
-      });
-
-      if (!response.ok) {
-        throw new Error(`Unable to download file chunk (${response.status}).`);
-      }
-
-      const contentRange = parseContentRangeHeader(response.headers.get("content-range"));
-      if (response.status !== 206 || !contentRange) {
-        throw new Error("The sender did not return a partial content response.");
-      }
-
-      const expectedChunkBytes = chunkEnd - bytesDownloaded + 1;
-      if (
-        contentRange.start !== bytesDownloaded ||
-        contentRange.end !== chunkEnd ||
-        (contentRange.total !== null && contentRange.total !== totalBytes)
-      ) {
-        throw new Error("The sender returned an unexpected file chunk.");
-      }
-
-      let chunkBytesDownloaded = 0;
-
-      if (!response.body) {
-        const bytes = new Uint8Array(await response.arrayBuffer());
-        if (signal.aborted) {
-          throw new Error("Download canceled.");
-        }
-
-        if (bytes.byteLength !== expectedChunkBytes) {
-          throw new Error("The sender returned an incomplete file chunk.");
-        }
-
-        handle.writeBytes(bytes);
-        chunkBytesDownloaded += bytes.byteLength;
-        bytesDownloaded += bytes.byteLength;
-        onBytes(bytes.byteLength);
-        continue;
-      }
-
-      const reader = response.body.getReader();
-
-      while (chunkBytesDownloaded < expectedChunkBytes) {
-        if (signal.aborted) {
-          throw new Error("Download canceled.");
-        }
-
-        const { done, value } = await reader.read();
-        if (done) {
-          break;
-        }
-
-        if (!value?.byteLength) {
-          continue;
-        }
-
-        const remainingChunkBytes = expectedChunkBytes - chunkBytesDownloaded;
-        if (value.byteLength > remainingChunkBytes) {
-          throw new Error("The sender returned too many bytes for this file chunk.");
-        }
-
-        handle.writeBytes(value);
-        chunkBytesDownloaded += value.byteLength;
-        bytesDownloaded += value.byteLength;
-        onBytes(value.byteLength);
-      }
-
-      if (chunkBytesDownloaded !== expectedChunkBytes) {
-        throw new Error("The sender returned an incomplete file chunk.");
-      }
-
-      await throttleTransferBytes({
-        bytesTransferred: chunkBytesDownloaded,
-        maxBytesPerSecond,
-        startedAt: chunkStartedAt,
-      });
-    }
-  } finally {
-    handle.close();
-  }
 }
 
 function isSendRuntimeSettled(runtime: SendRuntime) {
   return ["completed", "failed", "canceled"].includes(runtime.session.status);
 }
 
-function failSendSession(runtime: SendRuntime, detail: string) {
+async function finalizeSendPerf(runtime: SendRuntime) {
+  await collectDirectSendPayloadMetrics(runtime.session.id).catch(() => {});
+  finalizeTransferPerfSnapshot(runtime.session.id, "send", {
+    bytesTransferred: runtime.session.progress.bytesTransferred,
+    totalBytes: runtime.session.manifest.totalBytes,
+  });
+}
+
+function finalizeReceivePerf(runtime: ReceiveRuntime) {
+  finalizeTransferPerfSnapshot(runtime.session.id, "receive", {
+    bytesTransferred: runtime.session.progress.bytesTransferred,
+    totalBytes: runtime.session.incomingOffer?.totalBytes ?? runtime.session.progress.totalBytes,
+  });
+}
+
+async function failSendSession(runtime: SendRuntime, detail: string) {
+  if (isSendRuntimeSettled(runtime)) {
+    return;
+  }
+
   withSendSessionUpdate(runtime, {
     status: "failed",
     awaitingReceiverResponse: false,
@@ -749,9 +615,34 @@ function failSendSession(runtime: SendRuntime, detail: string) {
       updatedAt: nowIso(),
     },
   });
+
+  await finalizeSendPerf(runtime);
 }
 
-function completeSendSession(runtime: SendRuntime, detail: string) {
+async function cancelSendSession(runtime: SendRuntime, detail: string) {
+  if (isSendRuntimeSettled(runtime)) {
+    return;
+  }
+
+  withSendSessionUpdate(runtime, {
+    status: "canceled",
+    awaitingReceiverResponse: false,
+    progress: {
+      ...runtime.session.progress,
+      phase: "canceled",
+      detail,
+      updatedAt: nowIso(),
+    },
+  });
+
+  await finalizeSendPerf(runtime);
+}
+
+async function completeSendSession(runtime: SendRuntime, detail: string) {
+  if (isSendRuntimeSettled(runtime)) {
+    return;
+  }
+
   withSendSessionUpdate(runtime, {
     status: "completed",
     awaitingReceiverResponse: false,
@@ -765,6 +656,8 @@ function completeSendSession(runtime: SendRuntime, detail: string) {
       updatedAt: nowIso(),
     },
   });
+
+  await finalizeSendPerf(runtime);
 }
 
 function resetReceiveToDiscoverable(runtime: ReceiveRuntime, detail = "Ready to receive files.") {
@@ -788,7 +681,11 @@ function resetReceiveToDiscoverable(runtime: ReceiveRuntime, detail = "Ready to 
   });
 }
 
-function failReceiveSession(runtime: ReceiveRuntime, detail: string) {
+async function failReceiveSession(runtime: ReceiveRuntime, detail: string) {
+  if (["completed", "failed", "canceled"].includes(runtime.session.status)) {
+    return;
+  }
+
   runtime.activeDownloadAbortController?.abort();
   runtime.activeDownloadAbortController = undefined;
 
@@ -804,6 +701,32 @@ function failReceiveSession(runtime: ReceiveRuntime, detail: string) {
       updatedAt: nowIso(),
     },
   });
+
+  finalizeReceivePerf(runtime);
+}
+
+async function cancelReceiveSession(runtime: ReceiveRuntime, detail: string) {
+  if (["completed", "failed", "canceled"].includes(runtime.session.status)) {
+    return;
+  }
+
+  runtime.activeDownloadAbortController?.abort();
+  runtime.activeDownloadAbortController = undefined;
+
+  withReceiveSessionUpdate(runtime, {
+    status: "canceled",
+    progress: {
+      phase: "canceled",
+      totalBytes: runtime.session.incomingOffer?.totalBytes ?? runtime.session.progress.totalBytes,
+      bytesTransferred: runtime.session.progress.bytesTransferred,
+      currentFileName: null,
+      speedBytesPerSecond: 0,
+      detail,
+      updatedAt: nowIso(),
+    },
+  });
+
+  finalizeReceivePerf(runtime);
 }
 
 function isReceiveRuntimeBusy(runtime: ReceiveRuntime) {
@@ -930,12 +853,21 @@ async function receiveDirectHttpTransfer({
     const manifest = await fetchDownloadableManifest({
       peer: offer.sender,
       offer,
+      sessionId: runtime.session.id,
       signal: abortController.signal,
     });
+    const downloadPolicy = manifest.downloadPolicy ?? {
+      chunkBytes: runtime.transferPolicy.chunkBytes,
+      maxConcurrentChunks: runtime.transferPolicy.maxConcurrentChunks,
+    };
 
     const receivedFiles: ReceivedFileRecord[] = [];
     let bytesTransferred = 0;
     const downloadStartedAt = Date.now();
+    let totalRequestDurationMs = 0;
+    let totalDiskWriteDurationMs = 0;
+    let usedNativeClient = false;
+    let fallbackReason: string | null = null;
 
     for (const file of manifest.files) {
       const outputFile = createTransferOutputFile(getReceivedFilesDirectory(), file.name);
@@ -949,6 +881,7 @@ async function receiveDirectHttpTransfer({
       });
 
       let fileBytesTransferred = 0;
+      let lastReportedFileBytes = 0;
 
       onProgress({
         phase: "transferring",
@@ -960,19 +893,22 @@ async function receiveDirectHttpTransfer({
         updatedAt: nowIso(),
       });
 
-      await downloadFileInChunks({
-        chunkBytes: runtime.transferPolicy.chunkBytes,
+      const adapterResult = await downloadFileWithBestAvailableAdapter({
+        chunkBytes: downloadPolicy.chunkBytes,
         url: file.downloadUrl,
         destination: outputFile,
-        maxBytesPerSecond: runtime.transferPolicy.maxBytesPerSecond,
+        maxBytesPerSecond: null,
+        maxConcurrentChunks: downloadPolicy.maxConcurrentChunks,
         totalBytes: file.sizeBytes,
         headers: {
           [DIRECT_TOKEN_HEADER]: offer.sender.token,
         },
         signal: abortController.signal,
-        onBytes: (chunkBytes) => {
-          fileBytesTransferred += chunkBytes;
-          bytesTransferred += chunkBytes;
+        onProgress: (progress) => {
+          const delta = Math.max(progress.bytesTransferred - lastReportedFileBytes, 0);
+          lastReportedFileBytes = progress.bytesTransferred;
+          fileBytesTransferred = progress.bytesTransferred;
+          bytesTransferred += delta;
           const elapsedMilliseconds = Math.max(Date.now() - downloadStartedAt, 1);
           const speedBytesPerSecond = Math.round((bytesTransferred / elapsedMilliseconds) * 1000);
 
@@ -987,6 +923,10 @@ async function receiveDirectHttpTransfer({
           });
         },
       });
+      totalRequestDurationMs += adapterResult.requestDurationMs;
+      totalDiskWriteDurationMs += adapterResult.diskWriteDurationMs;
+      usedNativeClient = usedNativeClient || adapterResult.usedNative;
+      fallbackReason ??= adapterResult.fallbackReason;
 
       receivedFiles.push({
         id: Crypto.randomUUID(),
@@ -1015,6 +955,10 @@ async function receiveDirectHttpTransfer({
       receivedFiles,
       bytesTransferred,
       detail: "Transfer complete.",
+      diskWriteDurationMs: totalDiskWriteDurationMs,
+      fallbackReason,
+      requestDurationMs: totalRequestDurationMs,
+      usedNativeClient,
     } satisfies TransferResult;
   } catch (error) {
     logDirectTransferDebug("Receiver direct transfer failed", {
@@ -1139,7 +1083,7 @@ async function handleSenderEvent(runtime: SendRuntime, event: ReceiverToSenderEv
       sessionId: getSessionDebugId(runtime.session.id),
       detail: event.detail,
     });
-    completeSendSession(runtime, event.detail ?? "Transfer complete.");
+    await completeSendSession(runtime, event.detail ?? "Transfer complete.");
     return;
   }
 
@@ -1148,7 +1092,7 @@ async function handleSenderEvent(runtime: SendRuntime, event: ReceiverToSenderEv
       sessionId: getSessionDebugId(runtime.session.id),
       message: event.message,
     });
-    failSendSession(runtime, event.message || "Transfer declined.");
+    await failSendSession(runtime, event.message || "Transfer declined.");
     return;
   }
 
@@ -1157,7 +1101,12 @@ async function handleSenderEvent(runtime: SendRuntime, event: ReceiverToSenderEv
     kind: event.kind,
     message: event.message,
   });
-  failSendSession(runtime, event.message || "Transfer stopped.");
+  if (event.kind === "canceled") {
+    await cancelSendSession(runtime, event.message || "Transfer stopped.");
+    return;
+  }
+
+  await failSendSession(runtime, event.message || "Transfer stopped.");
 }
 
 async function handleReceiverEvent(runtime: ReceiveRuntime, event: SenderToReceiverEvent) {
@@ -1174,7 +1123,12 @@ async function handleReceiverEvent(runtime: ReceiveRuntime, event: SenderToRecei
     return;
   }
 
-  failReceiveSession(runtime, detail);
+  if (event.kind === "canceled") {
+    await cancelReceiveSession(runtime, detail);
+    return;
+  }
+
+  await failReceiveSession(runtime, detail);
 }
 
 async function startOffer(runtime: SendRuntime, offer: IncomingTransferOffer) {
@@ -1201,7 +1155,7 @@ async function startOffer(runtime: SendRuntime, offer: IncomingTransferOffer) {
       targetDeviceName: runtime.target.deviceName,
       ...getErrorDebugDetails(error),
     });
-    failSendSession(runtime, error instanceof Error ? error.message : "Unable to reach that receiver.");
+    await failSendSession(runtime, error instanceof Error ? error.message : "Unable to reach that receiver.");
   }
 }
 
@@ -1223,7 +1177,7 @@ async function handleSendRegistrationInterrupted(runtime: SendRuntime, detail: s
     }).catch(() => {});
   }
 
-  failSendSession(runtime, detail);
+  await failSendSession(runtime, detail);
 }
 
 async function handleReceiveRegistrationInterrupted(runtime: ReceiveRuntime, detail: string) {
@@ -1252,7 +1206,7 @@ async function handleReceiveRegistrationInterrupted(runtime: ReceiveRuntime, det
     await postDirectEvent(offer.sender, event).catch(() => {});
   }
 
-  failReceiveSession(runtime, detail);
+  await failReceiveSession(runtime, detail);
 }
 
 export async function startSendingTransfer({
@@ -1270,6 +1224,7 @@ export async function startSendingTransfer({
 }) {
   const sessionId = Crypto.randomUUID();
   const transferPolicy = assertSelectedFilesTransferAllowed(files, isPremium, "send");
+  ensureTransferPerfSnapshot(sessionId, "send");
 
   logDirectTransferDebug("Starting sender transfer session", {
     senderSessionId: getSessionDebugId(sessionId),
@@ -1336,6 +1291,9 @@ export async function startSendingTransfer({
     files,
     deviceName,
     sessionId,
+  });
+  updateTransferPerfSnapshot(sessionId, "send", (snapshot) => {
+    snapshot.totalBytes = manifest.totalBytes;
   });
 
   const direct = await registerDirectSendSession({
@@ -1418,6 +1376,10 @@ export async function stopSendingTransfer(sessionId: string) {
     }).catch(() => {});
   }
 
+  if (!isSendRuntimeSettled(runtime)) {
+    await cancelSendSession(runtime, "Sender canceled the transfer.");
+  }
+
   await unregisterDirectSendSession(runtime.session.id).catch(() => {});
   activeSendRuntimes.delete(sessionId);
 }
@@ -1436,7 +1398,11 @@ export async function startReceivingAvailability({
   const sessionId = Crypto.randomUUID();
   const receiverToken = Crypto.randomUUID().replace(/-/g, "");
   const requestedServiceName = createServiceName(serviceInstanceId);
-  const transferPolicy = getTransferPolicy(isPremium);
+  const transferPolicy = getTransferPolicy(isPremium, "receive");
+  ensureTransferPerfSnapshot(sessionId, "receive");
+  updateTransferPerfSnapshot(sessionId, "receive", (snapshot) => {
+    snapshot.totalBytes = 0;
+  });
 
   logDirectTransferDebug("Starting receiver availability", {
     sessionId: getSessionDebugId(sessionId),
@@ -1567,6 +1533,7 @@ export async function stopReceivingAvailability(sessionId: string) {
         kind: "canceled",
         message: "Receiver canceled the transfer.",
       }).catch(() => {});
+      await cancelReceiveSession(runtime, "Receiver canceled the transfer.");
     }
   }
 
@@ -1608,6 +1575,13 @@ export async function acceptIncomingTransferOffer(sessionId: string) {
         updatedAt: nowIso(),
       },
     });
+    updateTransferPerfSnapshot(sessionId, "receive", (snapshot) => {
+      snapshot.receiverRequestDurationMs += result.requestDurationMs;
+      snapshot.receiverDiskWriteDurationMs += result.diskWriteDurationMs;
+      snapshot.usedNativeClient = result.usedNativeClient;
+      snapshot.fallbackReason = result.fallbackReason;
+    });
+    finalizeReceivePerf(runtime);
     logDirectTransferDebug("Incoming transfer offer completed", {
       sessionId: getSessionDebugId(sessionId),
       offerId: getSessionDebugId(runtime.session.incomingOffer?.id),
@@ -1632,7 +1606,7 @@ export async function acceptIncomingTransferOffer(sessionId: string) {
       }).catch(() => {});
     }
 
-    failReceiveSession(runtime, detail);
+    await failReceiveSession(runtime, detail);
     return false;
   }
 }

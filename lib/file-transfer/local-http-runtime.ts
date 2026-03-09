@@ -3,6 +3,13 @@ import { File } from "expo-file-system";
 import * as Network from "expo-network";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 import { ConfigServer, type HttpRequest, type HttpResponse, type ServerConfig } from "react-native-nitro-http-server";
+import {
+  collectNativePayloadMetrics,
+  ensureNativePayloadServerStarted,
+  registerNativePayloadSession,
+  stopNativePayloadServer,
+  unregisterNativePayloadSession,
+} from "./direct-transfer-native";
 import { LOCAL_HTTP_SERVER_PORT, LOCAL_HTTP_SHARE_KEEP_AWAKE_TAG } from "./constants";
 import { createAttachmentContentDisposition } from "./content-disposition";
 import {
@@ -18,6 +25,7 @@ import {
 import { resolveDirectByteRange } from "./direct-transfer-range";
 import { formatBytes } from "./files";
 import { assertSelectedFilesTransferAllowed, type TransferPolicy } from "./transfer-policy";
+import { updateTransferPerfSnapshot } from "./transfer-perf";
 import type {
   DirectPeerAccess,
   DiscoveryRecord,
@@ -100,6 +108,7 @@ interface DirectSendRuntime {
   startedAt: string;
   files: SelectedTransferFile[];
   filesById: Map<string, HostedShareFile>;
+  payloadServerPort: number | null;
   transferPolicy: TransferPolicy;
   onEvent: RegisterDirectSendSessionOptions["onEvent"];
   onInterrupted?: RegisterDirectSendSessionOptions["onInterrupted"];
@@ -502,7 +511,7 @@ function createDirectManifest(runtime: SharedHttpRuntime, sendSession: DirectSen
   const directBaseUrl = {
     sessionId: sendSession.sessionId,
     host: runtime.publicHost,
-    port: LOCAL_HTTP_SERVER_PORT,
+    port: sendSession.payloadServerPort ?? LOCAL_HTTP_SERVER_PORT,
   };
 
   return {
@@ -513,6 +522,10 @@ function createDirectManifest(runtime: SharedHttpRuntime, sendSession: DirectSen
     startedAt: sendSession.startedAt,
     shareUrl: buildDirectSessionBaseUrl(directBaseUrl),
     totalBytes: sendSession.files.reduce((sum, file) => sum + file.sizeBytes, 0),
+    downloadPolicy: {
+      chunkBytes: sendSession.transferPolicy.chunkBytes,
+      maxConcurrentChunks: sendSession.transferPolicy.maxConcurrentChunks,
+    },
     files: sendSession.files.map((file) => {
       const hostedFile = sendSession.filesById.get(file.id);
       if (!hostedFile) {
@@ -569,10 +582,15 @@ async function createFileDownloadResponse({
   method,
   attachmentFileName,
   maxBytesPerSecond,
+  perfContext,
 }: {
   attachmentFileName?: string;
   file: SelectedTransferFile;
   maxBytesPerSecond: number | null;
+  perfContext?: {
+    fileId: string;
+    sessionId: string;
+  };
   request: HttpRequest;
   method: string;
 }): Promise<HttpResponse> {
@@ -635,7 +653,9 @@ async function createFileDownloadResponse({
 
   try {
     handle.offset = range.start;
+    const fileReadStartedAt = Date.now();
     const bytes = handle.readBytes(contentLength);
+    const fileReadDurationMs = Date.now() - fileReadStartedAt;
 
     await throttleTransferBytes({
       bytesTransferred: bytes.byteLength,
@@ -643,12 +663,23 @@ async function createFileDownloadResponse({
       startedAt,
     });
 
-    return createBinaryResponse({
+    const responseCopyStartedAt = Date.now();
+    const response = createBinaryResponse({
       statusCode: range.partial ? 206 : 200,
       body: bytes,
       method,
       headers,
     });
+    const responseCopyDurationMs = Date.now() - responseCopyStartedAt;
+
+    if (perfContext) {
+      updateTransferPerfSnapshot(perfContext.sessionId, "send", (snapshot) => {
+        snapshot.senderFileReadDurationMs += fileReadDurationMs;
+        snapshot.senderResponseCopyDurationMs += responseCopyDurationMs;
+      });
+    }
+
+    return response;
   } finally {
     handle.close();
   }
@@ -736,6 +767,7 @@ async function stopSharedRuntime(runtime: SharedHttpRuntime) {
   }
 
   setActiveRuntime(null);
+  await stopNativePayloadServer().catch(() => {});
   await stopRuntimeServer(runtime);
 }
 
@@ -982,6 +1014,10 @@ async function handleDirectRequest(runtime: SharedHttpRuntime, request: HttpRequ
       return createFileDownloadResponse({
         file: hostedFile.source,
         maxBytesPerSecond: directSender.transferPolicy.maxBytesPerSecond,
+        perfContext: {
+          sessionId,
+          fileId,
+        },
         request,
         method,
       });
@@ -1195,6 +1231,7 @@ export async function registerDirectSendSession({
   validateSelectedFiles(files, "Pick at least one file to start a local transfer.");
 
   const runtime = await ensureRuntime("direct");
+  const payloadServerInfo = await ensureNativePayloadServerStarted().catch(() => null);
   runtime.directSenders.set(sessionId, {
     sessionId,
     token,
@@ -1204,13 +1241,29 @@ export async function registerDirectSendSession({
     filesById: new Map(
       buildDirectHostedFiles({ sessionId, token, files }).map((hostedFile) => [hostedFile.source.id, hostedFile]),
     ),
+    payloadServerPort: payloadServerInfo?.port ?? null,
     transferPolicy,
     onEvent,
     onInterrupted,
   });
+
+  if (payloadServerInfo?.port) {
+    await registerNativePayloadSession({
+      sessionId,
+      token,
+      files: files.map((file) => ({
+        id: file.id,
+        uri: file.uri,
+        mimeType: file.mimeType,
+        sizeBytes: file.sizeBytes,
+      })),
+      maxBytesPerSecond: transferPolicy.maxBytesPerSecond,
+    }).catch(() => {});
+  }
   try {
     await refreshRuntimeServer(runtime);
   } catch (error) {
+    await unregisterNativePayloadSession(sessionId).catch(() => {});
     runtime.directSenders.delete(sessionId);
     await maybeStopIdleRuntime(runtime);
     throw error;
@@ -1225,6 +1278,7 @@ export async function unregisterDirectSendSession(sessionId: string) {
     return;
   }
 
+  await unregisterNativePayloadSession(sessionId).catch(() => {});
   runtime.directSenders.delete(sessionId);
   if (runtime.browserSession || runtime.directReceivers.size > 0 || runtime.directSenders.size > 0) {
     await refreshRuntimeServer(runtime);
@@ -1232,4 +1286,19 @@ export async function unregisterDirectSendSession(sessionId: string) {
   }
 
   await maybeStopIdleRuntime(runtime);
+}
+
+export async function collectDirectSendPayloadMetrics(sessionId: string) {
+  const nativeMetrics = await collectNativePayloadMetrics(sessionId).catch(() => []);
+  if (nativeMetrics.length > 0) {
+    updateTransferPerfSnapshot(sessionId, "send", (snapshot) => {
+      snapshot.usedNativeServer = true;
+      for (const metric of nativeMetrics) {
+        snapshot.senderFileReadDurationMs += metric.fileReadDurationMs;
+        snapshot.senderResponseCopyDurationMs += metric.responseCopyDurationMs;
+      }
+    });
+  }
+
+  return nativeMetrics;
 }

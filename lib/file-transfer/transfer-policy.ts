@@ -77,7 +77,17 @@ function formatPolicyBytes(value: number) {
   return `${current.toFixed(current >= 100 ? 0 : 1)} ${units[unitIndex]}`;
 }
 
-export function getTransferPolicy(isPremium: boolean): TransferPolicy {
+export function getTransferPolicy(isPremium: boolean, context: TransferPolicyContext = "send"): TransferPolicy {
+  if (context === "receive") {
+    return {
+      chunkBytes: DIRECT_TRANSFER_CHUNK_BYTES,
+      isPremium,
+      maxConcurrentChunks: DIRECT_TRANSFER_MAX_CONCURRENT_CHUNKS,
+      maxBytesPerSecond: null,
+      maxTransferBytes: null,
+    };
+  }
+
   if (isPremium) {
     return {
       chunkBytes: DIRECT_TRANSFER_CHUNK_BYTES,
@@ -118,8 +128,8 @@ export function getTransferSizeLimitNotice({
 
   if (context === "receive") {
     return {
-      title: "Free receiver speed limit reached",
-      description: `Free receivers can download at up to ${FREE_TRANSFER_MAX_SPEED_LABEL}. Upgrade to ${FILE_TRANSFERS_PRO_NAME} for full-speed receiving.`,
+      title: "Nearby receiving is uncapped",
+      description: "Nearby transfers only slow down when the sender is on the free tier.",
     };
   }
 
@@ -146,7 +156,7 @@ export function assertTransferSizeAllowed({
   isPremium: boolean;
   totalBytes: number;
 }) {
-  const policy = getTransferPolicy(isPremium);
+  const policy = getTransferPolicy(isPremium, context);
   if (policy.maxTransferBytes !== null && totalBytes > policy.maxTransferBytes) {
     throw new TransferSizeLimitError({
       context,

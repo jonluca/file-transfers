@@ -40,6 +40,11 @@ export interface DownloadableTransferFile extends TransferManifestFile {
   downloadUrl: string;
 }
 
+export interface DirectTransferDownloadPolicy {
+  chunkBytes: number;
+  maxConcurrentChunks: number;
+}
+
 export interface DownloadableTransferManifest {
   version: 1;
   kind: "local-http-share" | "direct-http-transfer";
@@ -49,6 +54,7 @@ export interface DownloadableTransferManifest {
   shareUrl: string;
   totalBytes: number;
   files: DownloadableTransferFile[];
+  downloadPolicy?: DirectTransferDownloadPolicy;
 }
 
 export interface DiscoveryRecord {
