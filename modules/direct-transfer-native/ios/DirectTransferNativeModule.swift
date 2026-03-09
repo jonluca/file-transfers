@@ -5,6 +5,33 @@ import Network
 private let headerLimitBytes = 64 * 1024
 private let ioPageBytes = 256 * 1024
 
+private func logDirectTransferNativeDebug(_ message: String, details: [String: Any] = [:]) {
+  #if DEBUG
+  if details.isEmpty {
+    NSLog("[DirectTransferNative] %@", message)
+  } else {
+    NSLog("[DirectTransferNative] %@ %@", message, String(describing: details))
+  }
+  #endif
+}
+
+private func getSessionDebugId(_ sessionId: String) -> String {
+  String(sessionId.prefix(8))
+}
+
+private func getTokenDebugSuffix(_ token: String) -> String {
+  String(token.suffix(6))
+}
+
+private func getUrlDebugDetails(_ url: URL) -> [String: Any] {
+  [
+    "host": url.host ?? "",
+    "port": url.port ?? (url.scheme == "https" ? 443 : 80),
+    "path": url.path,
+    "scheme": url.scheme ?? "",
+  ]
+}
+
 private struct PayloadFile {
   let id: String
   let mimeType: String
@@ -86,6 +113,9 @@ private final class PayloadServer {
 
   func ensureStarted() async throws -> UInt16 {
     if let listener, let port = listener.port?.rawValue {
+      logDirectTransferNativeDebug("Reusing native payload server", details: [
+        "port": port
+      ])
       return port
     }
 
@@ -100,11 +130,17 @@ private final class PayloadServer {
               return
             }
             self?.listener = listener
+            logDirectTransferNativeDebug("Native payload server ready", details: [
+              "port": listener.port?.rawValue ?? 0
+            ])
             continuation.resume(returning: listener.port?.rawValue ?? 0)
           case .failed(let error):
             guard gate.claim() else {
               return
             }
+            logDirectTransferNativeDebug("Native payload server failed", details: [
+              "error": error.localizedDescription
+            ])
             continuation.resume(throwing: error)
           default:
             break
@@ -676,6 +712,13 @@ public final class DirectTransferNativeModule: Module {
       let maxBytesPerSecond = optionalInt64(options["maxBytesPerSecond"])
       let files = try requiredFiles(options, key: "files")
 
+      logDirectTransferNativeDebug("Registering native payload session", details: [
+        "sessionId": getSessionDebugId(sessionId),
+        "fileCount": files.count,
+        "maxBytesPerSecond": maxBytesPerSecond ?? 0,
+        "tokenSuffix": getTokenDebugSuffix(token),
+      ])
+
       stateQueue.sync {
         payloadSessions[sessionId] = PayloadSession(
           filesById: Dictionary(uniqueKeysWithValues: files.map { ($0.id, $0) }),
@@ -687,6 +730,9 @@ public final class DirectTransferNativeModule: Module {
     }
 
     AsyncFunction("unregisterPayloadSession") { (sessionId: String) in
+      logDirectTransferNativeDebug("Unregistering native payload session", details: [
+        "sessionId": getSessionDebugId(sessionId)
+      ])
       stateQueue.sync {
         payloadSessions.removeValue(forKey: sessionId)
       }
@@ -710,6 +756,19 @@ public final class DirectTransferNativeModule: Module {
         let maxConcurrentChunks = try requiredInt(options, key: "maxConcurrentChunks")
         let maxBytesPerSecond = optionalInt64(options["maxBytesPerSecond"])
         let progress = DownloadTaskProgress(taskId: taskId, totalBytes: totalBytes)
+        let urlValue = URL(string: url)
+
+        logDirectTransferNativeDebug("Starting native range download", details: [
+          "taskId": getSessionDebugId(taskId),
+          "totalBytes": totalBytes,
+          "chunkBytes": chunkBytes,
+          "maxConcurrentChunks": maxConcurrentChunks,
+          "destinationUri": destinationUri,
+          "tokenHeaderSuffix": getTokenDebugSuffix(headers["x-direct-token"] ?? ""),
+          "host": urlValue?.host ?? "",
+          "port": urlValue?.port ?? (urlValue?.scheme == "https" ? 443 : 80),
+          "path": urlValue?.path ?? url,
+        ])
 
         stateQueue.sync {
           downloadProgress[taskId] = progress
@@ -744,8 +803,17 @@ public final class DirectTransferNativeModule: Module {
 
         Task {
           do {
-            promise.resolve(try await task.value)
+            let result = try await task.value
+            logDirectTransferNativeDebug("Native range download completed", details: [
+              "taskId": getSessionDebugId(taskId),
+              "bytesTransferred": result["bytesTransferred"] as? Double ?? 0,
+              "totalBytes": result["totalBytes"] as? Double ?? 0,
+            ])
+            promise.resolve(result)
           } catch is CancellationError {
+            logDirectTransferNativeDebug("Native range download canceled", details: [
+              "taskId": getSessionDebugId(taskId)
+            ])
             let exception = Exception(
               name: "DirectTransferDownloadCanceledException",
               description: "Download canceled.",
@@ -753,6 +821,10 @@ public final class DirectTransferNativeModule: Module {
             )
             promise.reject(exception)
           } catch {
+            logDirectTransferNativeDebug("Native range download failed", details: [
+              "taskId": getSessionDebugId(taskId),
+              "error": error.localizedDescription
+            ])
             let exception = Exception(
               name: "DirectTransferDownloadException",
               description: error.localizedDescription,
@@ -763,8 +835,14 @@ public final class DirectTransferNativeModule: Module {
           }
         }
       } catch let exception as Exception {
+        logDirectTransferNativeDebug("Native range download setup rejected", details: [
+          "error": exception.localizedDescription
+        ])
         promise.reject(exception)
       } catch {
+        logDirectTransferNativeDebug("Native range download setup failed", details: [
+          "error": error.localizedDescription
+        ])
         let exception = Exception(
           name: "DirectTransferDownloadStartException",
           description: error.localizedDescription,
@@ -816,6 +894,14 @@ public final class DirectTransferNativeModule: Module {
       withIntermediateDirectories: true
     )
 
+    logDirectTransferNativeDebug("Initializing native range download task", details: [
+      "taskId": getSessionDebugId(taskId),
+      "destinationPath": destinationUrl.path,
+      "totalBytes": totalBytes,
+      "chunkBytes": chunkBytes,
+      "maxConcurrentChunks": maxConcurrentChunks,
+    ])
+
     let writer = try FileWriter(url: destinationUrl, totalBytes: totalBytes)
     do {
       let totalChunkCount = Int(ceil(Double(totalBytes) / Double(chunkBytes)))
@@ -848,9 +934,17 @@ public final class DirectTransferNativeModule: Module {
       var result = progress.snapshot()
       result["completedAtMs"] = Date().timeIntervalSince1970 * 1000
       try await writer.close()
+      logDirectTransferNativeDebug("Native range download task finished", details: [
+        "taskId": getSessionDebugId(taskId),
+        "totalChunkCount": totalChunkCount,
+      ])
       return result
     } catch {
       try? await writer.close()
+      logDirectTransferNativeDebug("Native range download task threw", details: [
+        "taskId": getSessionDebugId(taskId),
+        "error": error.localizedDescription
+      ])
       throw error
     }
   }
@@ -884,94 +978,127 @@ public final class DirectTransferNativeModule: Module {
     let expectedChunkBytes = end - start + 1
 
     try await withTaskCancellationHandler(operation: {
-      defer {
-        session.finishTasksAndInvalidate()
-      }
+      do {
+        logDirectTransferNativeDebug("Starting native chunk request", details: [
+          "taskId": getSessionDebugId(progress.taskId),
+          "rangeStart": start,
+          "rangeEnd": end,
+          "expectedChunkBytes": expectedChunkBytes,
+        ].merging(getUrlDebugDetails(requestUrl)) { _, new in new })
 
-      dataTask.resume()
-
-      let httpResponse = try await delegate.waitForResponse()
-      guard httpResponse.statusCode == 206 else {
-        throw Exception(name: "DirectTransferBadStatus", description: "Unable to download file chunk.", code: "ERR_DIRECT_TRANSFER_DOWNLOAD")
-      }
-
-      guard let contentRange = parseContentRange(httpResponse.value(forHTTPHeaderField: "Content-Range")),
-            contentRange.start == start,
-            contentRange.end == end,
-            contentRange.total == nil || contentRange.total == totalBytes
-      else {
-        throw Exception(name: "DirectTransferBadRange", description: "The sender returned an unexpected file chunk.", code: "ERR_DIRECT_TRANSFER_DOWNLOAD")
-      }
-
-      var bytesDownloaded: Int64 = 0
-      var nextOffset = UInt64(start)
-      var pendingData = Data()
-      pendingData.reserveCapacity(ioPageBytes)
-
-      func flushPendingData() async throws {
-        guard !pendingData.isEmpty else {
-          return
+        defer {
+          session.finishTasksAndInvalidate()
         }
 
-        let writeOffset = nextOffset
-        let bytesToWrite = pendingData
-        pendingData = Data()
+        dataTask.resume()
+
+        let httpResponse = try await delegate.waitForResponse()
+        logDirectTransferNativeDebug("Native chunk response received", details: [
+          "taskId": getSessionDebugId(progress.taskId),
+          "statusCode": httpResponse.statusCode,
+          "contentRange": httpResponse.value(forHTTPHeaderField: "Content-Range") ?? "",
+        ].merging(getUrlDebugDetails(requestUrl)) { _, new in new })
+        guard httpResponse.statusCode == 206 else {
+          throw Exception(name: "DirectTransferBadStatus", description: "Unable to download file chunk.", code: "ERR_DIRECT_TRANSFER_DOWNLOAD")
+        }
+
+        guard let contentRange = parseContentRange(httpResponse.value(forHTTPHeaderField: "Content-Range")),
+              contentRange.start == start,
+              contentRange.end == end,
+              contentRange.total == nil || contentRange.total == totalBytes
+        else {
+          throw Exception(name: "DirectTransferBadRange", description: "The sender returned an unexpected file chunk.", code: "ERR_DIRECT_TRANSFER_DOWNLOAD")
+        }
+
+        var bytesDownloaded: Int64 = 0
+        var nextOffset = UInt64(start)
+        var pendingData = Data()
         pendingData.reserveCapacity(ioPageBytes)
-        nextOffset += UInt64(bytesToWrite.count)
 
-        let diskWriteDurationMs = try await writer.write(data: bytesToWrite, at: writeOffset)
-        progress.add(
-          bytes: Int64(bytesToWrite.count),
-          requestDurationMs: 0,
-          diskWriteDurationMs: diskWriteDurationMs
-        )
+        func flushPendingData() async throws {
+          guard !pendingData.isEmpty else {
+            return
+          }
 
-        throttleChunk(
-          bytesTransferred: bytesDownloaded,
-          maxBytesPerSecond: maxBytesPerSecond,
-          startedAt: requestStartedAt
-        )
-      }
+          let writeOffset = nextOffset
+          let bytesToWrite = pendingData
+          pendingData = Data()
+          pendingData.reserveCapacity(ioPageBytes)
+          nextOffset += UInt64(bytesToWrite.count)
 
-      for try await data in delegate.chunks {
-        try Task.checkCancellation()
-        if data.isEmpty {
-          continue
+          let diskWriteDurationMs = try await writer.write(data: bytesToWrite, at: writeOffset)
+          progress.add(
+            bytes: Int64(bytesToWrite.count),
+            requestDurationMs: 0,
+            diskWriteDurationMs: diskWriteDurationMs
+          )
+
+          throttleChunk(
+            bytesTransferred: bytesDownloaded,
+            maxBytesPerSecond: maxBytesPerSecond,
+            startedAt: requestStartedAt
+          )
         }
 
-        let remainingChunkBytes = expectedChunkBytes - bytesDownloaded
-        if Int64(data.count) > remainingChunkBytes {
+        for try await data in delegate.chunks {
+          try Task.checkCancellation()
+          if data.isEmpty {
+            continue
+          }
+
+          let remainingChunkBytes = expectedChunkBytes - bytesDownloaded
+          if Int64(data.count) > remainingChunkBytes {
+            throw Exception(
+              name: "DirectTransferTooManyBytes",
+              description: "The sender returned too many bytes for this file chunk.",
+              code: "ERR_DIRECT_TRANSFER_DOWNLOAD"
+            )
+          }
+
+          pendingData.append(data)
+          bytesDownloaded += Int64(data.count)
+
+          if pendingData.count >= ioPageBytes {
+            try await flushPendingData()
+          }
+        }
+
+        try await flushPendingData()
+
+        guard bytesDownloaded == expectedChunkBytes else {
           throw Exception(
-            name: "DirectTransferTooManyBytes",
-            description: "The sender returned too many bytes for this file chunk.",
+            name: "DirectTransferIncompleteChunk",
+            description: "The sender returned an incomplete file chunk.",
             code: "ERR_DIRECT_TRANSFER_DOWNLOAD"
           )
         }
 
-        pendingData.append(data)
-        bytesDownloaded += Int64(data.count)
-
-        if pendingData.count >= ioPageBytes {
-          try await flushPendingData()
-        }
-      }
-
-      try await flushPendingData()
-
-      guard bytesDownloaded == expectedChunkBytes else {
-        throw Exception(
-          name: "DirectTransferIncompleteChunk",
-          description: "The sender returned an incomplete file chunk.",
-          code: "ERR_DIRECT_TRANSFER_DOWNLOAD"
+        progress.add(
+          bytes: 0,
+          requestDurationMs: (CACurrentMediaTime() - requestStartedAt) * 1000,
+          diskWriteDurationMs: 0
         )
+        logDirectTransferNativeDebug("Native chunk completed", details: [
+          "taskId": getSessionDebugId(progress.taskId),
+          "rangeStart": start,
+          "rangeEnd": end,
+          "bytesDownloaded": bytesDownloaded,
+        ])
+      } catch {
+        logDirectTransferNativeDebug("Native chunk request failed", details: [
+          "taskId": getSessionDebugId(progress.taskId),
+          "rangeStart": start,
+          "rangeEnd": end,
+          "error": error.localizedDescription,
+        ].merging(getUrlDebugDetails(requestUrl)) { _, new in new })
+        throw error
       }
-
-      progress.add(
-        bytes: 0,
-        requestDurationMs: (CACurrentMediaTime() - requestStartedAt) * 1000,
-        diskWriteDurationMs: 0
-      )
     }, onCancel: {
+      logDirectTransferNativeDebug("Canceling native chunk request", details: [
+        "taskId": getSessionDebugId(progress.taskId),
+        "rangeStart": start,
+        "rangeEnd": end,
+      ])
       dataTask.cancel()
       session.invalidateAndCancel()
     })
