@@ -92,6 +92,12 @@ export default function getConfig({ config }: ConfigContext): ExpoConfig {
       },
       plugins: [
         ...(config.plugins ?? []),
+        [
+          "expo-dev-client",
+          {
+            launchMode: "most-recent",
+          },
+        ],
         "expo-apple-authentication",
         "expo-router",
         "expo-web-browser",
