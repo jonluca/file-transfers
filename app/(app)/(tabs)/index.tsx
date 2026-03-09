@@ -37,7 +37,6 @@ import {
   assertSelectedFilesTransferAllowed,
   declineIncomingTransferOffer,
   formatBytes,
-  isReceivingAvailabilityActive,
   isTransferSizeLimitError,
   startHttpShareSession,
   pickTransferFiles,
@@ -126,26 +125,6 @@ function getDebugErrorDetails(error: unknown) {
   return {
     error: String(error),
   };
-}
-
-function hasUsableReceiveAvailabilitySession({
-  activeReceiveSession,
-  receiveAvailabilityKey,
-  expectedKey,
-}: {
-  activeReceiveSession: ReceiveSession | null;
-  receiveAvailabilityKey: string | null;
-  expectedKey: string;
-}) {
-  if (!activeReceiveSession) {
-    return false;
-  }
-
-  return (
-    !["completed", "failed", "canceled"].includes(activeReceiveSession.status) &&
-    receiveAvailabilityKey === expectedKey &&
-    isReceivingAvailabilityActive(activeReceiveSession.id)
-  );
 }
 
 function MimeIcon({ type }: { type: string }) {
@@ -692,11 +671,10 @@ export default function TransferScreen() {
       }
 
       const nextReceiveAvailabilityKey = `${deviceName}|${serviceInstanceId}|${premiumAccess.isPremium ? "premium" : "free"}`;
-      const hasUsableSession = hasUsableReceiveAvailabilitySession({
-        activeReceiveSession,
-        receiveAvailabilityKey: receiveAvailabilityKeyRef.current,
-        expectedKey: nextReceiveAvailabilityKey,
-      });
+      const hasUsableSession =
+        Boolean(activeReceiveSession) &&
+        !["completed", "failed", "canceled"].includes(activeReceiveSession?.status ?? "") &&
+        receiveAvailabilityKeyRef.current === nextReceiveAvailabilityKey;
 
       if (hasUsableSession) {
         if (showReceivingScreen && activeReceiveSession) {
@@ -706,15 +684,6 @@ export default function TransferScreen() {
           setMode("receiving");
         }
         return true;
-      }
-
-      if (activeReceiveSession && !isReceivingAvailabilityActive(activeReceiveSession.id)) {
-        logTransferScreenDebug("Stored receive session is missing a live runtime; recreating availability", {
-          sessionId: getDebugSessionId(activeReceiveSession.id),
-          status: activeReceiveSession.status,
-          receiveAvailabilityKey: receiveAvailabilityKeyRef.current,
-          expectedReceiveAvailabilityKey: nextReceiveAvailabilityKey,
-        });
       }
 
       if (isStartingReceiveAvailabilityRef.current) {
@@ -786,11 +755,10 @@ export default function TransferScreen() {
     }
 
     const nextReceiveAvailabilityKey = `${deviceName}|${serviceInstanceId}|${premiumAccess.isPremium ? "premium" : "free"}`;
-    const hasUsableSession = hasUsableReceiveAvailabilitySession({
-      activeReceiveSession,
-      receiveAvailabilityKey: receiveAvailabilityKeyRef.current,
-      expectedKey: nextReceiveAvailabilityKey,
-    });
+    const hasUsableSession =
+      Boolean(activeReceiveSession) &&
+      !["completed", "failed", "canceled"].includes(activeReceiveSession?.status ?? "") &&
+      receiveAvailabilityKeyRef.current === nextReceiveAvailabilityKey;
 
     if (hasUsableSession || isStartingReceiveAvailabilityRef.current) {
       return;

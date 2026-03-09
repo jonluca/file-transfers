@@ -130,6 +130,28 @@ interface LocalHttpRuntimeState {
 const CACHE_CONTROL_HEADER = "no-store";
 const BROWSER_STATIC_FILES_PREFIX = "/__browser-files";
 const DIRECT_STATIC_FILES_PREFIX = "/__direct-files";
+const LOCAL_HTTP_DEBUG_PREFIX = "[LocalHttpRuntime]";
+
+function logLocalHttpDebug(message: string, details?: Record<string, unknown>) {
+  if (!__DEV__) {
+    return;
+  }
+
+  if (details) {
+    console.debug(`${LOCAL_HTTP_DEBUG_PREFIX} ${message}`, details);
+    return;
+  }
+
+  console.debug(`${LOCAL_HTTP_DEBUG_PREFIX} ${message}`);
+}
+
+function getSessionDebugId(sessionId: string | null | undefined) {
+  return sessionId?.slice(0, 8) ?? null;
+}
+
+function getTokenDebugSuffix(token: string | null | undefined) {
+  return token?.slice(-6) ?? null;
+}
 
 declare global {
   var __fileTransfersLocalHttpRuntimeState: LocalHttpRuntimeState | undefined;
@@ -613,6 +635,13 @@ async function createFileDownloadResponse({
   const fileSize = sourceInfo.size ?? file.sizeBytes;
   const range = resolveDirectByteRange(getRequestHeader(request, "Range"), fileSize, chunkBytes);
   if ("error" in range) {
+    logLocalHttpDebug("Rejecting direct file request because range was invalid", {
+      fileName: file.name,
+      fileSize,
+      method,
+      rangeHeader: getRequestHeader(request, "Range"),
+      error: range.error,
+    });
     const errorMessage = range.error ?? "Invalid Range header.";
     return createTextResponse({
       statusCode: errorMessage === "Requested range is not satisfiable." ? 416 : 400,
@@ -627,6 +656,15 @@ async function createFileDownloadResponse({
   }
 
   const contentLength = fileSize === 0 ? 0 : range.end - range.start + 1;
+  logLocalHttpDebug("Preparing direct file response", {
+    fileName: file.name,
+    fileSize,
+    method,
+    rangeStart: range.start,
+    rangeEnd: range.end,
+    partial: range.partial,
+    contentLength,
+  });
   const headers = {
     ...createDefaultHeaders(file.mimeType || "application/octet-stream", contentLength),
     "Accept-Ranges": "bytes",
@@ -697,6 +735,13 @@ function createServerConfig() {
 
 async function startRuntimeServer(runtime: SharedHttpRuntime) {
   const server = new ConfigServer();
+  logLocalHttpDebug("Starting local HTTP runtime server", {
+    host: runtime.publicHost,
+    port: LOCAL_HTTP_SERVER_PORT,
+    browserSessionId: getSessionDebugId(runtime.browserSession?.session.id),
+    directReceiverCount: runtime.directReceivers.size,
+    directSenderCount: runtime.directSenders.size,
+  });
   const started = await server.start(
     LOCAL_HTTP_SERVER_PORT,
     (request) => handleRequest(runtime, request),
@@ -709,6 +754,10 @@ async function startRuntimeServer(runtime: SharedHttpRuntime) {
   }
 
   runtime.server = server;
+  logLocalHttpDebug("Local HTTP runtime server started", {
+    host: runtime.publicHost,
+    port: LOCAL_HTTP_SERVER_PORT,
+  });
 }
 
 async function stopRuntimeServer(runtime: SharedHttpRuntime) {
@@ -716,6 +765,10 @@ async function stopRuntimeServer(runtime: SharedHttpRuntime) {
     return;
   }
 
+  logLocalHttpDebug("Stopping local HTTP runtime server", {
+    host: runtime.publicHost,
+    port: LOCAL_HTTP_SERVER_PORT,
+  });
   await runtime.server.stop().catch(() => {});
   runtime.server = null;
 }
@@ -800,7 +853,19 @@ async function ensureRuntime(kind: "boot" | "browser" | "direct", options?: { al
     const publicHost = options?.allowMissingHost ? await maybeGetLanShareHost() : await getLanShareHost();
     const activeRuntime = getActiveRuntime();
 
+    logLocalHttpDebug("Ensuring shared local HTTP runtime", {
+      kind,
+      allowMissingHost: options?.allowMissingHost ?? false,
+      resolvedHost: publicHost,
+      activeHost: activeRuntime?.publicHost ?? null,
+      hasActiveRuntime: Boolean(activeRuntime),
+    });
+
     if (activeRuntime && publicHost && activeRuntime.publicHost !== publicHost) {
+      logLocalHttpDebug("Restarting shared runtime because host changed", {
+        previousHost: activeRuntime.publicHost,
+        nextHost: publicHost,
+      });
       await finalizeBrowserSession({
         runtime: activeRuntime,
         status: "stopped",
@@ -811,6 +876,10 @@ async function ensureRuntime(kind: "boot" | "browser" | "direct", options?: { al
     }
 
     if (!publicHost) {
+      logLocalHttpDebug("Shared runtime host unavailable", {
+        kind,
+        allowMissingHost: options?.allowMissingHost ?? false,
+      });
       return getActiveRuntime();
     }
 
@@ -826,6 +895,10 @@ async function ensureRuntime(kind: "boot" | "browser" | "direct", options?: { al
 
       await startRuntimeServer(runtime);
       setActiveRuntime(runtime);
+      logLocalHttpDebug("Created new shared runtime", {
+        host: runtime.publicHost,
+        port: LOCAL_HTTP_SERVER_PORT,
+      });
     }
 
     if (kind === "browser") {
@@ -838,6 +911,15 @@ async function ensureRuntime(kind: "boot" | "browser" | "direct", options?: { al
       });
       await refreshRuntimeServer(runtime);
     }
+
+    logLocalHttpDebug("Shared runtime ready", {
+      kind,
+      host: runtime.publicHost,
+      port: LOCAL_HTTP_SERVER_PORT,
+      browserSessionId: getSessionDebugId(runtime.browserSession?.session.id),
+      directReceiverCount: runtime.directReceivers.size,
+      directSenderCount: runtime.directSenders.size,
+    });
 
     return runtime;
   });
@@ -912,13 +994,30 @@ async function handleBrowserShareRequest(runtime: SharedHttpRuntime, request: Ht
 
 async function handleDirectRequest(runtime: SharedHttpRuntime, request: HttpRequest) {
   const method = request.method.toUpperCase();
-  const pathSegments = getRequestPath(request.path).split("/").filter(Boolean);
+  const requestPath = getRequestPath(request.path);
+  const pathSegments = requestPath.split("/").filter(Boolean);
 
   if (pathSegments[0] !== "direct") {
     return null;
   }
 
+  logLocalHttpDebug("Incoming direct HTTP request", {
+    method,
+    path: requestPath,
+    host: runtime.publicHost,
+    port: LOCAL_HTTP_SERVER_PORT,
+    hasDirectToken: Boolean(getRequestHeader(request, DIRECT_TOKEN_HEADER)),
+    range: getRequestHeader(request, "Range"),
+  });
+
   if (pathSegments[1] === "discovery" && ["GET", "HEAD"].includes(method)) {
+    const receiverCount = Array.from(runtime.directReceivers.values()).filter((value) => value.canAcceptOffer?.() ?? true)
+      .length;
+    logLocalHttpDebug("Serving direct discovery request", {
+      method,
+      path: requestPath,
+      receiverCount,
+    });
     return createJsonResponse({
       statusCode: 200,
       body: createNearbyDiscoveryResponse(
@@ -938,6 +1037,14 @@ async function handleDirectRequest(runtime: SharedHttpRuntime, request: HttpRequ
   const directReceiver = runtime.directReceivers.get(sessionId) ?? null;
   const directSender = runtime.directSenders.get(sessionId) ?? null;
 
+  logLocalHttpDebug("Resolved direct session request", {
+    method,
+    path: requestPath,
+    sessionId: getSessionDebugId(sessionId),
+    hasDirectReceiver: Boolean(directReceiver),
+    hasDirectSender: Boolean(directSender),
+  });
+
   if (!directReceiver && !directSender) {
     return createTextResponse({
       statusCode: 404,
@@ -949,6 +1056,10 @@ async function handleDirectRequest(runtime: SharedHttpRuntime, request: HttpRequ
 
   try {
     if (pathSegments[3] === "offers" && method === "POST" && directReceiver) {
+      logLocalHttpDebug("Handling direct transfer offer request", {
+        sessionId: getSessionDebugId(sessionId),
+        tokenSuffix: getTokenDebugSuffix(directReceiver.discoveryRecord.token),
+      });
       ensureDirectToken(request, directReceiver.discoveryRecord.token);
       const payload = parseJsonBody<{ offer: IncomingTransferOffer }>(request);
       const decision = await directReceiver.onOffer(payload.offer);
@@ -980,6 +1091,10 @@ async function handleDirectRequest(runtime: SharedHttpRuntime, request: HttpRequ
         throw new Error("Direct transfer session not found.");
       }
 
+      logLocalHttpDebug("Handling direct transfer event request", {
+        sessionId: getSessionDebugId(sessionId),
+        tokenSuffix: getTokenDebugSuffix(token),
+      });
       ensureDirectToken(request, token);
       const payload = parseJsonBody<{ event: unknown }>(request);
       await handler(payload.event);
@@ -994,6 +1109,10 @@ async function handleDirectRequest(runtime: SharedHttpRuntime, request: HttpRequ
     }
 
     if (pathSegments[3] === "manifest" && ["GET", "HEAD"].includes(method) && directSender) {
+      logLocalHttpDebug("Handling direct manifest request", {
+        sessionId: getSessionDebugId(sessionId),
+        tokenSuffix: getTokenDebugSuffix(directSender.token),
+      });
       ensureDirectToken(request, directSender.token);
       return createJsonResponse({
         statusCode: 200,
@@ -1003,6 +1122,12 @@ async function handleDirectRequest(runtime: SharedHttpRuntime, request: HttpRequ
     }
 
     if (pathSegments[3] === "files" && pathSegments[4] && ["GET", "HEAD"].includes(method) && directSender) {
+      logLocalHttpDebug("Handling direct file request", {
+        sessionId: getSessionDebugId(sessionId),
+        fileId: decodeURIComponent(pathSegments[4]),
+        tokenSuffix: getTokenDebugSuffix(directSender.token),
+        range: getRequestHeader(request, "Range"),
+      });
       ensureDirectToken(request, directSender.token);
       const fileId = decodeURIComponent(pathSegments[4]);
       const hostedFile = directSender.filesById.get(fileId);
@@ -1043,6 +1168,14 @@ async function handleDirectRequest(runtime: SharedHttpRuntime, request: HttpRequ
         : message === "Direct transfer session not found."
           ? 404
           : 400;
+
+    logLocalHttpDebug("Direct HTTP request failed", {
+      method,
+      path: requestPath,
+      sessionId: getSessionDebugId(sessionId),
+      statusCode,
+      message,
+    });
 
     return createJsonResponse({
       statusCode,
@@ -1178,6 +1311,14 @@ export async function registerDirectReceiveSession({
   onInterrupted,
 }: RegisterDirectReceiveSessionOptions) {
   const runtime = await ensureRuntime("direct");
+  logLocalHttpDebug("Registering direct receive session", {
+    sessionId: getSessionDebugId(sessionId),
+    deviceName,
+    host: runtime.publicHost,
+    port: LOCAL_HTTP_SERVER_PORT,
+    serviceName,
+    tokenSuffix: getTokenDebugSuffix(token),
+  });
   runtime.directReceivers.set(sessionId, {
     discoveryRecord: createDiscoveryRecord({
       sessionId,
@@ -1237,6 +1378,15 @@ export async function registerDirectSendSession({
 
   const runtime = await ensureRuntime("direct");
   const payloadServerInfo = await ensureNativePayloadServerStarted().catch(() => null);
+  logLocalHttpDebug("Registering direct send session", {
+    sessionId: getSessionDebugId(sessionId),
+    deviceName,
+    host: runtime.publicHost,
+    port: LOCAL_HTTP_SERVER_PORT,
+    fileCount: files.length,
+    payloadServerPort: payloadServerInfo?.port ?? null,
+    tokenSuffix: getTokenDebugSuffix(token),
+  });
   runtime.directSenders.set(sessionId, {
     sessionId,
     token,

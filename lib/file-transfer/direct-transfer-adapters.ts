@@ -39,9 +39,6 @@ export interface DirectTransferClientAdapter {
   downloadFile(options: DirectTransferDownloadRuntimeOptions): Promise<DirectTransferDownloadResult>;
 }
 
-const NATIVE_DIRECT_TRANSFER_CHUNK_BYTES_FLOOR = 16 * 1024 * 1024;
-const NATIVE_DIRECT_TRANSFER_MAX_CONCURRENT_CHUNKS_FLOOR = 4;
-
 function parseContentRangeHeader(value: string | null) {
   if (!value) {
     return null;
@@ -318,15 +315,11 @@ export const NativeRangeTransferAdapter: DirectTransferClientAdapter = {
 };
 
 function getPreferredNativeDownloadOptions(options: DirectTransferDownloadRuntimeOptions) {
-  if (options.maxConcurrentChunks <= 1) {
-    return options;
-  }
-
-  return {
-    ...options,
-    chunkBytes: Math.max(options.chunkBytes, NATIVE_DIRECT_TRANSFER_CHUNK_BYTES_FLOOR),
-    maxConcurrentChunks: Math.max(options.maxConcurrentChunks, NATIVE_DIRECT_TRANSFER_MAX_CONCURRENT_CHUNKS_FLOOR),
-  } satisfies DirectTransferDownloadRuntimeOptions;
+  // The sender advertises the safe direct-download policy in the manifest.
+  // Native clients must honor it instead of silently increasing chunk size or
+  // concurrency, otherwise slower JS senders can be overwhelmed by extra
+  // simultaneous range requests.
+  return options;
 }
 
 export async function downloadFileWithBestAvailableAdapter(options: DirectTransferDownloadRuntimeOptions) {

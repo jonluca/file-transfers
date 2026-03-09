@@ -3,7 +3,7 @@ import { BonjourScanner, type ScanResult } from "@dawidzawada/bonjour-zeroconf";
 import { File, type Directory } from "expo-file-system";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 import NearbyAdvertiser from "@/modules/nearby-advertiser";
-import { downloadFileWithBestAvailableAdapter } from "./direct-transfer-adapters";
+import { downloadFileWithBestAvailableAdapter, getDirectTransferClientAdapterKind } from "./direct-transfer-adapters";
 import {
   DIRECT_TOKEN_HEADER,
   buildNearbyDiscoveryUrl,
@@ -125,10 +125,6 @@ const activeSendRuntimes = new Map<string, SendRuntime>();
 const activeReceiveRuntimes = new Map<string, ReceiveRuntime>();
 const PEER_REQUEST_TIMEOUT_MS = 8000;
 const NEARBY_DISCOVERY_REQUEST_TIMEOUT_MS = 2500;
-const NEARBY_DISCOVERY_RESCAN_INTERVAL_MS = 5_000;
-const NEARBY_DISCOVERY_RETRY_DELAY_MS = 1_000;
-const NEARBY_DISCOVERY_STOP_WAIT_TIMEOUT_MS = 2_000;
-const NEARBY_DISCOVERY_STOP_WAIT_POLL_INTERVAL_MS = 100;
 const PROGRESS_UPDATE_INTERVAL_MS = 250;
 const PROGRESS_UPDATE_BYTES = 256 * 1024;
 const DIRECT_TRANSFER_DEBUG_PREFIX = "[DirectTransfer]";
@@ -161,6 +157,53 @@ function getErrorDebugDetails(error: unknown) {
   return {
     error: String(error),
   };
+}
+
+function getTokenDebugSuffix(token: string | null | undefined) {
+  return token?.slice(-6) ?? null;
+}
+
+function getUrlDebugDetails(url: string) {
+  try {
+    const parsed = new URL(url);
+    return {
+      host: parsed.hostname,
+      port: parsed.port || (parsed.protocol === "https:" ? "443" : "80"),
+      path: parsed.pathname,
+      protocol: parsed.protocol.replace(/:$/, ""),
+    };
+  } catch {
+    return {
+      url,
+    };
+  }
+}
+
+function getPeerRequestBodyDebugDetails(body: unknown) {
+  if (!body || typeof body !== "object") {
+    return {};
+  }
+
+  const value = body as {
+    event?: { kind?: string } | null;
+    offer?: { id?: string; fileCount?: number; totalBytes?: number } | null;
+  };
+
+  if (value.event?.kind) {
+    return {
+      eventKind: value.event.kind,
+    };
+  }
+
+  if (value.offer) {
+    return {
+      offerId: getSessionDebugId(value.offer.id),
+      offerFileCount: value.offer.fileCount ?? null,
+      offerTotalBytes: value.offer.totalBytes ?? null,
+    };
+  }
+
+  return {};
 }
 
 function getDiscoveryDebugDetails(
@@ -327,24 +370,6 @@ function getNearbyBonjourDomain() {
   return LOCAL_TRANSFER_SERVICE_DOMAIN.replace(/\.+$/, "") || "local";
 }
 
-function wait(milliseconds: number) {
-  return new Promise<void>((resolve) => {
-    setTimeout(resolve, milliseconds);
-  });
-}
-
-async function waitForNearbyScannerToStop(scanner: BonjourScanner) {
-  const startedAt = Date.now();
-
-  while (scanner.isScanning && Date.now() - startedAt < NEARBY_DISCOVERY_STOP_WAIT_TIMEOUT_MS) {
-    await wait(NEARBY_DISCOVERY_STOP_WAIT_POLL_INTERVAL_MS);
-  }
-}
-
-function toNearbyScanError(error: unknown, fallbackMessage = "Nearby scanning failed.") {
-  return error instanceof Error ? error : new Error(fallbackMessage);
-}
-
 async function createNearbyAdvertiser({
   requestedServiceName,
   port,
@@ -386,6 +411,11 @@ async function fetchNearbyDiscoveryRecords({ host, port }: { host: string; port:
     controller.abort();
   }, NEARBY_DISCOVERY_REQUEST_TIMEOUT_MS);
 
+  logDirectTransferDebug("Fetching nearby discovery records", {
+    host,
+    port,
+  });
+
   try {
     const response = await fetch(buildNearbyDiscoveryUrl(host, port), {
       method: "GET",
@@ -395,11 +425,25 @@ async function fetchNearbyDiscoveryRecords({ host, port }: { host: string; port:
       signal: controller.signal,
     });
 
+    logDirectTransferDebug("Nearby discovery response received", {
+      host,
+      port,
+      statusCode: response.status,
+      ok: response.ok,
+    });
+
     if (!response.ok) {
       throw new Error(`Nearby discovery returned ${response.status}.`);
     }
 
     return parseNearbyDiscoveryResponse(await response.json());
+  } catch (error) {
+    logDirectTransferDebug("Nearby discovery request failed", {
+      host,
+      port,
+      ...getErrorDebugDetails(error),
+    });
+    throw error;
   } finally {
     clearTimeout(timer);
   }
@@ -502,6 +546,12 @@ async function postJsonWithTimeout({ url, token, body }: { url: string; token: s
     controller.abort();
   }, PEER_REQUEST_TIMEOUT_MS);
 
+  logDirectTransferDebug("Posting direct peer request", {
+    ...getUrlDebugDetails(url),
+    tokenSuffix: getTokenDebugSuffix(token),
+    ...getPeerRequestBodyDebugDetails(body),
+  });
+
   try {
     const response = await fetch(url, {
       method: "POST",
@@ -513,11 +563,25 @@ async function postJsonWithTimeout({ url, token, body }: { url: string; token: s
       signal: controller.signal,
     });
 
+    logDirectTransferDebug("Direct peer response received", {
+      ...getUrlDebugDetails(url),
+      statusCode: response.status,
+      ok: response.ok,
+      ...getPeerRequestBodyDebugDetails(body),
+    });
+
     if (!response.ok) {
       const payload = (await response.json().catch(() => null)) as { error?: string } | null;
       throw new Error(payload?.error ?? `Direct transfer request failed with status ${response.status}.`);
     }
   } catch (error) {
+    logDirectTransferDebug("Direct peer request failed", {
+      ...getUrlDebugDetails(url),
+      tokenSuffix: getTokenDebugSuffix(token),
+      ...getPeerRequestBodyDebugDetails(body),
+      ...getErrorDebugDetails(error),
+    });
+
     if (error instanceof Error && error.name === "AbortError") {
       throw new Error("Nearby device did not respond in time.", {
         cause: error,
@@ -568,12 +632,21 @@ async function fetchDownloadableManifest({
   });
 
   const startedAt = Date.now();
-  const response = await fetch(buildDirectSessionUrl(peer, "/manifest"), {
+  const manifestUrl = buildDirectSessionUrl(peer, "/manifest");
+  const response = await fetch(manifestUrl, {
     method: "GET",
     headers: {
       [DIRECT_TOKEN_HEADER]: peer.token,
     },
     signal,
+  });
+
+  logDirectTransferDebug("Sender manifest response received", {
+    offerId: getSessionDebugId(offer.id),
+    statusCode: response.status,
+    ok: response.ok,
+    ...getUrlDebugDetails(manifestUrl),
+    tokenSuffix: getTokenDebugSuffix(peer.token),
   });
 
   if (!response.ok) {
@@ -882,6 +955,15 @@ async function receiveDirectHttpTransfer({
       chunkBytes: runtime.transferPolicy.chunkBytes,
       maxConcurrentChunks: runtime.transferPolicy.maxConcurrentChunks,
     };
+
+    logDirectTransferDebug("Receiver download policy resolved", {
+      offerId: getSessionDebugId(offer.id),
+      adapterKind: getDirectTransferClientAdapterKind(),
+      chunkBytes: downloadPolicy.chunkBytes,
+      maxConcurrentChunks: downloadPolicy.maxConcurrentChunks,
+      transferPolicyChunkBytes: runtime.transferPolicy.chunkBytes,
+      transferPolicyMaxConcurrentChunks: runtime.transferPolicy.maxConcurrentChunks,
+    });
 
     const downloadedFiles: Array<{
       fileName: string;
@@ -1582,11 +1664,6 @@ export async function stopReceivingAvailability(sessionId: string) {
   activeReceiveRuntimes.delete(sessionId);
 }
 
-export function isReceivingAvailabilityActive(sessionId: string) {
-  const runtime = activeReceiveRuntimes.get(sessionId);
-  return Boolean(runtime && !runtime.stopping);
-}
-
 export async function acceptIncomingTransferOffer(sessionId: string) {
   const runtime = activeReceiveRuntimes.get(sessionId);
   if (!runtime?.session.incomingOffer || runtime.session.status !== "waiting") {
@@ -1689,8 +1766,6 @@ export async function startNearbyScan({
   });
   let stopped = false;
   let syncToken = 0;
-  let restartTimer: ReturnType<typeof setTimeout> | null = null;
-  let restarting = false;
 
   function emitCurrentRecords() {
     logDirectTransferDebug("Nearby discovery records updated", {
@@ -1764,83 +1839,7 @@ export async function startNearbyScan({
     emitCurrentRecords();
   }
 
-  function clearRestartTimer() {
-    if (restartTimer) {
-      clearTimeout(restartTimer);
-      restartTimer = null;
-    }
-  }
-
-  function scheduleRestart(delayMs: number, reason: "scheduled" | "failure") {
-    if (stopped) {
-      return;
-    }
-
-    clearRestartTimer();
-    restartTimer = setTimeout(() => {
-      restartTimer = null;
-      void restartScan(reason);
-    }, delayMs);
-  }
-
-  function startScanner() {
-    if (stopped) {
-      return;
-    }
-
-    logDirectTransferDebug("Starting nearby discovery scan", {
-      currentRecordCount: currentRecords.size,
-    });
-
-    try {
-      scanner.scan(getNearbyBonjourServiceType(), getNearbyBonjourDomain(), {
-        addressResolveTimeout: NEARBY_DISCOVERY_REQUEST_TIMEOUT_MS,
-      });
-    } catch (error) {
-      const nextError = toNearbyScanError(error, "Unable to start nearby scanning.");
-      logDirectTransferDebug("Nearby discovery scan start failed", getErrorDebugDetails(nextError));
-      onError?.(nextError);
-      scheduleRestart(NEARBY_DISCOVERY_RETRY_DELAY_MS, "failure");
-    }
-  }
-
-  async function restartScan(reason: "scheduled" | "failure") {
-    if (stopped || restarting) {
-      return;
-    }
-
-    restarting = true;
-    syncToken += 1;
-
-    logDirectTransferDebug("Restarting nearby discovery scan", {
-      reason,
-      currentRecordCount: currentRecords.size,
-    });
-
-    try {
-      scanner.stop();
-      await waitForNearbyScannerToStop(scanner);
-    } finally {
-      restarting = false;
-    }
-
-    if (stopped) {
-      return;
-    }
-
-    if (scanner.isScanning) {
-      logDirectTransferDebug("Nearby discovery scan restart is waiting for the native scanner to stop", {
-        reason,
-        currentRecordCount: currentRecords.size,
-      });
-      scheduleRestart(NEARBY_DISCOVERY_RETRY_DELAY_MS, "failure");
-      return;
-    }
-
-    startScanner();
-    scheduleRestart(NEARBY_DISCOVERY_RESCAN_INTERVAL_MS, "scheduled");
-  }
-
+  logDirectTransferDebug("Starting nearby discovery scan");
   const resultsListener = scanner.listenForScanResults((results) => {
     void syncNearbyRecords(results);
   });
@@ -1852,16 +1851,14 @@ export async function startNearbyScan({
         : null;
     const nextError = typeof errorMessage === "string" ? new Error(errorMessage) : new Error("Nearby scanning failed.");
     onError?.(nextError);
-    scheduleRestart(NEARBY_DISCOVERY_RETRY_DELAY_MS, "failure");
   });
-
-  startScanner();
-  scheduleRestart(NEARBY_DISCOVERY_RESCAN_INTERVAL_MS, "scheduled");
+  scanner.scan(getNearbyBonjourServiceType(), getNearbyBonjourDomain(), {
+    addressResolveTimeout: NEARBY_DISCOVERY_REQUEST_TIMEOUT_MS,
+  });
 
   return () => {
     stopped = true;
     syncToken += 1;
-    clearRestartTimer();
     logDirectTransferDebug("Stopping nearby discovery scan", {
       remainingRecords: currentRecords.size,
     });
