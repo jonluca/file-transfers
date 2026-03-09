@@ -2,7 +2,18 @@ import { router } from "expo-router";
 import { useIsFocused } from "@react-navigation/native";
 import * as Burnt from "burnt";
 import React, { startTransition, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
-import { ActivityIndicator, AppState, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import {
+  ActivityIndicator,
+  AppState,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  type StyleProp,
+  Text,
+  type TextStyle,
+  View,
+  type ViewStyle,
+} from "react-native";
 import QRCode from "react-native-qrcode-svg";
 import {
   Download,
@@ -272,11 +283,15 @@ function PrimaryButton({
   onPress,
   icon,
   disabled = false,
+  style,
+  labelStyle,
 }: {
   label: string;
   onPress: () => void;
   icon?: React.ReactNode;
   disabled?: boolean;
+  style?: StyleProp<ViewStyle>;
+  labelStyle?: StyleProp<TextStyle>;
 }) {
   return (
     <Pressable
@@ -284,21 +299,37 @@ function PrimaryButton({
       onPress={onPress}
       style={({ pressed }) => [
         styles.primaryButton,
+        style,
         disabled ? styles.disabled : null,
         pressed && !disabled ? styles.pressed : null,
       ]}
     >
       {icon}
-      <Text style={styles.primaryButtonLabel}>{label}</Text>
+      <Text style={[styles.primaryButtonLabel, labelStyle]}>{label}</Text>
     </Pressable>
   );
 }
 
-function OutlineButton({ label, onPress, icon }: { label: string; onPress: () => void; icon?: React.ReactNode }) {
+function OutlineButton({
+  label,
+  onPress,
+  icon,
+  style,
+  labelStyle,
+}: {
+  label: string;
+  onPress: () => void;
+  icon?: React.ReactNode;
+  style?: StyleProp<ViewStyle>;
+  labelStyle?: StyleProp<TextStyle>;
+}) {
   return (
-    <Pressable onPress={onPress} style={({ pressed }) => [styles.outlineButton, pressed ? styles.pressed : null]}>
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [styles.outlineButton, style, pressed ? styles.pressed : null]}
+    >
       {icon}
-      <Text style={styles.outlineButtonLabel}>{label}</Text>
+      <Text style={[styles.outlineButtonLabel, labelStyle]}>{label}</Text>
     </Pressable>
   );
 }
@@ -1340,18 +1371,22 @@ export default function TransferScreen() {
                 <OutlineButton
                   label={"Decline"}
                   icon={<X color={designTheme.foreground} size={18} strokeWidth={2} />}
+                  labelStyle={styles.approvalActionLabel}
                   onPress={() => {
                     void handleDeclineIncomingOffer();
                   }}
+                  style={styles.approvalActionButton}
                 />
               </View>
               <View style={styles.approvalAction}>
                 <PrimaryButton
                   label={"Accept"}
                   icon={<Download color={designTheme.primaryForeground} size={18} strokeWidth={2} />}
+                  labelStyle={styles.approvalActionLabel}
                   onPress={() => {
                     void handleAcceptIncomingOffer();
                   }}
+                  style={styles.approvalActionButton}
                 />
               </View>
             </View>
@@ -1786,6 +1821,13 @@ const styles = StyleSheet.create({
   },
   approvalAction: {
     flex: 1,
+  },
+  approvalActionButton: {
+    minHeight: 50,
+    width: "100%",
+  },
+  approvalActionLabel: {
+    fontSize: 16,
   },
   centerNotice: {
     color: designTheme.mutedForeground,
