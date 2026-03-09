@@ -1,6 +1,6 @@
 import "dotenv/config";
 import { spawn } from "node:child_process";
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
 import { mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -9,7 +9,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import {
-  DIRECT_TOKEN_HEADER,
   buildNearbyDiscoveryUrl,
   buildDirectSessionBaseUrl,
   buildDirectSessionUrl,
@@ -172,10 +171,6 @@ const MIME_TYPES: Record<string, string> = {
   ".webm": "video/webm",
   ".zip": "application/zip",
 };
-
-function randomToken() {
-  return randomBytes(16).toString("hex");
-}
 
 function sleep(milliseconds: number) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -668,7 +663,6 @@ function parseDiscoveryInput(raw: string): DiscoveryRecord {
         sessionId?: string;
         host?: string;
         port?: number;
-        token?: string;
         deviceName?: string;
         advertisedAt?: string;
         serviceName?: string | null;
@@ -682,7 +676,7 @@ function parseDiscoveryInput(raw: string): DiscoveryRecord {
     };
   }
 
-  if (!parsed.sessionId || !parsed.host || typeof parsed.port !== "number" || !parsed.token || !parsed.deviceName) {
+  if (!parsed.sessionId || !parsed.host || typeof parsed.port !== "number" || !parsed.deviceName) {
     throw new Error("Target payload is missing discovery fields.");
   }
 
@@ -692,7 +686,6 @@ function parseDiscoveryInput(raw: string): DiscoveryRecord {
     deviceName: parsed.deviceName,
     host: parsed.host,
     port: parsed.port,
-    token: parsed.token,
     advertisedAt: parsed.advertisedAt ?? nowIso(),
     serviceName: parsed.serviceName ?? null,
   };
@@ -739,7 +732,6 @@ async function startNearbyAdvertisement({
       LOCAL_TRANSFER_SERVICE_DOMAIN,
       String(port),
       `sessionId=${discoveryRecord.sessionId}`,
-      `receiverToken=${discoveryRecord.token}`,
       `deviceName=${discoveryRecord.deviceName}`,
     ],
     {
@@ -789,7 +781,7 @@ async function closeServer(server: Server) {
   });
 }
 
-async function postJsonWithTimeout({ url, token, body }: { url: string; token: string; body: unknown }) {
+async function postJsonWithTimeout({ url, body }: { url: string; body: unknown }) {
   const controller = new AbortController();
   const timer = setTimeout(() => {
     controller.abort();
@@ -800,7 +792,6 @@ async function postJsonWithTimeout({ url, token, body }: { url: string; token: s
       method: "POST",
       headers: {
         "content-type": "application/json",
-        [DIRECT_TOKEN_HEADER]: token,
       },
       body: JSON.stringify(body),
       signal: controller.signal,
@@ -826,7 +817,6 @@ async function postJsonWithTimeout({ url, token, body }: { url: string; token: s
 async function postDirectEvent(peer: DirectPeerAccess, event: ReceiverToSenderEvent | SenderToReceiverEvent) {
   await postJsonWithTimeout({
     url: buildDirectSessionUrl(peer, "/events"),
-    token: peer.token,
     body: {
       event,
     },
@@ -836,7 +826,6 @@ async function postDirectEvent(peer: DirectPeerAccess, event: ReceiverToSenderEv
 async function postIncomingOffer(peer: DiscoveryRecord, offer: IncomingTransferOffer) {
   await postJsonWithTimeout({
     url: buildDirectSessionUrl(peer, "/offers"),
-    token: peer.token,
     body: {
       offer,
     },
@@ -853,9 +842,6 @@ async function fetchDownloadableManifest({
   signal: AbortSignal;
 }) {
   const response = await fetch(buildDirectSessionUrl(peer, "/manifest"), {
-    headers: {
-      [DIRECT_TOKEN_HEADER]: peer.token,
-    },
     signal,
   });
 
@@ -964,9 +950,6 @@ async function receiveDirectHttpTransfer({
       });
 
       const response = await fetch(file.downloadUrl, {
-        headers: {
-          [DIRECT_TOKEN_HEADER]: offer.sender.token,
-        },
         signal,
       });
 
@@ -1029,7 +1012,6 @@ async function receiveDirectHttpTransfer({
 
 async function runReceiveCommand(options: ReceiveCommandOptions) {
   const sessionId = randomUUID();
-  const receiverToken = randomToken();
   const host = getPreferredLanAddress();
   if (!host) {
     throw new Error("No usable local WiFi address was found on this Mac.");
@@ -1041,7 +1023,6 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
     deviceName: options.deviceName,
     host,
     port: LOCAL_HTTP_SERVER_PORT,
-    token: receiverToken,
     serviceName: options.nearby ? createServiceName(sessionId) : null,
   });
 
@@ -1259,13 +1240,6 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
       return;
     }
 
-    if (getHeader(request, DIRECT_TOKEN_HEADER) !== receiverToken) {
-      sendJson(response, 401, {
-        error: "Unauthorized direct transfer request.",
-      });
-      return;
-    }
-
     if (pathSegments[3] === "offers" && method === "POST") {
       if (isBusy) {
         sendJson(response, 409, {
@@ -1371,7 +1345,7 @@ async function runSendCommand(options: SendCommandOptions) {
     throw new Error("No usable local WiFi address was found on this Mac.");
   }
 
-  if (target.port <= 0 || !target.token.trim()) {
+  if (target.port <= 0) {
     throw new Error("That receiver is no longer available.");
   }
 
@@ -1402,7 +1376,6 @@ async function runSendCommand(options: SendCommandOptions) {
     sessionId,
     host,
     port: LOCAL_HTTP_SERVER_PORT,
-    token: randomToken(),
   };
   const state: SendState = {
     mode: "send",
@@ -1444,13 +1417,6 @@ async function runSendCommand(options: SendCommandOptions) {
 
     if (pathSegments[0] !== "direct" || pathSegments[1] !== "sessions" || pathSegments[2] !== sessionId) {
       sendText(response, 404, "Not found.");
-      return;
-    }
-
-    if (getHeader(request, DIRECT_TOKEN_HEADER) !== direct.token) {
-      sendJson(response, 401, {
-        error: "Unauthorized direct transfer request.",
-      });
       return;
     }
 
@@ -1532,7 +1498,6 @@ async function runSendCommand(options: SendCommandOptions) {
           sessionId: resolvedTarget.sessionId,
           host: resolvedTarget.host,
           port: resolvedTarget.port,
-          token: resolvedTarget.token,
         },
         {
           kind: "canceled",

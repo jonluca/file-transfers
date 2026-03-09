@@ -23,7 +23,6 @@ export interface DirectTransferNativePayloadSessionOptions {
   files: DirectTransferNativeFile[];
   maxBytesPerSecond: number | null;
   sessionId: string;
-  token: string;
 }
 
 export interface DirectTransferNativeRangeDownloadOptions {

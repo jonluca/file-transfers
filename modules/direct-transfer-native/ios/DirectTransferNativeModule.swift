@@ -19,10 +19,6 @@ private func getSessionDebugId(_ sessionId: String) -> String {
   String(sessionId.prefix(8))
 }
 
-private func getTokenDebugSuffix(_ token: String) -> String {
-  String(token.suffix(6))
-}
-
 private func getUrlDebugDetails(_ url: URL) -> [String: Any] {
   [
     "host": url.host ?? "",
@@ -43,7 +39,6 @@ private struct PayloadSession {
   let filesById: [String: PayloadFile]
   let maxBytesPerSecond: Int64?
   let sessionId: String
-  let token: String
 }
 
 private struct PayloadMetric {
@@ -234,12 +229,6 @@ private final class PayloadServer {
       let fileId = decodePathSegment(String(pathSegments[4]))
       guard let session = resolveSession(sessionId) else {
         try await sendTextResponse(on: connection, statusCode: 404, body: "Direct transfer session not found.")
-        connection.cancel()
-        return
-      }
-
-      guard let token = request.headers["x-direct-token"], token == session.token else {
-        try await sendTextResponse(on: connection, statusCode: 401, body: "Unauthorized direct transfer request.")
         connection.cancel()
         return
       }
@@ -690,7 +679,6 @@ public final class DirectTransferNativeModule: Module {
 
     AsyncFunction("registerPayloadSession") { (options: [String: Any]) in
       let sessionId = try requiredString(options, key: "sessionId")
-      let token = try requiredString(options, key: "token")
       let maxBytesPerSecond = optionalInt64(options["maxBytesPerSecond"])
       let files = try requiredFiles(options, key: "files")
 
@@ -698,15 +686,13 @@ public final class DirectTransferNativeModule: Module {
         "sessionId": getSessionDebugId(sessionId),
         "fileCount": files.count,
         "maxBytesPerSecond": maxBytesPerSecond ?? 0,
-        "tokenSuffix": getTokenDebugSuffix(token),
       ])
 
       stateQueue.sync {
         payloadSessions[sessionId] = PayloadSession(
           filesById: Dictionary(uniqueKeysWithValues: files.map { ($0.id, $0) }),
           maxBytesPerSecond: maxBytesPerSecond,
-          sessionId: sessionId,
-          token: token
+          sessionId: sessionId
         )
       }
     }
@@ -746,7 +732,6 @@ public final class DirectTransferNativeModule: Module {
           "chunkBytes": chunkBytes,
           "requestedMaxConcurrentChunks": requestedMaxConcurrentChunks,
           "destinationUri": destinationUri,
-          "tokenHeaderSuffix": getTokenDebugSuffix(headers["x-direct-token"] ?? ""),
           "host": urlValue?.host ?? "",
           "port": urlValue?.port ?? (urlValue?.scheme == "https" ? 443 : 80),
           "path": urlValue?.path ?? url,

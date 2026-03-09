@@ -55,7 +55,6 @@ class DirectTransferNativeModule : Module() {
     val filesById: Map<String, PayloadFile>,
     val maxBytesPerSecond: Long?,
     val sessionId: String,
-    val token: String,
   )
 
   private data class PayloadMetric(
@@ -329,7 +328,6 @@ class DirectTransferNativeModule : Module() {
 
     AsyncFunction("registerPayloadSession") { options: Map<String, Any?> ->
       val sessionId = options.requiredString("sessionId")
-      val token = options.requiredString("token")
       val files = options.requiredFiles("files")
       val maxBytesPerSecond = options.optionalLong("maxBytesPerSecond")
 
@@ -337,7 +335,6 @@ class DirectTransferNativeModule : Module() {
         filesById = files.associateBy { file -> file.id },
         maxBytesPerSecond = maxBytesPerSecond,
         sessionId = sessionId,
-        token = token,
       )
     }.runOnQueue(Queues.DEFAULT)
 
@@ -475,12 +472,6 @@ class DirectTransferNativeModule : Module() {
     if (session == null) {
       writeTextResponse(output, 404, "Direct transfer session not found.", keepAlive = keepAlive)
       return keepAlive
-    }
-
-    val token = request.headers["x-direct-token"]
-    if (token == null || token != session.token) {
-      writeTextResponse(output, 401, "Unauthorized direct transfer request.", keepAlive = false)
-      return false
     }
 
     val file = session.filesById[fileId]

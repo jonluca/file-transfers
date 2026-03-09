@@ -5,7 +5,6 @@ import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 import NearbyAdvertiser from "@/modules/nearby-advertiser";
 import { downloadFileWithBestAvailableAdapter, getDirectTransferClientAdapterKind } from "./direct-transfer-adapters";
 import {
-  DIRECT_TOKEN_HEADER,
   buildNearbyDiscoveryUrl,
   buildDirectSessionUrl,
   createDiscoveryQrPayload,
@@ -227,10 +226,6 @@ function getErrorDebugDetails(error: unknown) {
   return {
     error: String(error),
   };
-}
-
-function getTokenDebugSuffix(token: string | null | undefined) {
-  return token?.slice(-6) ?? null;
 }
 
 function getUrlDebugDetails(url: string) {
@@ -607,7 +602,6 @@ async function refreshDiscoveryTarget(target: DiscoveryRecord, senderSessionId: 
 
     if (
       refreshed.sessionId === target.sessionId &&
-      refreshed.token === target.token &&
       refreshed.host === target.host &&
       refreshed.port === target.port
     ) {
@@ -660,19 +654,16 @@ function buildPeerAccessFromDiscovery(record: DiscoveryRecord): DirectPeerAccess
     sessionId: record.sessionId,
     host: record.host,
     port: record.port,
-    token: record.token,
   };
 }
 
 async function postJsonWithTimeout({
   url,
-  token,
   body,
   debugDeviceName,
   debugSessionId,
 }: {
   url: string;
-  token: string;
   body: unknown;
   debugDeviceName?: string;
   debugSessionId?: string;
@@ -686,7 +677,6 @@ async function postJsonWithTimeout({
     "Posting direct peer request",
     {
       ...getUrlDebugDetails(url),
-      tokenSuffix: getTokenDebugSuffix(token),
       ...getPeerRequestBodyDebugDetails(body),
     },
     {
@@ -700,7 +690,6 @@ async function postJsonWithTimeout({
       method: "POST",
       headers: {
         "content-type": "application/json",
-        [DIRECT_TOKEN_HEADER]: token,
       },
       body: JSON.stringify(body),
       signal: controller.signal,
@@ -729,7 +718,6 @@ async function postJsonWithTimeout({
       "Direct peer request failed",
       {
         ...getUrlDebugDetails(url),
-        tokenSuffix: getTokenDebugSuffix(token),
         ...getPeerRequestBodyDebugDetails(body),
         ...getErrorDebugDetails(error),
       },
@@ -758,7 +746,6 @@ async function postDirectEvent(
 ) {
   await postJsonWithTimeout({
     url: buildDirectSessionUrl(peer, "/events"),
-    token: peer.token,
     body: {
       event,
     },
@@ -769,7 +756,6 @@ async function postDirectEvent(
 async function postIncomingOffer(peer: DiscoveryRecord, offer: IncomingTransferOffer) {
   await postJsonWithTimeout({
     url: buildDirectSessionUrl(peer, "/offers"),
-    token: peer.token,
     body: {
       offer,
     },
@@ -799,9 +785,6 @@ async function fetchDownloadableManifest({
   const manifestUrl = buildDirectSessionUrl(peer, "/manifest");
   const response = await fetch(manifestUrl, {
     method: "GET",
-    headers: {
-      [DIRECT_TOKEN_HEADER]: peer.token,
-    },
     signal,
   });
 
@@ -811,7 +794,6 @@ async function fetchDownloadableManifest({
     statusCode: response.status,
     ok: response.ok,
     ...getUrlDebugDetails(manifestUrl),
-    tokenSuffix: getTokenDebugSuffix(peer.token),
   });
 
   if (!response.ok) {
@@ -1191,9 +1173,7 @@ async function receiveDirectHttpTransfer({
         maxBytesPerSecond: null,
         maxConcurrentChunks: downloadPolicy.maxConcurrentChunks,
         totalBytes: file.sizeBytes,
-        headers: {
-          [DIRECT_TOKEN_HEADER]: offer.sender.token,
-        },
+        headers: {},
         signal: abortController.signal,
         onProgress: (progress) => {
           const delta = Math.max(progress.bytesTransferred - lastReportedFileBytes, 0);
@@ -1575,13 +1555,12 @@ export async function startSendingTransfer({
 
   const refreshedTarget = await refreshDiscoveryTarget(target, sessionId, deviceName);
 
-  if (refreshedTarget.port <= 0 || !refreshedTarget.token.trim()) {
+  if (refreshedTarget.port <= 0) {
     logDirectTransferDebug(
       "Sender target is no longer valid",
       {
         senderSessionId: getSessionDebugId(sessionId),
         targetPort: refreshedTarget.port,
-        hasToken: Boolean(refreshedTarget.token.trim()),
         targetMethod: refreshedTarget.method,
         targetHost: refreshedTarget.host,
         targetDeviceName: refreshedTarget.deviceName,
@@ -1652,7 +1631,6 @@ export async function startSendingTransfer({
 
   const direct = await registerDirectSendSession({
     sessionId,
-    token: Crypto.randomUUID().replace(/-/g, ""),
     deviceName,
     transferPolicy,
     startedAt: manifest.createdAt,
@@ -1756,7 +1734,6 @@ export async function startReceivingAvailability({
   updateSession?: ReceiveRuntimeUpdate;
 }) {
   const sessionId = Crypto.randomUUID();
-  const receiverToken = Crypto.randomUUID().replace(/-/g, "");
   const requestedServiceName = createServiceName(serviceInstanceId);
   const transferPolicy = getTransferPolicy(isPremium, "receive");
   ensureTransferPerfSnapshot(sessionId, "receive");
@@ -1777,7 +1754,6 @@ export async function startReceivingAvailability({
 
   const direct = await registerDirectReceiveSession({
     sessionId,
-    token: receiverToken,
     deviceName,
     serviceName: requestedServiceName,
     canAcceptOffer: () => activeReceiveRuntimes.get(sessionId)?.session.status === "discoverable",
@@ -1861,7 +1837,6 @@ export async function startReceivingAvailability({
         deviceName,
         host: direct.host,
         port: direct.port,
-        token: direct.token,
         serviceName: nearbyAdvertiser.serviceName,
       }),
     ),
