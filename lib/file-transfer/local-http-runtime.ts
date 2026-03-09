@@ -511,7 +511,9 @@ function createDirectManifest(runtime: SharedHttpRuntime, sendSession: DirectSen
   const directBaseUrl = {
     sessionId: sendSession.sessionId,
     host: runtime.publicHost,
-    port: sendSession.payloadServerPort ?? LOCAL_HTTP_SERVER_PORT,
+    // Keep direct downloads on the shared fixed-port runtime so manifest, events,
+    // and file bytes all use the same transport across Android and iOS.
+    port: LOCAL_HTTP_SERVER_PORT,
   };
 
   return {
