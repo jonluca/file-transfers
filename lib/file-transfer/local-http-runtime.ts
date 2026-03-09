@@ -2,14 +2,19 @@ import * as Crypto from "expo-crypto";
 import { File } from "expo-file-system";
 import * as Network from "expo-network";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
-import { HttpServer, type HttpRequest, type HttpResponse } from "react-native-nitro-http-server";
+import {
+  ConfigServer,
+  type HttpRequest,
+  type HttpResponse,
+  type ServerConfig,
+  type StaticMount,
+} from "react-native-nitro-http-server";
 import { LOCAL_HTTP_SERVER_PORT, LOCAL_HTTP_SHARE_KEEP_AWAKE_TAG } from "./constants";
 import {
   DIRECT_TOKEN_HEADER,
   createDiscoveryRecord,
   createNearbyDiscoveryResponse,
   buildDirectSessionBaseUrl,
-  buildDirectSessionUrl,
   isPrivateIpv4Address,
   normalizeIpv4Address,
   nowIso,
@@ -69,6 +74,8 @@ interface RegisterDirectSendSessionOptions {
 interface HostedShareFile {
   source: SelectedTransferFile;
   downloadPath: string;
+  staticMountPath: string;
+  staticRootDirectory: string;
 }
 
 interface BrowserShareRuntime {
@@ -98,7 +105,7 @@ interface DirectSendRuntime {
 }
 
 interface SharedHttpRuntime {
-  server: HttpServer;
+  server: ConfigServer | null;
   publicHost: string;
   browserSession: BrowserShareRuntime | null;
   directReceivers: Map<string, DirectReceiveRuntime>;
@@ -106,6 +113,8 @@ interface SharedHttpRuntime {
 }
 
 const CACHE_CONTROL_HEADER = "no-store";
+const BROWSER_STATIC_FILES_PREFIX = "/__browser-files";
+const DIRECT_STATIC_FILES_PREFIX = "/__direct-files";
 
 let activeRuntime: SharedHttpRuntime | null = null;
 
@@ -122,11 +131,6 @@ function byteLength(value: string) {
   return new TextEncoder().encode(value).byteLength;
 }
 
-function sanitizeFileName(value: string) {
-  const sanitized = value.replace(/[^\w.\-() ]+/g, "_").trim();
-  return sanitized || "file";
-}
-
 function encodeHtml(value: string) {
   return value
     .replaceAll("&", "&amp;")
@@ -134,11 +138,6 @@ function encodeHtml(value: string) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
-}
-
-function encodeHeaderFilename(value: string) {
-  const safe = value.replace(/["\\\r\n]/g, "_");
-  return `attachment; filename="${safe}"; filename*=UTF-8''${encodeURIComponent(value)}`;
 }
 
 function toTransferManifestFile(file: SelectedTransferFile): TransferManifestFile {
@@ -150,11 +149,67 @@ function toTransferManifestFile(file: SelectedTransferFile): TransferManifestFil
   };
 }
 
-function buildHostedFiles(files: SelectedTransferFile[]) {
-  return files.map((file) => ({
+function decodeUriValue(value: string) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function toStaticRootDirectory(uri: string) {
+  const fileSystemUri = uri.startsWith("file://") ? uri.slice("file://".length) : uri;
+  return decodeURI(fileSystemUri);
+}
+
+function createHostedFileRoute({
+  file,
+  mountPath,
+}: {
+  file: SelectedTransferFile;
+  mountPath: string;
+}) {
+  const sourceFile = new File(file.uri);
+  const sourceInfo = sourceFile.info();
+
+  if (!sourceInfo.exists) {
+    throw new Error(`The file "${file.name}" is no longer available on this device.`);
+  }
+
+  const diskFileName = decodeUriValue(sourceFile.name);
+
+  return {
     source: file,
-    downloadPath: `/files/${encodeURIComponent(file.id)}/${encodeURIComponent(sanitizeFileName(file.name))}`,
-  })) satisfies HostedShareFile[];
+    downloadPath: `${mountPath}/${encodeURIComponent(diskFileName)}`,
+    staticMountPath: mountPath,
+    staticRootDirectory: toStaticRootDirectory(sourceFile.parentDirectory.uri),
+  } satisfies HostedShareFile;
+}
+
+function buildBrowserHostedFiles(sessionId: string, files: SelectedTransferFile[]) {
+  return files.map((file) =>
+    createHostedFileRoute({
+      file,
+      mountPath: `${BROWSER_STATIC_FILES_PREFIX}/${encodeURIComponent(sessionId)}/${encodeURIComponent(file.id)}`,
+    }),
+  );
+}
+
+function buildDirectHostedFiles({
+  sessionId,
+  token,
+  files,
+}: {
+  sessionId: string;
+  token: string;
+  files: SelectedTransferFile[];
+}) {
+  return files.map((file) =>
+    createHostedFileRoute({
+      file,
+      mountPath: `${DIRECT_STATIC_FILES_PREFIX}/${encodeURIComponent(sessionId)}/${encodeURIComponent(token)}/${encodeURIComponent(file.id)}`,
+    }),
+  );
 }
 
 function createDefaultHeaders(contentType: string, contentLength?: number) {
@@ -382,72 +437,97 @@ function createBrowserManifest(publicHost: string, browserSession: BrowserShareR
 }
 
 function createDirectManifest(runtime: SharedHttpRuntime, sendSession: DirectSendRuntime) {
+  const directBaseUrl = {
+    sessionId: sendSession.sessionId,
+    host: runtime.publicHost,
+    port: LOCAL_HTTP_SERVER_PORT,
+  };
+
   return {
     version: 1,
     kind: "direct-http-transfer",
     sessionId: sendSession.sessionId,
     deviceName: sendSession.deviceName,
     startedAt: sendSession.startedAt,
-    shareUrl: buildDirectSessionBaseUrl({
-      sessionId: sendSession.sessionId,
-      host: runtime.publicHost,
-      port: LOCAL_HTTP_SERVER_PORT,
-    }),
+    shareUrl: buildDirectSessionBaseUrl(directBaseUrl),
     totalBytes: sendSession.files.reduce((sum, file) => sum + file.sizeBytes, 0),
-    files: sendSession.files.map((file) => ({
-      id: file.id,
-      name: file.name,
-      mimeType: file.mimeType,
-      sizeBytes: file.sizeBytes,
-      downloadUrl: buildDirectSessionUrl(
-        {
-          sessionId: sendSession.sessionId,
-          host: runtime.publicHost,
-          port: LOCAL_HTTP_SERVER_PORT,
-        },
-        `/files/${encodeURIComponent(file.id)}/${encodeURIComponent(sanitizeFileName(file.name))}`,
-      ),
-    })),
+    files: sendSession.files.map((file) => {
+      const hostedFile = sendSession.filesById.get(file.id);
+      if (!hostedFile) {
+        throw new Error(`The file "${file.name}" is no longer available on this device.`);
+      }
+
+      return {
+        id: file.id,
+        name: file.name,
+        mimeType: file.mimeType,
+        sizeBytes: file.sizeBytes,
+        downloadUrl: `http://${runtime.publicHost}:${LOCAL_HTTP_SERVER_PORT}${hostedFile.downloadPath}`,
+      };
+    }),
   } satisfies DownloadableTransferManifest;
 }
 
-async function createFileResponse({ file, method }: { file: SelectedTransferFile; method: string }) {
-  const sourceFile = new File(file.uri);
-  const sourceInfo = sourceFile.info();
+function collectStaticMounts(runtime: SharedHttpRuntime) {
+  const mounts: StaticMount[] = [];
 
-  if (!sourceInfo.exists) {
-    return createTextResponse({
-      statusCode: 410,
-      body: "The selected file is no longer available on this device.",
-      contentType: "text/plain; charset=utf-8",
-      method,
-    });
+  if (runtime.browserSession) {
+    for (const hostedFile of runtime.browserSession.filesById.values()) {
+      mounts.push({
+        type: "static",
+        path: hostedFile.staticMountPath,
+        root: hostedFile.staticRootDirectory,
+      });
+    }
   }
 
-  const contentLength = sourceInfo.size ?? file.sizeBytes;
-  const headers = {
-    ...createDefaultHeaders(file.mimeType || "application/octet-stream", contentLength),
-    "Content-Disposition": encodeHeaderFilename(file.name),
-  };
-
-  if (method === "HEAD") {
-    return {
-      statusCode: 200,
-      headers,
-    } satisfies HttpResponse;
+  for (const directSender of runtime.directSenders.values()) {
+    for (const hostedFile of directSender.filesById.values()) {
+      mounts.push({
+        type: "static",
+        path: hostedFile.staticMountPath,
+        root: hostedFile.staticRootDirectory,
+      });
+    }
   }
 
-  const bytes = await sourceFile.bytes();
-  const body =
-    bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
-      ? bytes.buffer
-      : bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  return mounts;
+}
 
+function createServerConfig(runtime: SharedHttpRuntime) {
   return {
-    statusCode: 200,
-    headers,
-    body,
-  } satisfies HttpResponse;
+    mounts: collectStaticMounts(runtime),
+  } satisfies ServerConfig;
+}
+
+async function startRuntimeServer(runtime: SharedHttpRuntime) {
+  const server = new ConfigServer();
+  const started = await server.start(
+    LOCAL_HTTP_SERVER_PORT,
+    (request) => handleRequest(runtime, request),
+    createServerConfig(runtime),
+    runtime.publicHost,
+  );
+
+  if (!started) {
+    throw new Error(`Unable to start the local HTTP server on port ${LOCAL_HTTP_SERVER_PORT}.`);
+  }
+
+  runtime.server = server;
+}
+
+async function stopRuntimeServer(runtime: SharedHttpRuntime) {
+  if (!runtime.server) {
+    return;
+  }
+
+  await runtime.server.stop().catch(() => {});
+  runtime.server = null;
+}
+
+async function refreshRuntimeServer(runtime: SharedHttpRuntime) {
+  await stopRuntimeServer(runtime);
+  await startRuntimeServer(runtime);
 }
 
 async function finalizeBrowserSession({
@@ -496,7 +576,7 @@ async function stopSharedRuntime(runtime: SharedHttpRuntime) {
   }
 
   activeRuntime = null;
-  await runtime.server.stop().catch(() => {});
+  await stopRuntimeServer(runtime);
 }
 
 async function maybeStopIdleRuntime(runtime: SharedHttpRuntime) {
@@ -522,23 +602,14 @@ async function ensureRuntime(kind: "browser" | "direct") {
 
   if (!activeRuntime) {
     const runtime: SharedHttpRuntime = {
-      server: new HttpServer(),
+      server: null,
       publicHost,
       browserSession: null,
       directReceivers: new Map(),
       directSenders: new Map(),
     };
 
-    const started = await runtime.server.start(
-      LOCAL_HTTP_SERVER_PORT,
-      (request) => handleRequest(runtime, request),
-      publicHost,
-    );
-
-    if (!started) {
-      throw new Error(`Unable to start the local HTTP server on port ${LOCAL_HTTP_SERVER_PORT}.`);
-    }
-
+    await startRuntimeServer(runtime);
     activeRuntime = runtime;
   }
 
@@ -550,6 +621,7 @@ async function ensureRuntime(kind: "browser" | "direct") {
       status: "stopped",
       detail: "Browser sharing stopped because a local transfer started.",
     });
+    await refreshRuntimeServer(activeRuntime);
   }
 
   return activeRuntime;
@@ -590,25 +662,6 @@ function handleBrowserShareRequest(runtime: SharedHttpRuntime, request: HttpRequ
     return createJsonResponse({
       statusCode: 200,
       body: createBrowserManifest(runtime.publicHost, browserSession),
-      method,
-    });
-  }
-
-  const pathSegments = path.split("/").filter(Boolean);
-  if (pathSegments[0] === "files" && pathSegments[1]) {
-    const fileId = decodeURIComponent(pathSegments[1]);
-    const hostedFile = browserSession.filesById.get(fileId);
-    if (!hostedFile) {
-      return createTextResponse({
-        statusCode: 404,
-        body: "File not found.",
-        contentType: "text/plain; charset=utf-8",
-        method,
-      });
-    }
-
-    return createFileResponse({
-      file: hostedFile.source,
       method,
     });
   }
@@ -706,25 +759,6 @@ async function handleDirectRequest(runtime: SharedHttpRuntime, request: HttpRequ
       });
     }
 
-    if (pathSegments[3] === "files" && pathSegments[4] && ["GET", "HEAD"].includes(method) && directSender) {
-      ensureDirectToken(request, directSender.token);
-      const fileId = decodeURIComponent(pathSegments[4]);
-      const hostedFile = directSender.filesById.get(fileId);
-      if (!hostedFile) {
-        return createTextResponse({
-          statusCode: 404,
-          body: "File not found.",
-          contentType: "text/plain; charset=utf-8",
-          method,
-        });
-      }
-
-      return createFileResponse({
-        file: hostedFile.source,
-        method,
-      });
-    }
-
     return createEmptyResponse({
       statusCode: 405,
       method,
@@ -815,13 +849,21 @@ export async function startLocalHttpSession({
       files,
       publicHost: runtime.publicHost,
     }),
-    filesById: new Map(buildHostedFiles(files).map((hostedFile) => [hostedFile.source.id, hostedFile])),
+    filesById: new Map(
+      buildBrowserHostedFiles(sessionId, files).map((hostedFile) => [hostedFile.source.id, hostedFile]),
+    ),
     updateSession,
     finalizing: false,
     onFinalized,
   };
 
   runtime.browserSession = browserSession;
+  try {
+    await refreshRuntimeServer(runtime);
+  } catch (error) {
+    runtime.browserSession = null;
+    throw error;
+  }
   await activateKeepAwakeAsync(LOCAL_HTTP_SHARE_KEEP_AWAKE_TAG).catch(() => {});
 
   withBrowserSessionUpdate(browserSession, {
@@ -844,6 +886,11 @@ export async function stopLocalHttpSession(sessionId: string, detail = "Browser 
     status: "stopped",
     detail,
   });
+  if (runtime.directReceivers.size > 0 || runtime.directSenders.size > 0) {
+    await refreshRuntimeServer(runtime);
+    return;
+  }
+
   await maybeStopIdleRuntime(runtime);
 }
 
@@ -919,10 +966,19 @@ export async function registerDirectSendSession({
     deviceName,
     startedAt,
     files,
-    filesById: new Map(buildHostedFiles(files).map((hostedFile) => [hostedFile.source.id, hostedFile])),
+    filesById: new Map(
+      buildDirectHostedFiles({ sessionId, token, files }).map((hostedFile) => [hostedFile.source.id, hostedFile]),
+    ),
     onEvent,
     onInterrupted,
   });
+  try {
+    await refreshRuntimeServer(runtime);
+  } catch (error) {
+    runtime.directSenders.delete(sessionId);
+    await maybeStopIdleRuntime(runtime);
+    throw error;
+  }
 
   return toDirectPeerAccess(sessionId, token, runtime.publicHost);
 }
@@ -934,5 +990,10 @@ export async function unregisterDirectSendSession(sessionId: string) {
   }
 
   runtime.directSenders.delete(sessionId);
+  if (runtime.browserSession || runtime.directReceivers.size > 0 || runtime.directSenders.size > 0) {
+    await refreshRuntimeServer(runtime);
+    return;
+  }
+
   await maybeStopIdleRuntime(runtime);
 }
