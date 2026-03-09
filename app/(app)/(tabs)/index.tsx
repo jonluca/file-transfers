@@ -1,5 +1,6 @@
 import { CameraView, useCameraPermissions } from "expo-camera";
 import { useIsFocused } from "@react-navigation/native";
+import * as Burnt from "burnt";
 import React, { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, AppState, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import QRCode from "react-native-qrcode-svg";
@@ -17,13 +18,16 @@ import {
   X,
 } from "lucide-react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { InlineNotice } from "@/components/ui";
 import { usePremiumAccess } from "@/hooks/use-premium-access";
 import { getTabScreenTopInset } from "@/lib/design/tab-screen-insets";
 import { designFonts, designTheme } from "@/lib/design/theme";
 import {
   acceptIncomingTransferOffer,
+  assertSelectedFilesTransferAllowed,
   declineIncomingTransferOffer,
   formatBytes,
+  isTransferSizeLimitError,
   startHttpShareSession,
   parseDiscoveryQrPayload,
   pickTransferFiles,
@@ -37,6 +41,7 @@ import {
   type HttpShareSession,
   type ReceiveSession,
   type SelectedTransferFile,
+  type TransferSizeLimitNotice,
   type TransferManifestFile,
   type TransferHistoryEntry,
   type TransferProgress,
@@ -47,6 +52,40 @@ import { useAppStore, useDeviceName, useServiceInstanceId } from "@/store";
 type TransferMode = "idle" | "sending" | "waiting" | "receiving" | "transferring" | "sharing";
 
 const TRANSFER_SCREEN_DEBUG_PREFIX = "[TransferScreen]";
+
+function showBanner({ description, title }: TransferSizeLimitNotice) {
+  void Burnt.toast({
+    duration: 5,
+    from: "top",
+    haptic: "error",
+    message: description,
+    preset: "error",
+    title,
+  });
+}
+
+async function pickTransferFilesSafely() {
+  try {
+    return {
+      error: null,
+      files: await pickTransferFiles(),
+    };
+  } catch (error) {
+    return {
+      error,
+      files: null,
+    };
+  }
+}
+
+function getSelectionValidationError(files: SelectedTransferFile[], isPremium: boolean) {
+  try {
+    assertSelectedFilesTransferAllowed(files, isPremium, "send");
+    return null;
+  } catch (error) {
+    return error;
+  }
+}
 
 function logTransferScreenDebug(message: string, details?: Record<string, unknown>) {
   if (!__DEV__) {
@@ -100,6 +139,40 @@ function MimeIcon({ type }: { type: string }) {
 
 function getTransferDetail(value: string | null | undefined, fallback: string) {
   return value ?? fallback;
+}
+
+function formatTransferSpeed(bytesPerSecond: number) {
+  if (!Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0) {
+    return "Calculating...";
+  }
+
+  return `${formatBytes(Math.round(bytesPerSecond))}/s`;
+}
+
+function formatTransferEta(progress: TransferProgress) {
+  const remainingBytes = progress.totalBytes - progress.bytesTransferred;
+  if (remainingBytes <= 0) {
+    return "Almost done";
+  }
+
+  if (!Number.isFinite(progress.speedBytesPerSecond) || progress.speedBytesPerSecond <= 0) {
+    return "Calculating...";
+  }
+
+  const totalSeconds = Math.max(1, Math.ceil(remainingBytes / progress.speedBytesPerSecond));
+  if (totalSeconds < 60) {
+    return `${totalSeconds}s`;
+  }
+
+  if (totalSeconds < 3600) {
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return seconds === 0 ? `${minutes}m` : `${minutes}m ${seconds}s`;
+  }
+
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  return minutes === 0 ? `${hours}h` : `${hours}h ${minutes}m`;
 }
 
 function createHistoryEntryFromSendSession(session: TransferSession): TransferHistoryEntry {
@@ -291,6 +364,7 @@ export default function TransferScreen() {
   const [nearbyRecords, setNearbyRecords] = useState<DiscoveryRecord[]>([]);
   const [transferProgress, setTransferProgress] = useState<TransferProgress | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [selectionError, setSelectionError] = useState<TransferSizeLimitNotice | null>(null);
   const [showQrScanner, setShowQrScanner] = useState(false);
   const [showQrCode, setShowQrCode] = useState(false);
   const completionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -626,6 +700,12 @@ export default function TransferScreen() {
     ensureReceiveAvailabilityRef.current = ensureReceiveAvailability;
   });
 
+  function surfaceSelectionError(error: TransferSizeLimitNotice) {
+    setNotice(null);
+    setSelectionError(error);
+    showBanner(error);
+  }
+
   useEffect(() => {
     if (activeHttpShareSession) {
       return;
@@ -770,20 +850,53 @@ export default function TransferScreen() {
       });
     }
 
-    const files = await pickTransferFiles();
-
-    if (files.length === 0) {
+    const { error: pickError, files } = await pickTransferFilesSafely();
+    if (pickError) {
+      const message = pickError instanceof Error ? pickError.message : "Unable to add these files.";
+      setSelectionError(null);
+      setNotice(message);
+      showBanner({
+        description: message,
+        title: "Unable to add files",
+      });
       return;
     }
 
+    if (!files || files.length === 0) {
+      return;
+    }
+
+    const nextFiles = append ? [...stagedFiles, ...files] : files;
+    const validationError = getSelectionValidationError(nextFiles, premiumAccess.isPremium);
+    if (validationError) {
+      if (isTransferSizeLimitError(validationError)) {
+        surfaceSelectionError({
+          description: validationError.description,
+          title: validationError.title,
+        });
+        return;
+      }
+
+      const message = validationError instanceof Error ? validationError.message : "Unable to add these files.";
+      setSelectionError(null);
+      setNotice(message);
+      showBanner({
+        description: message,
+        title: "Unable to add files",
+      });
+      return;
+    }
+
+    setSelectionError(null);
     setNotice(null);
     setShowQrCode(false);
     setShowQrScanner(false);
-    setStagedFiles((current) => (append ? [...current, ...files] : files));
+    setStagedFiles(nextFiles);
     setMode("sending");
   }
 
   function handleRemoveFile(index: number) {
+    setSelectionError(null);
     setStagedFiles((current) => {
       const nextFiles = current.filter((_, fileIndex) => fileIndex !== index);
       if (nextFiles.length === 0) {
@@ -818,12 +931,14 @@ export default function TransferScreen() {
     setActiveSendSession(null);
     setTransferProgress(null);
     setNotice(null);
+    setSelectionError(null);
     setShowQrScanner(false);
     setShowQrCode(false);
     setMode(stagedFiles.length > 0 ? "sending" : "idle");
   }
 
   async function handleStartReceiving() {
+    setSelectionError(null);
     const ready = await ensureReceiveAvailability({
       preserveNotice: false,
       showReceivingScreen: true,
@@ -856,6 +971,7 @@ export default function TransferScreen() {
       stagedBytes: stagedFiles.reduce((sum, file) => sum + file.sizeBytes, 0),
     });
     setNotice(null);
+    setSelectionError(null);
     setTransferProgress(null);
     setShowQrScanner(false);
     setMode("waiting");
@@ -885,10 +1001,18 @@ export default function TransferScreen() {
         targetDeviceName: record.deviceName,
         ...getDebugErrorDetails(error),
       });
+      if (isTransferSizeLimitError(error)) {
+        surfaceSelectionError({
+          description: error.description,
+          title: error.title,
+        });
+      } else {
+        setSelectionError(null);
+        setNotice(error instanceof Error ? error.message : "Unable to start this transfer.");
+      }
       setActiveSendSession(null);
       setTransferProgress(null);
       setMode("sending");
-      setNotice(error instanceof Error ? error.message : "Unable to start this transfer.");
     }
   }
 
@@ -908,6 +1032,7 @@ export default function TransferScreen() {
       }
 
       setNotice(null);
+      setSelectionError(null);
       setTransferProgress(null);
       setShowQrCode(false);
       setShowQrScanner(false);
@@ -924,6 +1049,15 @@ export default function TransferScreen() {
     } catch (error) {
       setActiveHttpShareSession(null);
       setMode(stagedFiles.length > 0 ? "sending" : "idle");
+      if (isTransferSizeLimitError(error)) {
+        surfaceSelectionError({
+          description: error.description,
+          title: error.title,
+        });
+        return;
+      }
+
+      setSelectionError(null);
       setNotice(error instanceof Error ? error.message : "Unable to start browser sharing.");
     }
   }
@@ -947,6 +1081,7 @@ export default function TransferScreen() {
 
   async function handleScanQrPress() {
     setNotice(null);
+    setSelectionError(null);
 
     if (!cameraPermission?.granted) {
       const permission = await requestCameraPermission();
@@ -1001,6 +1136,12 @@ export default function TransferScreen() {
       : progressPercent >= 100
         ? "Complete!"
         : "Transferring...";
+  const shouldShowTransferMetrics =
+    currentProgress?.phase === "transferring" && currentProgress.bytesTransferred < currentProgress.totalBytes;
+  const transferSpeedLabel = shouldShowTransferMetrics
+    ? formatTransferSpeed(currentProgress.speedBytesPerSecond)
+    : null;
+  const transferEtaLabel = shouldShowTransferMetrics ? formatTransferEta(currentProgress) : null;
 
   if (mode === "idle") {
     return (
@@ -1021,6 +1162,11 @@ export default function TransferScreen() {
               void handleStartReceiving();
             }}
           />
+          {selectionError ? (
+            <View style={styles.noticeCardWrap}>
+              <InlineNotice description={selectionError.description} title={selectionError.title} tone={"danger"} />
+            </View>
+          ) : null}
           {notice ? <Text style={styles.centerNotice}>{notice}</Text> : null}
         </View>
       </View>
@@ -1057,6 +1203,9 @@ export default function TransferScreen() {
           >
             <Text style={styles.addFilesLabel}>Add more files</Text>
           </Pressable>
+          {selectionError ? (
+            <InlineNotice description={selectionError.description} title={selectionError.title} tone={"danger"} />
+          ) : null}
 
           <View style={styles.discoverySection}>
             <Text style={styles.discoveryTitle}>Choose a receiver</Text>
@@ -1351,6 +1500,18 @@ export default function TransferScreen() {
           </View>
           <Text style={styles.progressLabel}>{progressPercent}%</Text>
         </View>
+        {shouldShowTransferMetrics ? (
+          <View style={styles.transferMetricsRow}>
+            <View style={styles.transferMetricCard}>
+              <Text style={styles.transferMetricLabel}>Speed</Text>
+              <Text style={styles.transferMetricValue}>{transferSpeedLabel}</Text>
+            </View>
+            <View style={styles.transferMetricCard}>
+              <Text style={styles.transferMetricLabel}>ETA</Text>
+              <Text style={styles.transferMetricValue}>{transferEtaLabel}</Text>
+            </View>
+          </View>
+        ) : null}
         {currentProgress?.currentFileName ? (
           <Text style={styles.transferFileName}>{currentProgress.currentFileName}</Text>
         ) : null}
@@ -1380,6 +1541,10 @@ const styles = StyleSheet.create({
   },
   stack: {
     gap: 10,
+  },
+  noticeCardWrap: {
+    maxWidth: 320,
+    width: "100%",
   },
   idleWrap: {
     alignItems: "center",
@@ -1821,6 +1986,34 @@ const styles = StyleSheet.create({
     fontFamily: designFonts.regular,
     fontSize: 13,
     textAlign: "center",
+  },
+  transferMetricsRow: {
+    flexDirection: "row",
+    gap: 10,
+    marginTop: 14,
+    maxWidth: 320,
+    width: "100%",
+  },
+  transferMetricCard: {
+    backgroundColor: designTheme.muted,
+    borderColor: designTheme.border,
+    borderRadius: 14,
+    borderWidth: 1,
+    flex: 1,
+    gap: 4,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  transferMetricLabel: {
+    color: designTheme.mutedForeground,
+    fontFamily: designFonts.regular,
+    fontSize: 12,
+    textTransform: "uppercase",
+  },
+  transferMetricValue: {
+    color: designTheme.foreground,
+    fontFamily: designFonts.medium,
+    fontSize: 15,
   },
   transferFileName: {
     color: designTheme.foreground,

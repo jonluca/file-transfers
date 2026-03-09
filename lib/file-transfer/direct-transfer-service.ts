@@ -935,6 +935,7 @@ async function receiveDirectHttpTransfer({
 
     const receivedFiles: ReceivedFileRecord[] = [];
     let bytesTransferred = 0;
+    const downloadStartedAt = Date.now();
 
     for (const file of manifest.files) {
       const outputFile = createTransferOutputFile(getReceivedFilesDirectory(), file.name);
@@ -947,7 +948,6 @@ async function receiveDirectHttpTransfer({
         destinationUri: outputFile.uri,
       });
 
-      const startedAt = Date.now();
       let fileBytesTransferred = 0;
 
       onProgress({
@@ -973,8 +973,8 @@ async function receiveDirectHttpTransfer({
         onBytes: (chunkBytes) => {
           fileBytesTransferred += chunkBytes;
           bytesTransferred += chunkBytes;
-          const elapsedMilliseconds = Math.max(Date.now() - startedAt, 1);
-          const speedBytesPerSecond = Math.round((fileBytesTransferred / elapsedMilliseconds) * 1000);
+          const elapsedMilliseconds = Math.max(Date.now() - downloadStartedAt, 1);
+          const speedBytesPerSecond = Math.round((bytesTransferred / elapsedMilliseconds) * 1000);
 
           onProgress({
             phase: "transferring",

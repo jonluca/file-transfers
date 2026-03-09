@@ -113,15 +113,62 @@ interface SharedHttpRuntime {
   directSenders: Map<string, DirectSendRuntime>;
 }
 
+interface LocalHttpRuntimeState {
+  activeRuntime: SharedHttpRuntime | null;
+  ensurePromise: Promise<unknown> | null;
+}
+
 const CACHE_CONTROL_HEADER = "no-store";
 const BROWSER_STATIC_FILES_PREFIX = "/__browser-files";
 const DIRECT_STATIC_FILES_PREFIX = "/__direct-files";
 
-let activeRuntime: SharedHttpRuntime | null = null;
+declare global {
+  var __fileTransfersLocalHttpRuntimeState: LocalHttpRuntimeState | undefined;
+}
+
+function getLocalHttpRuntimeState(): LocalHttpRuntimeState {
+  globalThis.__fileTransfersLocalHttpRuntimeState ??= {
+    activeRuntime: null,
+    ensurePromise: null,
+  };
+
+  return globalThis.__fileTransfersLocalHttpRuntimeState;
+}
+
+function getActiveRuntime() {
+  return getLocalHttpRuntimeState().activeRuntime;
+}
+
+function setActiveRuntime(runtime: SharedHttpRuntime | null) {
+  getLocalHttpRuntimeState().activeRuntime = runtime;
+}
+
+async function withRuntimeEnsureLock<T>(operation: () => Promise<T>) {
+  const runtimeState = getLocalHttpRuntimeState();
+  if (runtimeState.ensurePromise) {
+    await runtimeState.ensurePromise.catch(() => {});
+  }
+
+  const promise = operation();
+  runtimeState.ensurePromise = Promise.resolve(promise);
+
+  try {
+    return await promise;
+  } finally {
+    if (runtimeState.ensurePromise === promise) {
+      runtimeState.ensurePromise = null;
+    }
+  }
+}
+
+async function maybeGetLanShareHost() {
+  const ipAddress = normalizeIpv4Address(await Network.getIpAddressAsync().catch(() => null));
+  return ipAddress && isPrivateIpv4Address(ipAddress) ? ipAddress : null;
+}
 
 async function getLanShareHost() {
-  const ipAddress = normalizeIpv4Address(await Network.getIpAddressAsync().catch(() => null));
-  if (!ipAddress || !isPrivateIpv4Address(ipAddress)) {
+  const ipAddress = await maybeGetLanShareHost();
+  if (!ipAddress) {
     throw new Error("Connect this device to local WiFi before starting a local transfer.");
   }
 
@@ -684,11 +731,11 @@ async function interruptDirectSessions(runtime: SharedHttpRuntime, detail: strin
 }
 
 async function stopSharedRuntime(runtime: SharedHttpRuntime) {
-  if (activeRuntime !== runtime) {
+  if (getActiveRuntime() !== runtime) {
     return;
   }
 
-  activeRuntime = null;
+  setActiveRuntime(null);
   await stopRuntimeServer(runtime);
 }
 
@@ -700,44 +747,68 @@ async function maybeStopIdleRuntime(runtime: SharedHttpRuntime) {
   await stopSharedRuntime(runtime);
 }
 
-async function ensureRuntime(kind: "browser" | "direct") {
-  const publicHost = await getLanShareHost();
+async function ensureRuntime(
+  kind: "boot",
+  options?: {
+    allowMissingHost?: boolean;
+  },
+): Promise<SharedHttpRuntime | null>;
+async function ensureRuntime(
+  kind: "browser" | "direct",
+  options?: {
+    allowMissingHost?: false;
+  },
+): Promise<SharedHttpRuntime>;
+async function ensureRuntime(kind: "boot" | "browser" | "direct", options?: { allowMissingHost?: boolean }) {
+  return withRuntimeEnsureLock(async () => {
+    const publicHost = options?.allowMissingHost ? await maybeGetLanShareHost() : await getLanShareHost();
+    const activeRuntime = getActiveRuntime();
 
-  if (activeRuntime && activeRuntime.publicHost !== publicHost) {
-    await finalizeBrowserSession({
-      runtime: activeRuntime,
-      status: "stopped",
-      detail: "Local HTTP service restarted because the WiFi address changed.",
-    });
-    await interruptDirectSessions(activeRuntime, "Local transfer stopped because the WiFi address changed.");
-    await stopSharedRuntime(activeRuntime);
-  }
+    if (activeRuntime && publicHost && activeRuntime.publicHost !== publicHost) {
+      await finalizeBrowserSession({
+        runtime: activeRuntime,
+        status: "stopped",
+        detail: "Local HTTP service restarted because the WiFi address changed.",
+      });
+      await interruptDirectSessions(activeRuntime, "Local transfer stopped because the WiFi address changed.");
+      await stopSharedRuntime(activeRuntime);
+    }
 
-  if (!activeRuntime) {
-    const runtime: SharedHttpRuntime = {
-      server: null,
-      publicHost,
-      browserSession: null,
-      directReceivers: new Map(),
-      directSenders: new Map(),
-    };
+    if (!publicHost) {
+      return getActiveRuntime();
+    }
 
-    await startRuntimeServer(runtime);
-    activeRuntime = runtime;
-  }
+    let runtime = getActiveRuntime();
+    if (!runtime) {
+      runtime = {
+        server: null,
+        publicHost,
+        browserSession: null,
+        directReceivers: new Map(),
+        directSenders: new Map(),
+      };
 
-  if (kind === "browser") {
-    await interruptDirectSessions(activeRuntime, "Local transfer stopped because browser sharing started.");
-  } else if (activeRuntime.browserSession) {
-    await finalizeBrowserSession({
-      runtime: activeRuntime,
-      status: "stopped",
-      detail: "Browser sharing stopped because a local transfer started.",
-    });
-    await refreshRuntimeServer(activeRuntime);
-  }
+      await startRuntimeServer(runtime);
+      setActiveRuntime(runtime);
+    }
 
-  return activeRuntime;
+    if (kind === "browser") {
+      await interruptDirectSessions(runtime, "Local transfer stopped because browser sharing started.");
+    } else if (kind === "direct" && runtime.browserSession) {
+      await finalizeBrowserSession({
+        runtime,
+        status: "stopped",
+        detail: "Browser sharing stopped because a local transfer started.",
+      });
+      await refreshRuntimeServer(runtime);
+    }
+
+    return runtime;
+  });
+}
+
+export async function ensureLocalHttpServerStarted() {
+  return ensureRuntime("boot", { allowMissingHost: true });
 }
 
 function toDirectPeerAccess(sessionId: string, token: string, publicHost: string): DirectPeerAccess {
@@ -1037,7 +1108,7 @@ export async function startLocalHttpSession({
 }
 
 export async function stopLocalHttpSession(sessionId: string, detail = "Browser sharing stopped.") {
-  const runtime = activeRuntime;
+  const runtime = getActiveRuntime();
   if (!runtime?.browserSession || runtime.browserSession.session.id !== sessionId) {
     return;
   }
@@ -1086,7 +1157,7 @@ export async function registerDirectReceiveSession({
 }
 
 export async function unregisterDirectReceiveSession(sessionId: string) {
-  const runtime = activeRuntime;
+  const runtime = getActiveRuntime();
   if (!runtime) {
     return;
   }
@@ -1096,7 +1167,7 @@ export async function unregisterDirectReceiveSession(sessionId: string) {
 }
 
 export async function updateDirectReceiveServiceName(sessionId: string, serviceName: string | null) {
-  const runtime = activeRuntime;
+  const runtime = getActiveRuntime();
   const receiver = runtime?.directReceivers.get(sessionId);
   if (!runtime || !receiver) {
     return;
@@ -1149,7 +1220,7 @@ export async function registerDirectSendSession({
 }
 
 export async function unregisterDirectSendSession(sessionId: string) {
-  const runtime = activeRuntime;
+  const runtime = getActiveRuntime();
   if (!runtime) {
     return;
   }

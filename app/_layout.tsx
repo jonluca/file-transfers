@@ -8,6 +8,7 @@ import {
 } from "@expo-google-fonts/geist";
 import { QueryClientProvider, focusManager } from "@tanstack/react-query";
 import type { QueryCacheNotifyEvent } from "@tanstack/query-core";
+import { Toaster } from "burnt/web";
 import * as SystemUI from "expo-system-ui";
 import { Slot } from "expo-router";
 import { StatusBar } from "expo-status-bar";
@@ -18,6 +19,7 @@ import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { FullScreenLoader } from "@/components/ui";
 import { designTheme } from "@/lib/design/theme";
+import { ensureLocalHttpServerStarted } from "@/lib/file-transfer/local-http-runtime-startup";
 import { createBoilerplateQueryClient, getTrpcClient, TRPCProvider } from "@/lib/trpc";
 import { RevenueCatProvider } from "@/providers/revenuecat-provider";
 import { useHasHydrated } from "@/store";
@@ -59,6 +61,18 @@ export default function RootLayout() {
     }
 
     void SystemUI.setBackgroundColorAsync(designTheme.background);
+  }, []);
+
+  useEffect(() => {
+    if (Platform.OS === "web") {
+      return;
+    }
+
+    void ensureLocalHttpServerStarted().catch((error) => {
+      if (__DEV__) {
+        console.warn("[LocalHttpServer] App-start startup failed.", error);
+      }
+    });
   }, []);
 
   useEffect(() => {
@@ -107,6 +121,7 @@ export default function RootLayout() {
             <GestureHandlerRootView style={{ flex: 1, backgroundColor: designTheme.background }}>
               <RootLayoutContent />
             </GestureHandlerRootView>
+            <Toaster position={"top-center"} richColors />
           </RevenueCatProvider>
         </TRPCProvider>
         <StatusBar backgroundColor={designTheme.background} style={"dark"} />
