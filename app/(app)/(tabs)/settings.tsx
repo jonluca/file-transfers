@@ -31,6 +31,7 @@ import {
   X,
 } from "lucide-react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { ContinueWithAppleButton, ContinueWithGoogleButton } from "@/components/auth";
 import { useGoogleSignIn } from "@/hooks/use-google-sign-in";
 import { useCompleteHostedUpload, useCreateHostedUpload, useDeleteHostedFile, useHostedFiles } from "@/hooks/queries";
 import { usePremiumAccess } from "@/hooks/use-premium-access";
@@ -453,10 +454,18 @@ export default function SettingsScreen() {
   const createHostedUploadMutation = useCreateHostedUpload();
   const completeHostedUploadMutation = useCompleteHostedUpload();
   const deleteHostedFileMutation = useDeleteHostedFile();
-  const { errorMessage: appleError, isSigningIn: isSigningInWithApple, triggerAppleSignIn } = useAppleSignIn({
+  const {
+    errorMessage: appleError,
+    isSigningIn: isSigningInWithApple,
+    triggerAppleSignIn,
+  } = useAppleSignIn({
     onSuccess: () => setPurchaseNotice(null),
   });
-  const { errorMessage: googleError, isSigningIn: isSigningInWithGoogle, triggerGoogleSignIn } = useGoogleSignIn({
+  const {
+    errorMessage: googleError,
+    isSigningIn: isSigningInWithGoogle,
+    triggerGoogleSignIn,
+  } = useGoogleSignIn({
     onSuccess: () => setPurchaseNotice(null),
   });
   const [draftDeviceName, setDraftDeviceName] = useState(deviceName);
@@ -1069,9 +1078,7 @@ export default function SettingsScreen() {
                 <InlineNotice description={sessionUser?.email ?? "Signed in"} title={"App account linked"} />
               ) : (
                 <InlineNotice
-                  description={
-                    `Sign in before subscribing or restoring ${FILE_TRANSFERS_PRO_NAME} so billing stays linked to your app account.`
-                  }
+                  description={`Sign in before subscribing or restoring ${FILE_TRANSFERS_PRO_NAME} so billing stays linked to your app account.`}
                   title={"Sign-in required"}
                   tone={"warning"}
                 />
@@ -1085,97 +1092,101 @@ export default function SettingsScreen() {
               ) : null}
 
               <View style={styles.modalSection}>
-                {hasConfiguredRevenueCat ? (
-                  isLoadingOfferings && !plans.availablePackages.length ? (
-                    <View style={styles.loadingRow}>
-                      <ActivityIndicator color={designTheme.primary} />
-                      <Text style={styles.loadingLabel}>Loading {FILE_TRANSFERS_PRO_NAME} plans...</Text>
-                    </View>
-                  ) : plans.availablePackages.length ? (
-                    plans.availablePackages.map((selectedPackage) => (
-                      <PremiumPackageCard
-                        key={selectedPackage.identifier}
-                        disabled={isSubscriptionActionDisabled}
-                        highlighted={selectedPackage.identifier === recommendedPackageIdentifier}
-                        onPress={() => {
-                          void handlePurchase(selectedPackage);
-                        }}
-                        selectedPackage={selectedPackage}
-                      />
-                    ))
-                  ) : (
-                    <InlineNotice
-                      description={
-                        "Create a current offering in RevenueCat and attach the subscription packages you want to sell in this build."
-                      }
-                      title={"Offering setup required"}
-                      tone={"warning"}
-                    />
-                  )
-                ) : (
-                  <InlineNotice
-                    description={"Add the RevenueCat public API keys to this build to enable live purchases."}
-                    title={"RevenueCat keys missing"}
-                    tone={"warning"}
-                  />
-                )}
-
-                {customerInfo?.activeSubscriptions.length ? (
-                  <InlineNotice
-                    description={customerInfo.activeSubscriptions.join(", ")}
-                    title={"Active store products"}
-                  />
-                ) : null}
-
-                <PrimaryButton
-                  disabled={!hasConfiguredRevenueCat || (!isPremium && !isSignedIn) || isLoadingCustomerInfo}
-                  label={
-                    isPremium
-                      ? "Open Customer Center"
-                      : isSignedIn
-                        ? "Open paywall"
-                        : "Sign in to subscribe"
-                  }
-                  onPress={() => {
-                    if (isPremium) {
-                      void handleOpenCustomerCenter();
-                      return;
-                    }
-
-                    void handlePresentPaywall();
-                  }}
-                />
-
-                {hasConfiguredRevenueCat && !isPremium ? (
-                  <SecondaryButton
-                    disabled={isSubscriptionActionDisabled}
-                    label={isSignedIn ? "Restore purchases" : "Sign in to restore purchases"}
-                    onPress={() => {
-                      void handleRestorePurchases();
-                    }}
-                  />
-                ) : null}
-
-                {premiumAccess.entitlement.managementUrl ? (
-                  <SecondaryButton
-                    label={"Open store management"}
-                    onPress={() => {
-                      void Linking.openURL(premiumAccess.entitlement.managementUrl ?? "");
-                    }}
-                  />
-                ) : null}
-
-                {!sessionUser ? (
+                {sessionUser ? (
                   <>
+                    {hasConfiguredRevenueCat ? (
+                      isLoadingOfferings && !plans.availablePackages.length ? (
+                        <View style={styles.loadingRow}>
+                          <ActivityIndicator color={designTheme.primary} />
+                          <Text style={styles.loadingLabel}>Loading {FILE_TRANSFERS_PRO_NAME} plans...</Text>
+                        </View>
+                      ) : plans.availablePackages.length ? (
+                        plans.availablePackages.map((selectedPackage) => (
+                          <PremiumPackageCard
+                            key={selectedPackage.identifier}
+                            disabled={isSubscriptionActionDisabled}
+                            highlighted={selectedPackage.identifier === recommendedPackageIdentifier}
+                            onPress={() => {
+                              void handlePurchase(selectedPackage);
+                            }}
+                            selectedPackage={selectedPackage}
+                          />
+                        ))
+                      ) : (
+                        <InlineNotice
+                          description={
+                            "Create a current offering in RevenueCat and attach the subscription packages you want to sell in this build."
+                          }
+                          title={"Offering setup required"}
+                          tone={"warning"}
+                        />
+                      )
+                    ) : (
+                      <InlineNotice
+                        description={"Add the RevenueCat public API keys to this build to enable live purchases."}
+                        title={"RevenueCat keys missing"}
+                        tone={"warning"}
+                      />
+                    )}
+
+                    {customerInfo?.activeSubscriptions.length ? (
+                      <InlineNotice
+                        description={customerInfo.activeSubscriptions.join(", ")}
+                        title={"Active store products"}
+                      />
+                    ) : null}
+
                     <PrimaryButton
+                      disabled={!hasConfiguredRevenueCat || (!isPremium && !isSignedIn) || isLoadingCustomerInfo}
+                      label={isPremium ? "Open Customer Center" : "Open paywall"}
+                      onPress={() => {
+                        if (isPremium) {
+                          void handleOpenCustomerCenter();
+                          return;
+                        }
+
+                        void handlePresentPaywall();
+                      }}
+                    />
+
+                    {hasConfiguredRevenueCat && !isPremium ? (
+                      <SecondaryButton
+                        disabled={isSubscriptionActionDisabled}
+                        label={"Restore purchases"}
+                        onPress={() => {
+                          void handleRestorePurchases();
+                        }}
+                      />
+                    ) : null}
+
+                    {premiumAccess.entitlement.managementUrl ? (
+                      <SecondaryButton
+                        label={"Open store management"}
+                        onPress={() => {
+                          void Linking.openURL(premiumAccess.entitlement.managementUrl ?? "");
+                        }}
+                      />
+                    ) : null}
+
+                    <SecondaryButton
+                      label={"Sign out"}
+                      onPress={() => {
+                        void signOut();
+                        setWantsHostedLinksPanel(false);
+                      }}
+                      tone={"danger"}
+                    />
+                  </>
+                ) : (
+                  <>
+                    <ContinueWithAppleButton
                       disabled={isSigningInWithApple}
-                      label={Platform.OS === "ios" ? "Continue with Apple" : "Sign in with Apple"}
                       onPress={() => {
                         void triggerAppleSignIn();
                       }}
-                      tone={"inverted"}
+                      type={Platform.OS === "ios" ? "continue" : "signIn"}
                     />
-                    <SecondaryButton
+                    <ContinueWithGoogleButton
                       disabled={isSigningInWithGoogle}
                       label={"Continue with Google"}
                       onPress={() => {
@@ -1183,15 +1194,6 @@ export default function SettingsScreen() {
                       }}
                     />
                   </>
-                ) : (
-                  <SecondaryButton
-                    label={"Sign out"}
-                    onPress={() => {
-                      void signOut();
-                      setWantsHostedLinksPanel(false);
-                    }}
-                    tone={"danger"}
-                  />
                 )}
               </View>
 

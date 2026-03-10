@@ -2,6 +2,7 @@ import * as AppleAuthentication from "expo-apple-authentication";
 import React, { useEffect, useState } from "react";
 import { ActivityIndicator, Text, View } from "react-native";
 import { useSession } from "@/lib/auth-client";
+import { ContinueWithAppleButton } from "@/components/auth/social-sign-in-buttons";
 import { useAppleSignIn } from "@/hooks/use-apple-sign-in";
 
 export function AppleSignInPanel({ onSuccess }: { onSuccess?: () => void }) {
@@ -59,17 +60,13 @@ export function AppleSignInPanel({ onSuccess }: { onSuccess?: () => void }) {
         </View>
       ) : isAvailable ? (
         <View style={{ gap: 10 }}>
-          <View pointerEvents={isSigningIn ? "none" : "auto"} style={{ opacity: isSigningIn ? 0.6 : 1 }}>
-            <AppleAuthentication.AppleAuthenticationButton
-              buttonStyle={AppleAuthentication.AppleAuthenticationButtonStyle.BLACK}
-              buttonType={AppleAuthentication.AppleAuthenticationButtonType.CONTINUE}
-              cornerRadius={18}
-              onPress={() => {
-                void triggerAppleSignIn();
-              }}
-              style={{ width: "100%", height: 54 }}
-            />
-          </View>
+          <ContinueWithAppleButton
+            disabled={isSigningIn}
+            onPress={() => {
+              void triggerAppleSignIn();
+            }}
+            type={"continue"}
+          />
           {isSigningIn ? (
             <Text selectable style={{ fontSize: 13, color: "#64748b" }}>
               Finishing Apple sign-in...
