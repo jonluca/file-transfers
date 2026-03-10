@@ -5,7 +5,7 @@ import { createAuthClient } from "better-auth/react";
 import { PRODUCTION_API_URL } from "@/lib/api-config";
 
 const AUTH_STORAGE_PREFIX = "file-transfers-auth";
-const AUTH_CALLBACK_URL = "filetransfers://auth-callback";
+const AUTH_CALLBACK_PATH = "/auth-callback";
 
 export const authClient = createAuthClient({
   baseURL: PRODUCTION_API_URL,
@@ -58,7 +58,7 @@ export async function signInWithApple() {
 export async function signInWithGoogle() {
   const result = await signIn.social({
     provider: "google",
-    callbackURL: AUTH_CALLBACK_URL,
+    callbackURL: AUTH_CALLBACK_PATH,
   });
 
   if (!result.error) {

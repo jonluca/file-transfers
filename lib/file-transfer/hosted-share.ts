@@ -19,7 +19,7 @@ export function normalizeHostedPasscode(value: string) {
 }
 
 export function buildHostedShareMessage(items: HostedShareItem[], passcode: string | null) {
-  const lines = items.flatMap((item, index) => [index === 0 ? "Hosted file links" : "", item.fileName, item.shareUrl]);
+  const lines = items.map((item) => item.shareUrl.trim()).filter((shareUrl) => shareUrl.length > 0);
 
   if (passcode) {
     lines.push("", `Passcode: ${passcode}`);

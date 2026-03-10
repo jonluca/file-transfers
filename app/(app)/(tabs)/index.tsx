@@ -38,6 +38,7 @@ import {
   isTransferSizeLimitError,
   normalizeHostedPasscode,
   startHttpShareSession,
+  prepareHostedUploadFileAsync,
   pickTransferFiles,
   shareHostedLinksAsync,
   startReceivingAvailability,
@@ -1375,6 +1376,7 @@ export default function TransferScreen() {
     const retryFiles: SelectedTransferFile[] = [];
     const createdButUnsharedFiles: string[] = [];
     const cleanupFailures: string[] = [];
+    const stagingCleanupFailures: string[] = [];
     let uploadedBytes = 0;
 
     for (const [index, stagedFile] of stagedFiles.entries()) {
@@ -1382,6 +1384,7 @@ export default function TransferScreen() {
       const uploadedBytesBeforeFile = uploadedBytes;
       let createdHostedFileId: string | null = null;
       let completedHostedFileId: string | null = null;
+      let preparedUploadFile: Awaited<ReturnType<typeof prepareHostedUploadFileAsync>> | null = null;
 
       updateHostedUploadProgress(setHostedUploadProgress, {
         bytesUploaded: uploadedBytesBeforeFile,
@@ -1393,6 +1396,8 @@ export default function TransferScreen() {
       });
 
       try {
+        preparedUploadFile = await prepareHostedUploadFileAsync(stagedFile);
+
         const createResult = await createHostedUploadMutation.mutateAsync({
           fileName: stagedFile.name,
           mimeType: stagedFile.mimeType,
@@ -1403,7 +1408,7 @@ export default function TransferScreen() {
         createdHostedFileId = createResult.hostedFile.id;
 
         await uploadHostedFileAsync({
-          fileUri: stagedFile.uri,
+          fileUri: preparedUploadFile.fileUri,
           uploadHeaders: createResult.uploadHeaders,
           uploadMethod: createResult.uploadMethod,
           uploadUrl: createResult.uploadUrl,
@@ -1463,24 +1468,33 @@ export default function TransferScreen() {
 
         if (completedHostedFileId) {
           createdButUnsharedFiles.push(stagedFile.name);
-          continue;
+        } else {
+          retryFiles.push(stagedFile);
+
+          if (createdHostedFileId) {
+            try {
+              await deleteHostedFileMutation.mutateAsync({
+                hostedFileId: createdHostedFileId,
+              });
+            } catch (cleanupError) {
+              cleanupFailures.push(stagedFile.name);
+              logTransferScreenDebug("Hosted share cleanup failed", {
+                fileName: stagedFile.name,
+                hostedFileId: getDebugSessionId(createdHostedFileId),
+                ...getDebugErrorDetails(cleanupError),
+              });
+            }
+          }
         }
+      }
 
-        retryFiles.push(stagedFile);
-
-        if (!createdHostedFileId) {
-          continue;
-        }
-
+      if (preparedUploadFile) {
         try {
-          await deleteHostedFileMutation.mutateAsync({
-            hostedFileId: createdHostedFileId,
-          });
+          await preparedUploadFile.cleanup();
         } catch (cleanupError) {
-          cleanupFailures.push(stagedFile.name);
-          logTransferScreenDebug("Hosted share cleanup failed", {
+          stagingCleanupFailures.push(stagedFile.name);
+          logTransferScreenDebug("Hosted upload staging cleanup failed", {
             fileName: stagedFile.name,
-            hostedFileId: getDebugSessionId(createdHostedFileId),
             ...getDebugErrorDetails(cleanupError),
           });
         }
@@ -1554,6 +1568,10 @@ export default function TransferScreen() {
 
     if (cleanupFailures.length > 0) {
       nextHostedMessages.push("Delete any incomplete hosted items from Files if they appear.");
+    }
+
+    if (stagingCleanupFailures.length > 0) {
+      nextHostedMessages.push("Some temporary upload copies could not be removed automatically.");
     }
 
     if (shareSheetError) {

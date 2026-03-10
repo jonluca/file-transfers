@@ -10,7 +10,7 @@ import { serverEnv } from "./env";
 const APPLE_CLIENT_SECRET_TTL_SECONDS = 86400 * 180;
 const appleClientSecretCache = new Map<string, string>();
 
-const defaultTrustedOrigins = new Set(["mobileboilerplate://", "https://appleid.apple.com"]);
+const defaultTrustedOrigins = new Set(["filetransfers://", "https://appleid.apple.com"]);
 defaultTrustedOrigins.add(new URL(serverEnv.betterAuthUrl).origin);
 
 if (serverEnv.isDevelopment) {

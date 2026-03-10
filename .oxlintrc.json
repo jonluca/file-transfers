@@ -8,9 +8,7 @@
     "builtin": true,
     "es2026": true,
     "browser": true,
-    "node": true,
-    "serviceworker": true,
-    "worker": true
+    "node": true
   },
   "ignorePatterns": [
     ".expo/**/*",

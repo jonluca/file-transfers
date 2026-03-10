@@ -3,6 +3,7 @@ import * as Sharing from "expo-sharing";
 import * as IntentLauncher from "expo-intent-launcher";
 import * as Linking from "expo-linking";
 import { Directory, File, Paths } from "expo-file-system";
+import { copyAsync, deleteAsync } from "expo-file-system/legacy";
 import * as Crypto from "expo-crypto";
 import type { DocumentPickerAsset } from "expo-document-picker";
 import { PermissionsAndroid, Platform } from "react-native";
@@ -37,6 +38,7 @@ export interface DownloadsFolderSnapshot {
 const ALWAYS_PLACEHOLDER_FILE_BASENAMES = new Set(["unknown", "untitled"]);
 const MAYBE_PLACEHOLDER_FILE_BASENAMES = new Set(["document", "file"]);
 const ANDROID_GRANT_READ_URI_PERMISSION_FLAG = 1;
+const HOSTED_UPLOADS_STAGING_DIRECTORY_NAME = ".hosted-upload-staging";
 const LEGACY_ANDROID_DOWNLOADS_PERMISSION = PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE;
 const MIME_TYPE_EXTENSION_OVERRIDES: Record<string, string> = {
   "application/json": "json",
@@ -246,9 +248,9 @@ function createSelectedFile(asset: DocumentPickerAsset): SelectedTransferFile {
 export async function pickTransferFiles() {
   const result = await DocumentPicker.getDocumentAsync({
     multiple: true,
-    // iOS already imports a readable copy from the document picker, and Android
-    // can stream large content:// URIs directly. Avoid an extra cache copy on
-    // both platforms so selection does not duplicate multi-GB files up front.
+    // Avoid up-front cache copies so large selections do not immediately
+    // duplicate data. Hosted uploads stage a durable iOS copy later because
+    // the legacy uploader cannot safely rely on picker Inbox URLs.
     copyToCacheDirectory: false,
   });
 
@@ -273,6 +275,58 @@ export function getReceivedFilesStagingDirectory() {
   const directory = new Directory(Paths.cache, RECEIVED_FILES_STAGING_DIRECTORY_NAME);
   directory.create({ idempotent: true, intermediates: true });
   return directory;
+}
+
+function getHostedUploadsStagingDirectory() {
+  const directory = new Directory(Paths.cache, HOSTED_UPLOADS_STAGING_DIRECTORY_NAME);
+  directory.create({ idempotent: true, intermediates: true });
+  return directory;
+}
+
+export interface PreparedHostedUploadFile {
+  cleanup: () => Promise<void>;
+  fileUri: string;
+}
+
+export async function prepareHostedUploadFileAsync(file: SelectedTransferFile): Promise<PreparedHostedUploadFile> {
+  if (Platform.OS !== "ios") {
+    return {
+      cleanup: async () => {},
+      fileUri: file.uri,
+    };
+  }
+
+  const sourceFile = new File(file.uri);
+  if (!sourceFile.exists) {
+    throw new Error(`"${file.name}" is no longer available. Pick it again before creating hosted URLs.`);
+  }
+
+  const directory = getHostedUploadsStagingDirectory();
+  const destination = new File(directory, buildUniqueFileName(directory, `${file.id}-${file.name}`));
+
+  try {
+    await copyAsync({
+      from: file.uri,
+      to: destination.uri,
+    });
+  } catch (error) {
+    const message =
+      error instanceof Error
+        ? `Unable to prepare "${file.name}" for upload. ${error.message}`
+        : `Unable to prepare "${file.name}" for upload.`;
+    throw new Error(message, {
+      cause: error,
+    });
+  }
+
+  return {
+    cleanup: async () => {
+      await deleteAsync(destination.uri, {
+        idempotent: true,
+      });
+    },
+    fileUri: destination.uri,
+  };
 }
 
 export function isReceivedFileInDownloadsFolder(uri: string) {
