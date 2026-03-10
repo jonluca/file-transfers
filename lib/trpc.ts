@@ -1,12 +1,12 @@
 import { QueryClient } from "@tanstack/react-query";
 import { createTRPCClient, httpLink } from "@trpc/client";
-import { createTRPCContext } from "@trpc/tanstack-react-query";
+import { createTRPCReact } from "@trpc/react-query";
 import { authClient } from "@/lib/auth-client";
 import { getApiBaseUrl } from "@/lib/api-config";
 import type { AppRouter } from "@/server/trpc/router";
 import type { inferRouterOutputs } from "@trpc/server";
 
-export const { TRPCProvider, useTRPC, useTRPCClient } = createTRPCContext<AppRouter>();
+export const trpc = createTRPCReact<AppRouter>();
 export type RouterOutputs = inferRouterOutputs<AppRouter>;
 
 let trpcClientSingleton: ReturnType<typeof createTRPCClient<AppRouter>> | null = null;

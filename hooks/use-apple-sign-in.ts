@@ -1,14 +1,14 @@
 import * as AppleAuthentication from "expo-apple-authentication";
-import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { getSocialSignInErrorMessage, isAppleSignInCanceled, signInWithApple } from "@/lib/auth-client";
+import { trpc } from "@/lib/trpc";
 
 interface UseAppleSignInOptions {
   onSuccess?: () => void;
 }
 
 export function useAppleSignIn({ onSuccess }: UseAppleSignInOptions = {}) {
-  const queryClient = useQueryClient();
+  const utils = trpc.useUtils();
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -35,7 +35,7 @@ export function useAppleSignIn({ onSuccess }: UseAppleSignInOptions = {}) {
         return false;
       }
 
-      await queryClient.invalidateQueries({ queryKey: ["cloud"] });
+      await Promise.all([utils.entitlements.me.invalidate(), utils.hostedFiles.listMine.invalidate()]);
       onSuccess?.();
       return true;
     } catch (error) {

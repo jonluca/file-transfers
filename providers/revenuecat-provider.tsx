@@ -78,9 +78,14 @@ export function RevenueCatProvider({ children }: { children: React.ReactNode }) 
     }
 
     try {
+      const entitlement = mapCustomerInfoToEntitlement(nextCustomerInfo, true);
+
       await syncPurchaseMutation.mutateAsync({
-        ...mapCustomerInfoToEntitlement(nextCustomerInfo, true),
         appUserId: sessionUserId,
+        isPremium: entitlement.isPremium,
+        source: entitlement.source === "preview" ? "preview" : "client_sync",
+        managementUrl: entitlement.managementUrl,
+        expiresAt: entitlement.expiresAt,
       });
     } catch (error) {
       console.error("Unable to sync RevenueCat entitlement to the backend", error);

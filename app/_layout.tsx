@@ -20,7 +20,7 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 import { FullScreenLoader } from "@/components/ui";
 import { designTheme } from "@/lib/design/theme";
 import { ensureLocalHttpServerStarted } from "@/lib/file-transfer/local-http-runtime-startup";
-import { createBoilerplateQueryClient, getTrpcClient, TRPCProvider } from "@/lib/trpc";
+import { createBoilerplateQueryClient, getTrpcClient, trpc } from "@/lib/trpc";
 import { RevenueCatProvider } from "@/providers/revenuecat-provider";
 import { useHasHydrated } from "@/store";
 
@@ -123,14 +123,14 @@ export default function RootLayout() {
   return (
     <SafeAreaProvider>
       <QueryClientProvider client={queryClient}>
-        <TRPCProvider trpcClient={trpcClient} queryClient={queryClient}>
+        <trpc.Provider client={trpcClient} queryClient={queryClient}>
           <RevenueCatProvider>
             <GestureHandlerRootView style={{ flex: 1, backgroundColor: designTheme.background }}>
               <RootLayoutContent />
             </GestureHandlerRootView>
             <Toaster position={"top-center"} richColors />
           </RevenueCatProvider>
-        </TRPCProvider>
+        </trpc.Provider>
         <StatusBar backgroundColor={designTheme.background} style={"dark"} />
       </QueryClientProvider>
     </SafeAreaProvider>
