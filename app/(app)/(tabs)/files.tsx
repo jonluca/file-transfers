@@ -54,6 +54,8 @@ const fontStyles = {
   semibold: { fontFamily: designFonts.semibold },
 } as const;
 
+type FilesContentTab = "local" | "hosted";
+
 function FilePreviewIcon({ type }: { type: string | null | undefined }) {
   if (type?.startsWith("image/")) {
     return <ImageIcon color={designTheme.secondaryForeground} size={18} strokeWidth={1.9} />;
@@ -150,6 +152,38 @@ async function handleShareFile(file: Pick<ReceivedFileRecord, "uri" | "mimeType"
     console.error("Unable to share downloaded file", error);
     Alert.alert("Unable to share file", "Please try again in a moment.");
   }
+}
+
+function FilesContentTabButton({
+  icon,
+  isActive,
+  label,
+  onPress,
+}: {
+  icon: React.ReactNode;
+  isActive: boolean;
+  label: string;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      accessibilityRole={"tab"}
+      accessibilityState={{ selected: isActive }}
+      className={"min-h-[46px] flex-1 flex-row items-center justify-center gap-2 rounded-full px-4 py-3"}
+      onPress={onPress}
+      style={({ pressed }) => ({
+        opacity: pressed ? 0.78 : 1,
+        backgroundColor: isActive ? designTheme.card : "transparent",
+        borderColor: isActive ? "rgba(37,99,235,0.14)" : "transparent",
+        borderWidth: isActive ? 1 : 0,
+      })}
+    >
+      {icon}
+      <Text className={cn("text-[14px]", isActive ? "text-[#030213]" : "text-[#6b7280]")} style={fontStyles.medium}>
+        {label}
+      </Text>
+    </Pressable>
+  );
 }
 
 function RecentDownloadRow({
@@ -496,6 +530,7 @@ export default function FilesScreen() {
   const [shareTarget, setShareTarget] = useState<HostedFile | null>(null);
   const [hostedPasscode, setHostedPasscode] = useState("");
   const [hostedNotice, setHostedNotice] = useState<string | null>(null);
+  const [selectedContentTab, setSelectedContentTab] = useState<FilesContentTab>("local");
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -544,12 +579,12 @@ export default function FilesScreen() {
   });
 
   useEffect(() => {
-    if (!isFocused) {
+    if (!isFocused || selectedContentTab !== "local") {
       return;
     }
 
     refreshFolder();
-  }, [isFocused]);
+  }, [isFocused, selectedContentTab]);
 
   const deleteFile = useEffectEvent(async (file: Pick<ReceivedFileRecord, "name" | "uri" | "mimeType">) => {
     if (deletingUri === file.uri) {
@@ -702,288 +737,324 @@ export default function FilesScreen() {
           Files
         </Text>
 
-        <View className={"gap-3 rounded-[24px] border border-[#e5e7eb] bg-white p-[18px]"}>
-          <View className={"flex-row items-center gap-3.5"}>
-            <View className={"h-11 w-11 items-center justify-center rounded-full bg-[rgba(37,99,235,0.08)]"}>
-              <Download color={designTheme.primary} size={18} strokeWidth={2.2} />
-            </View>
-            <View className={"flex-1 gap-0.5"}>
-              <Text className={"text-[13px] uppercase text-[#6b7280]"} style={fontStyles.medium}>
-                Downloaded files
-              </Text>
-              <Text className={"text-xl text-[#030213]"} style={fontStyles.semibold}>
-                {downloadedFiles.length} saved • {formatBytes(totalDownloadedBytes)}
-              </Text>
-            </View>
+        <View className={"gap-3"}>
+          <View
+            accessibilityRole={"tablist"}
+            className={"flex-row rounded-full border border-[#e5e7eb] bg-[#f9fafb] p-1"}
+          >
+            <FilesContentTabButton
+              icon={
+                <FolderOpen
+                  color={selectedContentTab === "local" ? designTheme.primary : designTheme.mutedForeground}
+                  size={16}
+                  strokeWidth={2.1}
+                />
+              }
+              isActive={selectedContentTab === "local"}
+              label={"Local"}
+              onPress={() => {
+                setSelectedContentTab("local");
+              }}
+            />
+            <FilesContentTabButton
+              icon={
+                <Link2
+                  color={selectedContentTab === "hosted" ? designTheme.primary : designTheme.mutedForeground}
+                  size={16}
+                  strokeWidth={2.1}
+                />
+              }
+              isActive={selectedContentTab === "hosted"}
+              label={"Hosted"}
+              onPress={() => {
+                setSelectedContentTab("hosted");
+              }}
+            />
           </View>
           <Text className={"text-sm leading-5 text-[#6b7280]"} style={fontStyles.regular}>
-            Browse your recent downloads below and inspect the app downloads folder with the folder navigator.
+            {selectedContentTab === "local"
+              ? "Saved files on this device, plus the app downloads folder."
+              : "Cloud-hosted links tied to your account and ready to reshare or delete."}
           </Text>
         </View>
 
-        <View className={"gap-3"}>
-          <View className={"flex-row items-center justify-between gap-3"}>
-            <View>
-              <Text className={"text-lg text-[#030213]"} style={fontStyles.semibold}>
-                Hosted files
-              </Text>
-              <Text className={"mt-0.5 text-[13px] leading-[18px] text-[#6b7280]"} style={fontStyles.regular}>
-                Manage the hosted URLs created from the Transfer tab.
-              </Text>
-            </View>
-          </View>
-
-          <View className={"overflow-hidden rounded-[20px] border border-[#e5e7eb] bg-white"}>
-            {!isSignedIn ? (
-              <InlineNotice
-                description={"Sign in to view, reshare, and delete hosted files tied to your account."}
-                title={"Hosted files"}
-                tone={"warning"}
-              />
-            ) : null}
-
-            {isSignedIn && !premiumAccess.isPremium ? (
-              <InlineNotice
-                description={`Upgrade to ${FILE_TRANSFERS_PRO_NAME} in Settings to generate fresh hosted URLs. You can still delete existing hosted files here.`}
-                title={"Hosted sharing locked"}
-                tone={"warning"}
-              />
-            ) : null}
-
-            {hostedNotice ? <InlineNotice description={hostedNotice} title={"Hosted files"} /> : null}
-
-            {isSignedIn && hostedFilesQuery.error ? (
-              <InlineNotice
-                description={
-                  hostedFilesQuery.error instanceof Error
-                    ? hostedFilesQuery.error.message
-                    : "Unable to load hosted files right now."
-                }
-                title={"Hosted files"}
-                tone={"danger"}
-              />
-            ) : null}
-
-            {isSignedIn && hostedFilesQuery.isLoading && hostedFiles.length === 0 ? (
-              <View className={"flex-row items-center gap-2.5 px-[18px] pb-4"}>
-                <ActivityIndicator color={designTheme.primary} size={"small"} />
-                <Text className={"text-[13px] text-[#6b7280]"} style={fontStyles.regular}>
-                  Loading hosted files...
-                </Text>
-              </View>
-            ) : null}
-
-            {isSignedIn && !hostedFilesQuery.isLoading && hostedFiles.length === 0 ? (
-              <InlineNotice
-                description={"No hosted files yet. Create new hosted URLs from the Transfer tab."}
-                title={"No hosted files"}
-              />
-            ) : null}
-
-            {hostedFiles.map((hostedFile, index) => (
-              <View
-                key={hostedFile.id}
-                className={cn("border-b border-[#e5e7eb]", index === hostedFiles.length - 1 && "border-b-0")}
-              >
-                <HostedFileRow
-                  deleting={deletingHostedFileId === hostedFile.id}
-                  hostedFile={hostedFile}
-                  isShareDisabled={!premiumAccess.isPremium || hostedFile.status !== "active"}
-                  onDelete={(file) => {
-                    confirmDeleteHostedFile(file);
-                  }}
-                  onShare={(file) => {
-                    openHostedShareModal(file);
-                  }}
-                  sharing={sharingHostedFileId === hostedFile.id}
-                />
-              </View>
-            ))}
-          </View>
-        </View>
-
-        <View className={"gap-3"}>
-          <View className={"flex-row items-center justify-between gap-3"}>
-            <View>
-              <Text className={"text-lg text-[#030213]"} style={fontStyles.semibold}>
-                Recent downloads
-              </Text>
-              <Text className={"mt-0.5 text-[13px] leading-[18px] text-[#6b7280]"} style={fontStyles.regular}>
-                Completed transfers saved on this device.
-              </Text>
-            </View>
-          </View>
-
-          <View className={"overflow-hidden rounded-[20px] border border-[#e5e7eb] bg-white"}>
-            {downloadedFiles.length === 0 ? (
-              <View className={"items-center gap-2 px-5 py-7"}>
-                <View className={"h-[60px] w-[60px] items-center justify-center rounded-full bg-[#f3f4f6]"}>
-                  <File color={designTheme.mutedForeground} size={28} strokeWidth={1.8} />
+        {selectedContentTab === "local" ? (
+          <>
+            <View className={"gap-3 rounded-[24px] border border-[#e5e7eb] bg-white p-[18px]"}>
+              <View className={"flex-row items-center gap-3.5"}>
+                <View className={"h-11 w-11 items-center justify-center rounded-full bg-[rgba(37,99,235,0.08)]"}>
+                  <Download color={designTheme.primary} size={18} strokeWidth={2.2} />
                 </View>
-                <Text className={"text-[17px] text-[#030213]"} style={fontStyles.semibold}>
-                  No downloaded files yet
-                </Text>
-                <Text className={"text-center text-sm leading-5 text-[#6b7280]"} style={fontStyles.regular}>
-                  Received files will appear here after the first completed transfer.
-                </Text>
-              </View>
-            ) : (
-              downloadedFiles.map((item, index) => (
-                <View
-                  key={item.id}
-                  className={cn("border-b border-[#e5e7eb]", index === downloadedFiles.length - 1 && "border-b-0")}
-                >
-                  <RecentDownloadRow
-                    deleting={deletingUri === item.uri}
-                    item={item}
-                    onDelete={(file) => {
-                      confirmDeleteFile(file);
-                    }}
-                  />
+                <View className={"flex-1 gap-0.5"}>
+                  <Text className={"text-[13px] uppercase text-[#6b7280]"} style={fontStyles.medium}>
+                    Downloaded files
+                  </Text>
+                  <Text className={"text-xl text-[#030213]"} style={fontStyles.semibold}>
+                    {downloadedFiles.length} saved • {formatBytes(totalDownloadedBytes)}
+                  </Text>
                 </View>
-              ))
-            )}
-          </View>
-        </View>
-
-        <View className={"gap-3"}>
-          <View className={"flex-row items-center justify-between gap-3"}>
-            <View className={"flex-1"}>
-              <Text className={"text-lg text-[#030213]"} style={fontStyles.semibold}>
-                Downloads folder
-              </Text>
-              <Text className={"mt-0.5 text-[13px] leading-[18px] text-[#6b7280]"} style={fontStyles.regular}>
-                Tap folders to drill in, or tap files to open them.
+              </View>
+              <Text className={"text-sm leading-5 text-[#6b7280]"} style={fontStyles.regular}>
+                Browse your recent downloads below and inspect the app downloads folder with the folder navigator.
               </Text>
             </View>
-            <Pressable
-              className={
-                "min-h-[38px] flex-row items-center gap-2 rounded-full bg-[rgba(37,99,235,0.08)] px-[14px] py-2"
-              }
-              onPress={() => {
-                refreshFolder();
-              }}
-              style={({ pressed }) => ({ opacity: pressed ? 0.72 : 1 })}
-            >
-              {isRefreshing ? (
-                <ActivityIndicator color={designTheme.primary} size={"small"} />
-              ) : (
-                <RefreshCw color={designTheme.primary} size={16} strokeWidth={2.1} />
-              )}
-              <Text className={"text-[13px] text-[#2563eb]"} style={fontStyles.medium}>
-                Refresh
-              </Text>
-            </Pressable>
-          </View>
+            {downloadedFiles.length > 0 ? (
+              <View className={"gap-3"}>
+                <View className={"flex-row items-center justify-between gap-3"}>
+                  <View>
+                    <Text className={"text-lg text-[#030213]"} style={fontStyles.semibold}>
+                      Recent downloads
+                    </Text>
+                    <Text className={"mt-0.5 text-[13px] leading-[18px] text-[#6b7280]"} style={fontStyles.regular}>
+                      Completed transfers saved on this device.
+                    </Text>
+                  </View>
+                </View>
 
-          <View className={"overflow-hidden rounded-[20px] border border-[#e5e7eb] bg-white"}>
-            <View className={"gap-3 px-[18px] pb-[14px] pt-4"}>
-              <View className={"flex-row flex-wrap items-center gap-1.5"}>
-                {(folderSnapshot?.breadcrumbs ?? [{ label: "Downloads", uri: rootDirectoryUri }]).map(
-                  (crumb, index) => (
-                    <React.Fragment key={crumb.uri}>
-                      {index > 0 ? (
-                        <ChevronRight color={designTheme.mutedForeground} size={14} strokeWidth={2} />
-                      ) : null}
-                      <Pressable
-                        className={"rounded-full bg-[#f9fafb] px-2.5 py-1.5"}
-                        onPress={() => {
-                          refreshFolder(crumb.uri);
+                <View className={"overflow-hidden rounded-[20px] border border-[#e5e7eb] bg-white"}>
+                  {downloadedFiles.map((item, index) => (
+                    <View
+                      key={item.id}
+                      className={cn("border-b border-[#e5e7eb]", index === downloadedFiles.length - 1 && "border-b-0")}
+                    >
+                      <RecentDownloadRow
+                        deleting={deletingUri === item.uri}
+                        item={item}
+                        onDelete={(file) => {
+                          confirmDeleteFile(file);
                         }}
-                        style={({ pressed }) => ({ opacity: pressed ? 0.72 : 1 })}
-                      >
-                        <Text className={"text-[13px] text-[#030213]"} numberOfLines={1} style={fontStyles.medium}>
-                          {crumb.label}
-                        </Text>
-                      </Pressable>
-                    </React.Fragment>
-                  ),
-                )}
+                      />
+                    </View>
+                  ))}
+                </View>
               </View>
+            ) : null}
 
-              {(folderSnapshot?.uri ?? rootDirectoryUri) !== rootDirectoryUri ? (
+            <View className={"gap-3"}>
+              <View className={"flex-row items-center justify-between gap-3"}>
+                <View className={"flex-1"}>
+                  <Text className={"text-lg text-[#030213]"} style={fontStyles.semibold}>
+                    Downloads folder
+                  </Text>
+                  <Text className={"mt-0.5 text-[13px] leading-[18px] text-[#6b7280]"} style={fontStyles.regular}>
+                    Tap folders to drill in, or tap files to open them.
+                  </Text>
+                </View>
                 <Pressable
-                  className={"self-start rounded-full bg-[rgba(37,99,235,0.08)] px-3 py-2"}
+                  className={
+                    "min-h-[38px] flex-row items-center gap-2 rounded-full bg-[rgba(37,99,235,0.08)] px-[14px] py-2"
+                  }
                   onPress={() => {
-                    const crumbs = folderSnapshot?.breadcrumbs ?? [];
-                    const parentCrumb = crumbs.length > 1 ? crumbs[crumbs.length - 2] : null;
-                    refreshFolder(parentCrumb?.uri ?? rootDirectoryUri);
+                    refreshFolder();
                   }}
                   style={({ pressed }) => ({ opacity: pressed ? 0.72 : 1 })}
                 >
-                  <View className={"flex-row items-center gap-1.5"}>
-                    <ChevronLeft color={designTheme.primary} size={16} strokeWidth={2.1} />
-                    <Text className={"text-[13px] text-[#2563eb]"} style={fontStyles.medium}>
-                      Up
+                  {isRefreshing ? (
+                    <ActivityIndicator color={designTheme.primary} size={"small"} />
+                  ) : (
+                    <RefreshCw color={designTheme.primary} size={16} strokeWidth={2.1} />
+                  )}
+                  <Text className={"text-[13px] text-[#2563eb]"} style={fontStyles.medium}>
+                    Refresh
+                  </Text>
+                </Pressable>
+              </View>
+
+              <View className={"overflow-hidden rounded-[20px] border border-[#e5e7eb] bg-white"}>
+                <View className={"gap-3 px-[18px] pb-[14px] pt-4"}>
+                  <View className={"flex-row flex-wrap items-center gap-1.5"}>
+                    {(folderSnapshot?.breadcrumbs ?? [{ label: "Downloads", uri: rootDirectoryUri }]).map(
+                      (crumb, index) => (
+                        <React.Fragment key={crumb.uri}>
+                          {index > 0 ? (
+                            <ChevronRight color={designTheme.mutedForeground} size={14} strokeWidth={2} />
+                          ) : null}
+                          <Pressable
+                            className={"rounded-full bg-[#f9fafb] px-2.5 py-1.5"}
+                            onPress={() => {
+                              refreshFolder(crumb.uri);
+                            }}
+                            style={({ pressed }) => ({ opacity: pressed ? 0.72 : 1 })}
+                          >
+                            <Text className={"text-[13px] text-[#030213]"} numberOfLines={1} style={fontStyles.medium}>
+                              {crumb.label}
+                            </Text>
+                          </Pressable>
+                        </React.Fragment>
+                      ),
+                    )}
+                  </View>
+
+                  {(folderSnapshot?.uri ?? rootDirectoryUri) !== rootDirectoryUri ? (
+                    <Pressable
+                      className={"self-start rounded-full bg-[rgba(37,99,235,0.08)] px-3 py-2"}
+                      onPress={() => {
+                        const crumbs = folderSnapshot?.breadcrumbs ?? [];
+                        const parentCrumb = crumbs.length > 1 ? crumbs[crumbs.length - 2] : null;
+                        refreshFolder(parentCrumb?.uri ?? rootDirectoryUri);
+                      }}
+                      style={({ pressed }) => ({ opacity: pressed ? 0.72 : 1 })}
+                    >
+                      <View className={"flex-row items-center gap-1.5"}>
+                        <ChevronLeft color={designTheme.primary} size={16} strokeWidth={2.1} />
+                        <Text className={"text-[13px] text-[#2563eb]"} style={fontStyles.medium}>
+                          Up
+                        </Text>
+                      </View>
+                    </Pressable>
+                  ) : null}
+                </View>
+
+                {Platform.OS === "android" && systemDownloadsCount > 0 ? (
+                  <View className={"mx-[18px] mb-[14px] gap-1 rounded-2xl bg-[#f9fafb] px-[14px] py-3"}>
+                    <Text className={"text-sm text-[#030213]"} style={fontStyles.medium}>
+                      System Downloads detected
+                    </Text>
+                    <Text className={"text-[13px] leading-[18px] text-[#6b7280]"} style={fontStyles.regular}>
+                      {systemDownloadsCount} file{systemDownloadsCount === 1 ? "" : "s"} were saved through Android's
+                      public Downloads area. They still appear above even when this folder browser cannot enumerate them
+                      directly.
                     </Text>
                   </View>
-                </Pressable>
-              ) : null}
+                ) : null}
+
+                {loadError ? (
+                  <View className={"mx-[18px] mb-[14px] gap-1 rounded-2xl bg-[#f9fafb] px-[14px] py-3"}>
+                    <Text className={"text-sm text-[#030213]"} style={fontStyles.medium}>
+                      Folder unavailable
+                    </Text>
+                    <Text className={"text-[13px] leading-[18px] text-[#6b7280]"} style={fontStyles.regular}>
+                      {loadError}
+                    </Text>
+                  </View>
+                ) : null}
+
+                {!folderSnapshot && isRefreshing ? (
+                  <View className={"flex-row items-center gap-2.5 px-[18px] pb-4"}>
+                    <ActivityIndicator color={designTheme.primary} size={"small"} />
+                    <Text className={"text-[13px] text-[#6b7280]"} style={fontStyles.regular}>
+                      Loading downloads folder...
+                    </Text>
+                  </View>
+                ) : null}
+
+                {folderSnapshot && folderSnapshot.entries.length === 0 ? (
+                  <View className={"items-center gap-2 px-[18px] pb-[22px] pt-2"}>
+                    <Folder color={designTheme.mutedForeground} size={28} strokeWidth={1.8} />
+                    <Text className={"text-[17px] text-[#030213]"} style={fontStyles.semibold}>
+                      This folder is empty
+                    </Text>
+                    <Text className={"text-center text-sm leading-5 text-[#6b7280]"} style={fontStyles.regular}>
+                      Downloaded files will show up here when they are saved inside the app folder.
+                    </Text>
+                  </View>
+                ) : null}
+
+                {folderSnapshot?.entries.map((entry, index) => (
+                  <View
+                    key={entry.uri}
+                    className={cn(
+                      "border-b border-[#e5e7eb]",
+                      index === folderSnapshot.entries.length - 1 && "border-b-0",
+                    )}
+                  >
+                    <FolderEntryRow
+                      deleting={deletingUri === entry.uri}
+                      entry={entry}
+                      onDeleteFile={(file) => {
+                        confirmDeleteFile(file);
+                      }}
+                      onOpenDirectory={(uri) => {
+                        refreshFolder(uri);
+                      }}
+                    />
+                  </View>
+                ))}
+              </View>
+            </View>
+          </>
+        ) : (
+          <View className={"gap-3"}>
+            <View className={"flex-row items-center justify-between gap-3"}>
+              <View>
+                <Text className={"text-lg text-[#030213]"} style={fontStyles.semibold}>
+                  Hosted files
+                </Text>
+                <Text className={"mt-0.5 text-[13px] leading-[18px] text-[#6b7280]"} style={fontStyles.regular}>
+                  Manage the hosted URLs created from the Transfer tab.
+                </Text>
+              </View>
             </View>
 
-            {Platform.OS === "android" && systemDownloadsCount > 0 ? (
-              <View className={"mx-[18px] mb-[14px] gap-1 rounded-2xl bg-[#f9fafb] px-[14px] py-3"}>
-                <Text className={"text-sm text-[#030213]"} style={fontStyles.medium}>
-                  System Downloads detected
-                </Text>
-                <Text className={"text-[13px] leading-[18px] text-[#6b7280]"} style={fontStyles.regular}>
-                  {systemDownloadsCount} file{systemDownloadsCount === 1 ? "" : "s"} were saved through Android's public
-                  Downloads area. They still appear above even when this folder browser cannot enumerate them directly.
-                </Text>
-              </View>
-            ) : null}
-
-            {loadError ? (
-              <View className={"mx-[18px] mb-[14px] gap-1 rounded-2xl bg-[#f9fafb] px-[14px] py-3"}>
-                <Text className={"text-sm text-[#030213]"} style={fontStyles.medium}>
-                  Folder unavailable
-                </Text>
-                <Text className={"text-[13px] leading-[18px] text-[#6b7280]"} style={fontStyles.regular}>
-                  {loadError}
-                </Text>
-              </View>
-            ) : null}
-
-            {!folderSnapshot && isRefreshing ? (
-              <View className={"flex-row items-center gap-2.5 px-[18px] pb-4"}>
-                <ActivityIndicator color={designTheme.primary} size={"small"} />
-                <Text className={"text-[13px] text-[#6b7280]"} style={fontStyles.regular}>
-                  Loading downloads folder...
-                </Text>
-              </View>
-            ) : null}
-
-            {folderSnapshot && folderSnapshot.entries.length === 0 ? (
-              <View className={"items-center gap-2 px-[18px] pb-[22px] pt-2"}>
-                <Folder color={designTheme.mutedForeground} size={28} strokeWidth={1.8} />
-                <Text className={"text-[17px] text-[#030213]"} style={fontStyles.semibold}>
-                  This folder is empty
-                </Text>
-                <Text className={"text-center text-sm leading-5 text-[#6b7280]"} style={fontStyles.regular}>
-                  Downloaded files will show up here when they are saved inside the app folder.
-                </Text>
-              </View>
-            ) : null}
-
-            {folderSnapshot?.entries.map((entry, index) => (
-              <View
-                key={entry.uri}
-                className={cn("border-b border-[#e5e7eb]", index === folderSnapshot.entries.length - 1 && "border-b-0")}
-              >
-                <FolderEntryRow
-                  deleting={deletingUri === entry.uri}
-                  entry={entry}
-                  onDeleteFile={(file) => {
-                    confirmDeleteFile(file);
-                  }}
-                  onOpenDirectory={(uri) => {
-                    refreshFolder(uri);
-                  }}
+            <View className={"overflow-hidden rounded-[20px] border border-[#e5e7eb] bg-white"}>
+              {!isSignedIn ? (
+                <InlineNotice
+                  description={"Sign in to view, reshare, and delete hosted files tied to your account."}
+                  title={"Hosted files"}
+                  tone={"warning"}
                 />
-              </View>
-            ))}
+              ) : null}
+
+              {isSignedIn && !premiumAccess.isPremium ? (
+                <InlineNotice
+                  description={`Upgrade to ${FILE_TRANSFERS_PRO_NAME} in Settings to generate fresh hosted URLs. You can still delete existing hosted files here.`}
+                  title={"Hosted sharing locked"}
+                  tone={"warning"}
+                />
+              ) : null}
+
+              {hostedNotice ? <InlineNotice description={hostedNotice} title={"Hosted files"} /> : null}
+
+              {isSignedIn && hostedFilesQuery.error ? (
+                <InlineNotice
+                  description={
+                    hostedFilesQuery.error instanceof Error
+                      ? hostedFilesQuery.error.message
+                      : "Unable to load hosted files right now."
+                  }
+                  title={"Hosted files"}
+                  tone={"danger"}
+                />
+              ) : null}
+
+              {isSignedIn && hostedFilesQuery.isLoading && hostedFiles.length === 0 ? (
+                <View className={"flex-row items-center gap-2.5 px-[18px] pb-4"}>
+                  <ActivityIndicator color={designTheme.primary} size={"small"} />
+                  <Text className={"text-[13px] text-[#6b7280]"} style={fontStyles.regular}>
+                    Loading hosted files...
+                  </Text>
+                </View>
+              ) : null}
+
+              {isSignedIn && !hostedFilesQuery.isLoading && hostedFiles.length === 0 ? (
+                <InlineNotice
+                  description={"No hosted files yet. Create new hosted URLs from the Transfer tab."}
+                  title={"No hosted files"}
+                />
+              ) : null}
+
+              {hostedFiles.map((hostedFile, index) => (
+                <View
+                  key={hostedFile.id}
+                  className={cn("border-b border-[#e5e7eb]", index === hostedFiles.length - 1 && "border-b-0")}
+                >
+                  <HostedFileRow
+                    deleting={deletingHostedFileId === hostedFile.id}
+                    hostedFile={hostedFile}
+                    isShareDisabled={!premiumAccess.isPremium || hostedFile.status !== "active"}
+                    onDelete={(file) => {
+                      confirmDeleteHostedFile(file);
+                    }}
+                    onShare={(file) => {
+                      openHostedShareModal(file);
+                    }}
+                    sharing={sharingHostedFileId === hostedFile.id}
+                  />
+                </View>
+              ))}
+            </View>
           </View>
-        </View>
+        )}
       </ScrollView>
 
       <Modal

@@ -61,6 +61,7 @@ import { FILE_TRANSFERS_PRO_NAME } from "@/lib/subscriptions";
 import { useAppStore, useDeviceName, useServiceInstanceId } from "@/store";
 
 type TransferMode = "idle" | "sending" | "waiting" | "receiving" | "transferring" | "sharing";
+type ShareScope = "local" | "internet";
 
 interface HostedUploadProgressState {
   bytesUploaded: number;
@@ -444,6 +445,37 @@ function OutlineButton({
   );
 }
 
+function ShareScopeButton({
+  active,
+  disabled = false,
+  icon,
+  label,
+  onPress,
+}: {
+  active: boolean;
+  disabled?: boolean;
+  icon: React.ReactNode;
+  label: string;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      className={cn(
+        "min-h-[46px] flex-1 flex-row items-center justify-center gap-2 rounded-[14px] border px-4",
+        active ? "border-[#e5e7eb] bg-white" : "border-transparent bg-transparent",
+      )}
+      disabled={disabled}
+      onPress={onPress}
+      style={({ pressed }) => ({ opacity: disabled ? 0.5 : pressed ? 0.72 : 1 })}
+    >
+      {icon}
+      <Text className={cn("text-[15px]", active ? "text-[#030213]" : "text-[#6b7280]")} style={fontStyles.medium}>
+        {label}
+      </Text>
+    </Pressable>
+  );
+}
+
 function FileRow({
   file,
   onRemove,
@@ -552,6 +584,7 @@ export default function TransferScreen() {
   const [hostedPasscode, setHostedPasscode] = useState("");
   const [hostedUploadProgress, setHostedUploadProgress] = useState<HostedUploadProgressState | null>(null);
   const [isCreatingHostedLinks, setIsCreatingHostedLinks] = useState(false);
+  const [shareScope, setShareScope] = useState<ShareScope>("local");
   const [selectionError, setSelectionError] = useState<TransferSizeLimitNotice | null>(null);
   const [showQrCode, setShowQrCode] = useState(false);
   const completionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1128,6 +1161,9 @@ export default function TransferScreen() {
     setHostedNotice(null);
     setNotice(null);
     setShowQrCode(false);
+    if (!append) {
+      setShareScope("local");
+    }
     setStagedFiles(nextFiles);
     setMode("sending");
   }
@@ -1138,6 +1174,7 @@ export default function TransferScreen() {
     setStagedFiles((current) => {
       const nextFiles = current.filter((_, fileIndex) => fileIndex !== index);
       if (nextFiles.length === 0) {
+        setShareScope("local");
         setMode("idle");
       }
       return nextFiles;
@@ -1607,6 +1644,7 @@ export default function TransferScreen() {
     hostedUploadProgress && hostedUploadProgress.totalBytes > 0
       ? Math.round((hostedUploadProgress.bytesUploaded / hostedUploadProgress.totalBytes) * 100)
       : 0;
+  const isShareScopeLocked = isCreatingHostedLinks;
 
   if (mode === "idle") {
     return (
@@ -1685,147 +1723,199 @@ export default function TransferScreen() {
             <InlineNotice description={selectionError.description} title={selectionError.title} tone={"danger"} />
           ) : null}
 
-          <View className={"mb-[18px] mt-6 gap-1.5"}>
-            <Text className={"text-lg text-[#030213]"} style={fontStyles.semibold}>
-              Choose a receiver
-            </Text>
-            <Text className={"text-sm leading-5 text-[#6b7280]"} style={fontStyles.regular}>
-              Pick a nearby device or scan its QR code.
-            </Text>
-          </View>
-
-          <View className={"mb-6"}>
-            <OutlineButton
-              label={"Scan QR code"}
-              icon={<QrCode color={designTheme.primary} size={16} strokeWidth={2} />}
-              onPress={handleScanQrPress}
-            />
-          </View>
-
-          {nearbyRecords.length > 0 ? (
-            <View className={"gap-2.5"}>
-              {nearbyRecords.map((record) => (
-                <NearbyDeviceRow
-                  key={`${record.sessionId}-${record.method}`}
-                  record={record}
-                  onPress={() => void handleSendToReceiver(record)}
-                />
-              ))}
-            </View>
-          ) : (
-            <View className={"items-center justify-center py-8"}>
-              <View className={"mb-4 h-16 w-16 items-center justify-center rounded-full bg-[#f3f4f6]"}>
-                <ActivityIndicator color={designTheme.mutedForeground} size={"small"} />
-              </View>
-              <Text className={"text-[15px] text-[#6b7280]"} style={fontStyles.regular}>
-                Looking for receivers...
+          <View className={"mb-6 mt-6 gap-3"}>
+            <View className={"gap-1.5"}>
+              <Text className={"text-lg text-[#030213]"} style={fontStyles.semibold}>
+                Share options
               </Text>
+              <Text className={"text-sm leading-5 text-[#6b7280]"} style={fontStyles.regular}>
+                Choose whether to share on the local network or over the internet.
+              </Text>
+            </View>
+
+            <View className={"rounded-[18px] bg-[#f3f4f6] p-1.5"}>
+              <View className={"flex-row gap-1.5"}>
+                <ShareScopeButton
+                  active={shareScope === "local"}
+                  disabled={isShareScopeLocked}
+                  icon={
+                    <Smartphone
+                      color={shareScope === "local" ? designTheme.primary : designTheme.mutedForeground}
+                      size={16}
+                      strokeWidth={2}
+                    />
+                  }
+                  label={"Local"}
+                  onPress={() => {
+                    setShareScope("local");
+                  }}
+                />
+                <ShareScopeButton
+                  active={shareScope === "internet"}
+                  disabled={isShareScopeLocked}
+                  icon={
+                    <Globe
+                      color={shareScope === "internet" ? designTheme.primary : designTheme.mutedForeground}
+                      size={16}
+                      strokeWidth={2}
+                    />
+                  }
+                  label={"Internet"}
+                  onPress={() => {
+                    setShareScope("internet");
+                  }}
+                />
+              </View>
+            </View>
+          </View>
+
+          {shareScope === "local" ? (
+            <>
+              <View className={"mb-[18px] gap-1.5"}>
+                <Text className={"text-lg text-[#030213]"} style={fontStyles.semibold}>
+                  Choose a receiver
+                </Text>
+                <Text className={"text-sm leading-5 text-[#6b7280]"} style={fontStyles.regular}>
+                  Pick a nearby device or scan its QR code.
+                </Text>
+              </View>
+
+              <View className={"mb-6"}>
+                <OutlineButton
+                  label={"Scan QR code"}
+                  icon={<QrCode color={designTheme.primary} size={16} strokeWidth={2} />}
+                  onPress={handleScanQrPress}
+                />
+              </View>
+
+              {nearbyRecords.length > 0 ? (
+                <View className={"gap-2.5"}>
+                  {nearbyRecords.map((record) => (
+                    <NearbyDeviceRow
+                      key={`${record.sessionId}-${record.method}`}
+                      record={record}
+                      onPress={() => void handleSendToReceiver(record)}
+                    />
+                  ))}
+                </View>
+              ) : (
+                <View className={"items-center justify-center py-8"}>
+                  <View className={"mb-4 h-16 w-16 items-center justify-center rounded-full bg-[#f3f4f6]"}>
+                    <ActivityIndicator color={designTheme.mutedForeground} size={"small"} />
+                  </View>
+                  <Text className={"text-[15px] text-[#6b7280]"} style={fontStyles.regular}>
+                    Looking for receivers...
+                  </Text>
+                </View>
+              )}
+
+              <View className={"mb-3 mt-6 gap-3.5 rounded-[20px] border border-[#e5e7eb] bg-white p-[18px]"}>
+                <View className={"gap-1.5"}>
+                  <Text className={"text-lg text-[#030213]"} style={fontStyles.semibold}>
+                    Share over local WiFi
+                  </Text>
+                  <Text className={"text-sm leading-5 text-[#6b7280]"} style={fontStyles.regular}>
+                    Open a temporary browser page on this device for anyone on the same WiFi network.
+                  </Text>
+                </View>
+                <OutlineButton
+                  label={"Share in browser"}
+                  icon={<Globe color={designTheme.primary} size={16} strokeWidth={2} />}
+                  onPress={() => {
+                    void handleStartBrowserShare();
+                  }}
+                />
+              </View>
+            </>
+          ) : (
+            <View className={"mb-3 gap-3.5 rounded-[20px] border border-[#e5e7eb] bg-white p-[18px]"}>
+              <View className={"gap-1.5"}>
+                <Text className={"text-lg text-[#030213]"} style={fontStyles.semibold}>
+                  Hosted share links
+                </Text>
+                <Text className={"text-sm leading-5 text-[#6b7280]"} style={fontStyles.regular}>
+                  Upload these files for 30 days and share download links over the internet.
+                </Text>
+              </View>
+
+              {hostedUploadProgress ? (
+                <View className={"rounded-2xl border border-[#e5e7eb] bg-[#f9fafb] p-[14px]"}>
+                  <View className={"flex-row items-center justify-between gap-3"}>
+                    <Text className={"flex-1 text-sm text-[#030213]"} style={fontStyles.medium}>
+                      {hostedUploadProgress.detail}
+                    </Text>
+                    <Text className={"text-[13px] text-[#6b7280]"} style={fontStyles.medium}>
+                      {hostedUploadPercent}%
+                    </Text>
+                  </View>
+                  <View className={"mb-2 mt-3 h-1.5 overflow-hidden rounded-full bg-[#f3f4f6]"}>
+                    <View
+                      style={[
+                        { borderRadius: 999, height: "100%" },
+                        {
+                          width: `${Math.max(0, Math.min(hostedUploadPercent, 100))}%`,
+                          backgroundColor: hostedUploadPercent >= 100 ? designTheme.success : designTheme.primary,
+                        },
+                      ]}
+                    />
+                  </View>
+                  {hostedUploadProgress.currentFileName ? (
+                    <Text className={"mt-0.5 text-sm text-[#030213]"} style={fontStyles.medium}>
+                      {hostedUploadProgress.currentFileName}
+                    </Text>
+                  ) : null}
+                  <Text className={"text-[13px] leading-5 text-[#6b7280]"} style={fontStyles.regular}>
+                    {formatBytes(hostedUploadProgress.bytesUploaded)} of {formatBytes(hostedUploadProgress.totalBytes)}{" "}
+                    · File {Math.max(1, hostedUploadProgress.currentFileIndex)} of {hostedUploadProgress.totalFiles}
+                  </Text>
+                </View>
+              ) : null}
+
+              {isSignedIn && premiumAccess.isPremium ? (
+                <>
+                  <TextInput
+                    className={
+                      "min-h-[50px] rounded-[14px] border border-[#e5e7eb] bg-[#f3f4f6] px-[14px] text-[15px] text-[#030213]"
+                    }
+                    keyboardType={"number-pad"}
+                    maxLength={6}
+                    onChangeText={setHostedPasscode}
+                    placeholder={"Optional shared 6-digit passcode"}
+                    placeholderTextColor={designTheme.mutedForeground}
+                    style={fontStyles.medium}
+                    value={hostedPasscode}
+                  />
+                  <PrimaryButton
+                    className={"self-stretch"}
+                    disabled={isCreatingHostedLinks}
+                    icon={
+                      isCreatingHostedLinks ? <ActivityIndicator color={designTheme.primaryForeground} /> : undefined
+                    }
+                    label={isCreatingHostedLinks ? "Creating hosted URLs..." : "Create hosted URLs"}
+                    onPress={() => {
+                      void handleStartHostedShare();
+                    }}
+                  />
+                </>
+              ) : (
+                <>
+                  <Text className={"text-sm leading-[21px] text-[#6b7280]"} style={fontStyles.regular}>
+                    {isSignedIn
+                      ? `Upgrade to ${FILE_TRANSFERS_PRO_NAME} in Settings to create hosted links.`
+                      : `Sign in from Settings, then upgrade to ${FILE_TRANSFERS_PRO_NAME} to create hosted links.`}
+                  </Text>
+                  <OutlineButton
+                    label={"Go to Settings"}
+                    onPress={() => {
+                      router.push("/settings");
+                    }}
+                  />
+                </>
+              )}
+
+              {hostedNotice ? <InlineNotice description={hostedNotice} title={"Hosted URL"} /> : null}
             </View>
           )}
-
-          <View className={"mb-3 mt-6 gap-3.5 rounded-[20px] border border-[#e5e7eb] bg-white p-[18px]"}>
-            <View className={"gap-1.5"}>
-              <Text className={"text-lg text-[#030213]"} style={fontStyles.semibold}>
-                Share over local WiFi
-              </Text>
-              <Text className={"text-sm leading-5 text-[#6b7280]"} style={fontStyles.regular}>
-                Open a temporary browser page on this device for anyone on the same WiFi network.
-              </Text>
-            </View>
-            <OutlineButton
-              label={"Share in browser"}
-              icon={<Globe color={designTheme.primary} size={16} strokeWidth={2} />}
-              onPress={() => {
-                void handleStartBrowserShare();
-              }}
-            />
-          </View>
-
-          <View className={"mb-3 gap-3.5 rounded-[20px] border border-[#e5e7eb] bg-white p-[18px]"}>
-            <View className={"gap-1.5"}>
-              <Text className={"text-lg text-[#030213]"} style={fontStyles.semibold}>
-                Hosted URL
-              </Text>
-              <Text className={"text-sm leading-5 text-[#6b7280]"} style={fontStyles.regular}>
-                Upload these files for 30 days and share a download link.
-              </Text>
-            </View>
-
-            {hostedUploadProgress ? (
-              <View className={"rounded-2xl border border-[#e5e7eb] bg-[#f9fafb] p-[14px]"}>
-                <View className={"flex-row items-center justify-between gap-3"}>
-                  <Text className={"flex-1 text-sm text-[#030213]"} style={fontStyles.medium}>
-                    {hostedUploadProgress.detail}
-                  </Text>
-                  <Text className={"text-[13px] text-[#6b7280]"} style={fontStyles.medium}>
-                    {hostedUploadPercent}%
-                  </Text>
-                </View>
-                <View className={"mb-2 mt-3 h-1.5 overflow-hidden rounded-full bg-[#f3f4f6]"}>
-                  <View
-                    style={[
-                      { borderRadius: 999, height: "100%" },
-                      {
-                        width: `${Math.max(0, Math.min(hostedUploadPercent, 100))}%`,
-                        backgroundColor: hostedUploadPercent >= 100 ? designTheme.success : designTheme.primary,
-                      },
-                    ]}
-                  />
-                </View>
-                {hostedUploadProgress.currentFileName ? (
-                  <Text className={"mt-0.5 text-sm text-[#030213]"} style={fontStyles.medium}>
-                    {hostedUploadProgress.currentFileName}
-                  </Text>
-                ) : null}
-                <Text className={"text-[13px] leading-5 text-[#6b7280]"} style={fontStyles.regular}>
-                  {formatBytes(hostedUploadProgress.bytesUploaded)} of {formatBytes(hostedUploadProgress.totalBytes)} ·
-                  File {Math.max(1, hostedUploadProgress.currentFileIndex)} of {hostedUploadProgress.totalFiles}
-                </Text>
-              </View>
-            ) : null}
-
-            {isSignedIn && premiumAccess.isPremium ? (
-              <>
-                <TextInput
-                  className={
-                    "min-h-[50px] rounded-[14px] border border-[#e5e7eb] bg-[#f3f4f6] px-[14px] text-[15px] text-[#030213]"
-                  }
-                  keyboardType={"number-pad"}
-                  maxLength={6}
-                  onChangeText={setHostedPasscode}
-                  placeholder={"Optional shared 6-digit passcode"}
-                  placeholderTextColor={designTheme.mutedForeground}
-                  style={fontStyles.medium}
-                  value={hostedPasscode}
-                />
-                <PrimaryButton
-                  className={"self-stretch"}
-                  disabled={isCreatingHostedLinks}
-                  icon={isCreatingHostedLinks ? <ActivityIndicator color={designTheme.primaryForeground} /> : undefined}
-                  label={isCreatingHostedLinks ? "Creating hosted URLs..." : "Create hosted URLs"}
-                  onPress={() => {
-                    void handleStartHostedShare();
-                  }}
-                />
-              </>
-            ) : (
-              <>
-                <Text className={"text-sm leading-[21px] text-[#6b7280]"} style={fontStyles.regular}>
-                  {isSignedIn
-                    ? `Upgrade to ${FILE_TRANSFERS_PRO_NAME} in Settings to create hosted links.`
-                    : `Sign in from Settings, then upgrade to ${FILE_TRANSFERS_PRO_NAME} to create hosted links.`}
-                </Text>
-                <OutlineButton
-                  label={"Go to Settings"}
-                  onPress={() => {
-                    router.push("/settings");
-                  }}
-                />
-              </>
-            )}
-
-            {hostedNotice ? <InlineNotice description={hostedNotice} title={"Hosted URL"} /> : null}
-          </View>
         </ScrollView>
 
         <View
