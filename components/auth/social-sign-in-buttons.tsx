@@ -1,14 +1,13 @@
 import * as AppleAuthentication from "expo-apple-authentication";
 import React from "react";
-import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { Apple } from "lucide-react-native";
+import { Platform, Pressable, Text, View } from "react-native";
 import Svg, { Path } from "react-native-svg";
 
 type AppleButtonType = "continue" | "signIn";
 
 const APPLE_BUTTON_HEIGHT = 50;
 const APPLE_BUTTON_RADIUS = 16;
-const GOOGLE_BUTTON_HEIGHT = 48;
 
 function getAppleNativeButtonType(type: AppleButtonType) {
   return type === "continue"
@@ -62,13 +61,17 @@ export function ContinueWithAppleButton({
 }) {
   if (Platform.OS === "ios") {
     return (
-      <View pointerEvents={disabled ? "none" : "auto"} style={[styles.fullWidth, disabled ? styles.disabled : null]}>
+      <View
+        className={"w-full"}
+        pointerEvents={disabled ? "none" : "auto"}
+        style={disabled ? { opacity: 0.6 } : undefined}
+      >
         <AppleAuthentication.AppleAuthenticationButton
           buttonStyle={AppleAuthentication.AppleAuthenticationButtonStyle.BLACK}
           buttonType={getAppleNativeButtonType(type)}
           cornerRadius={APPLE_BUTTON_RADIUS}
           onPress={onPress}
-          style={styles.appleNativeButton}
+          style={{ height: APPLE_BUTTON_HEIGHT, width: "100%" }}
         />
       </View>
     );
@@ -77,16 +80,15 @@ export function ContinueWithAppleButton({
   return (
     <Pressable
       accessibilityRole={"button"}
+      className={"h-[50px] w-full flex-row items-center justify-center gap-2.5 rounded-2xl bg-black"}
       disabled={disabled}
       onPress={onPress}
-      style={({ pressed }) => [
-        styles.appleFallbackButton,
-        disabled ? styles.disabled : null,
-        pressed && !disabled ? styles.pressed : null,
-      ]}
+      style={({ pressed }) => ({
+        opacity: disabled ? 0.6 : pressed ? 0.86 : 1,
+      })}
     >
       <Apple color={"#ffffff"} size={18} strokeWidth={2} />
-      <Text style={styles.appleFallbackLabel}>{getAppleFallbackLabel(type)}</Text>
+      <Text className={"text-base font-semibold text-white"}>{getAppleFallbackLabel(type)}</Text>
     </Pressable>
   );
 }
@@ -103,74 +105,17 @@ export function ContinueWithGoogleButton({
   return (
     <Pressable
       accessibilityRole={"button"}
+      className={"relative h-12 w-full items-center justify-center rounded-full border border-[#dadce0] bg-white"}
       disabled={disabled}
       onPress={onPress}
-      style={({ pressed }) => [
-        styles.googleButton,
-        disabled ? styles.disabled : null,
-        pressed && !disabled ? styles.pressed : null,
-      ]}
+      style={({ pressed }) => ({
+        opacity: disabled ? 0.6 : pressed ? 0.86 : 1,
+      })}
     >
-      <View style={styles.googleIconWrap}>
+      <View className={"absolute left-4 h-[18px] w-[18px] items-center justify-center"}>
         <GoogleMark />
       </View>
-      <Text style={styles.googleLabel}>{label}</Text>
+      <Text className={"text-base font-medium text-[#1f1f1f] tracking-[0.1px]"}>{label}</Text>
     </Pressable>
   );
 }
-
-const styles = StyleSheet.create({
-  fullWidth: {
-    width: "100%",
-  },
-  appleNativeButton: {
-    height: APPLE_BUTTON_HEIGHT,
-    width: "100%",
-  },
-  appleFallbackButton: {
-    alignItems: "center",
-    backgroundColor: "#000000",
-    borderRadius: APPLE_BUTTON_RADIUS,
-    flexDirection: "row",
-    gap: 10,
-    height: APPLE_BUTTON_HEIGHT,
-    justifyContent: "center",
-    width: "100%",
-  },
-  appleFallbackLabel: {
-    color: "#ffffff",
-    fontSize: 16,
-    fontWeight: "600",
-  },
-  googleButton: {
-    alignItems: "center",
-    backgroundColor: "#ffffff",
-    borderColor: "#dadce0",
-    borderRadius: 999,
-    borderWidth: 1,
-    height: GOOGLE_BUTTON_HEIGHT,
-    justifyContent: "center",
-    position: "relative",
-    width: "100%",
-  },
-  googleIconWrap: {
-    alignItems: "center",
-    height: 18,
-    justifyContent: "center",
-    left: 16,
-    position: "absolute",
-    width: 18,
-  },
-  googleLabel: {
-    color: "#1f1f1f",
-    fontSize: 16,
-    fontWeight: "500",
-    letterSpacing: 0.1,
-  },
-  disabled: {
-    opacity: 0.6,
-  },
-  pressed: {
-    opacity: 0.86,
-  },
-});

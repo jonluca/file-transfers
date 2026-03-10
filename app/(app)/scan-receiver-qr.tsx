@@ -2,12 +2,19 @@ import { CameraView, useCameraPermissions } from "expo-camera";
 import { Stack, router } from "expo-router";
 import { QrCode, X } from "lucide-react-native";
 import React, { useEffect, useRef, useState } from "react";
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Pressable, Text, View } from "react-native";
 import { useIsFocused } from "@react-navigation/native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { cn } from "@/lib/cn";
 import { designFonts, designTheme } from "@/lib/design/theme";
 import { parseDiscoveryQrPayload } from "@/lib/file-transfer";
 import { useAppStore, useDeviceName } from "@/store";
+
+const fontStyles = {
+  medium: { fontFamily: designFonts.medium },
+  regular: { fontFamily: designFonts.regular },
+  semibold: { fontFamily: designFonts.semibold },
+} as const;
 
 function ActionButton({
   icon,
@@ -22,15 +29,17 @@ function ActionButton({
 }) {
   return (
     <Pressable
+      className={cn(
+        "min-h-[52px] flex-row items-center justify-center gap-2 rounded-2xl px-[18px]",
+        secondary ? "bg-[#f3f4f6]" : "bg-[#2563eb]",
+      )}
       onPress={onPress}
-      style={({ pressed }) => [
-        styles.actionButton,
-        secondary ? styles.secondaryActionButton : styles.primaryActionButton,
-        pressed ? styles.pressed : null,
-      ]}
+      style={({ pressed }) => ({ opacity: pressed ? 0.85 : 1 })}
     >
       {icon}
-      <Text style={[styles.actionButtonLabel, secondary ? styles.secondaryActionButtonLabel : null]}>{label}</Text>
+      <Text className={cn("text-base", secondary ? "text-[#030213]" : "text-white")} style={fontStyles.medium}>
+        {label}
+      </Text>
     </Pressable>
   );
 }
@@ -56,12 +65,6 @@ export default function ScanReceiverQrScreen() {
     requestedPermissionRef.current = true;
     void requestCameraPermission();
   }, [canRequestPermission, hasCameraAccess, requestCameraPermission]);
-
-  useEffect(() => {
-    if (hasCameraAccess) {
-      setNotice(null);
-    }
-  }, [hasCameraAccess]);
 
   useEffect(() => {
     return () => {
@@ -104,32 +107,36 @@ export default function ScanReceiverQrScreen() {
   }
 
   return (
-    <View style={styles.root}>
+    <View className={"flex-1 bg-white"}>
       <Stack.Screen options={{ title: "Scan Receiver QR" }} />
 
-      <View style={[styles.content, { paddingBottom: insets.bottom + 24, paddingTop: 24 }]}>
-        <View style={styles.headerCard}>
-          <View style={styles.headerIcon}>
+      <View className={"flex-1 gap-5 px-6"} style={{ paddingBottom: insets.bottom + 24, paddingTop: 24 }}>
+        <View className={"items-center gap-2.5 rounded-[24px] border border-[#e5e7eb] bg-[#f9fafb] px-5 py-5"}>
+          <View className={"h-12 w-12 items-center justify-center rounded-full bg-white"}>
             <QrCode color={designTheme.primary} size={24} strokeWidth={2} />
           </View>
-          <Text style={styles.title}>Point the camera at the receiver&apos;s QR code.</Text>
-          <Text style={styles.subtitle}>
+          <Text className={"text-center text-[22px] text-[#030213]"} style={fontStyles.semibold}>
+            Point the camera at the receiver&apos;s QR code.
+          </Text>
+          <Text className={"text-center text-sm leading-[21px] text-[#6b7280]"} style={fontStyles.regular}>
             The app will return to the transfer screen as soon as it finds a valid receiver.
           </Text>
         </View>
 
-        <View style={styles.cameraCard}>
+        <View className={"min-h-[320px] flex-1 overflow-hidden rounded-[28px] border border-[#e5e7eb] bg-[#f9fafb]"}>
           {hasCameraAccess ? (
             <CameraView
-              style={styles.camera}
+              style={{ backgroundColor: "#000000", flex: 1 }}
               barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
               onBarcodeScanned={isFocused ? ({ data }) => handleBarcodeScanned(data) : undefined}
             />
           ) : (
-            <View style={styles.permissionState}>
+            <View className={"flex-1 items-center justify-center gap-2.5 px-6"}>
               <ActivityIndicator color={designTheme.primary} size={"small"} />
-              <Text style={styles.permissionTitle}>Camera access is required to scan a QR code.</Text>
-              <Text style={styles.permissionBody}>
+              <Text className={"text-center text-base text-[#030213]"} style={fontStyles.medium}>
+                Camera access is required to scan a QR code.
+              </Text>
+              <Text className={"text-center text-sm leading-[21px] text-[#6b7280]"} style={fontStyles.regular}>
                 {canRequestPermission
                   ? "Allow camera access to continue."
                   : "Enable camera access in Settings, then reopen the scanner."}
@@ -138,9 +145,13 @@ export default function ScanReceiverQrScreen() {
           )}
         </View>
 
-        {notice ? <Text style={styles.notice}>{notice}</Text> : null}
+        {notice ? (
+          <Text className={"text-center text-sm leading-5 text-[#dc2626]"} style={fontStyles.medium}>
+            {notice}
+          </Text>
+        ) : null}
 
-        <View style={styles.actions}>
+        <View className={"gap-3"}>
           {!hasCameraAccess && canRequestPermission ? (
             <ActionButton label={"Allow camera"} onPress={() => void requestCameraPermission()} />
           ) : null}
@@ -155,115 +166,3 @@ export default function ScanReceiverQrScreen() {
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  root: {
-    backgroundColor: designTheme.background,
-    flex: 1,
-  },
-  content: {
-    flex: 1,
-    gap: 20,
-    paddingHorizontal: 24,
-  },
-  headerCard: {
-    alignItems: "center",
-    backgroundColor: designTheme.muted,
-    borderColor: designTheme.border,
-    borderRadius: 24,
-    borderWidth: 1,
-    gap: 10,
-    paddingHorizontal: 20,
-    paddingVertical: 20,
-  },
-  headerIcon: {
-    alignItems: "center",
-    backgroundColor: designTheme.card,
-    borderRadius: 999,
-    height: 48,
-    justifyContent: "center",
-    width: 48,
-  },
-  title: {
-    color: designTheme.foreground,
-    fontFamily: designFonts.semibold,
-    fontSize: 22,
-    textAlign: "center",
-  },
-  subtitle: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 14,
-    lineHeight: 21,
-    textAlign: "center",
-  },
-  cameraCard: {
-    backgroundColor: designTheme.muted,
-    borderColor: designTheme.border,
-    borderRadius: 28,
-    borderWidth: 1,
-    flex: 1,
-    minHeight: 320,
-    overflow: "hidden",
-  },
-  camera: {
-    backgroundColor: "#000000",
-    flex: 1,
-  },
-  permissionState: {
-    alignItems: "center",
-    flex: 1,
-    gap: 10,
-    justifyContent: "center",
-    paddingHorizontal: 24,
-  },
-  permissionTitle: {
-    color: designTheme.foreground,
-    fontFamily: designFonts.medium,
-    fontSize: 16,
-    textAlign: "center",
-  },
-  permissionBody: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 14,
-    lineHeight: 21,
-    textAlign: "center",
-  },
-  notice: {
-    color: designTheme.destructive,
-    fontFamily: designFonts.medium,
-    fontSize: 14,
-    lineHeight: 20,
-    textAlign: "center",
-  },
-  actions: {
-    gap: 12,
-  },
-  actionButton: {
-    alignItems: "center",
-    borderRadius: 16,
-    flexDirection: "row",
-    gap: 8,
-    justifyContent: "center",
-    minHeight: 52,
-    paddingHorizontal: 18,
-  },
-  primaryActionButton: {
-    backgroundColor: designTheme.primary,
-  },
-  secondaryActionButton: {
-    backgroundColor: designTheme.secondary,
-  },
-  actionButtonLabel: {
-    color: designTheme.primaryForeground,
-    fontFamily: designFonts.medium,
-    fontSize: 16,
-  },
-  secondaryActionButtonLabel: {
-    color: designTheme.foreground,
-  },
-  pressed: {
-    opacity: 0.85,
-  },
-});

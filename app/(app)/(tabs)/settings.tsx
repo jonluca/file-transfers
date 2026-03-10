@@ -9,7 +9,6 @@ import {
   Platform,
   Pressable,
   ScrollView,
-  StyleSheet,
   Switch,
   Text,
   TextInput,
@@ -36,6 +35,7 @@ import { usePremiumAccess } from "@/hooks/use-premium-access";
 import { useAppleSignIn } from "@/hooks/use-apple-sign-in";
 import { signOut, useSession } from "@/lib/auth-client";
 import { canUseLocalPremiumOverride, isTestFlightBuild } from "@/lib/build-environment";
+import { cn } from "@/lib/cn";
 import { getTabScreenBottomPadding, getTabScreenTopInset } from "@/lib/design/tab-screen-insets";
 import { designFonts, designTheme } from "@/lib/design/theme";
 import {
@@ -55,6 +55,12 @@ import {
   useFreeTransferChunkBytes,
 } from "@/store";
 
+const fontStyles = {
+  regular: { fontFamily: designFonts.regular },
+  medium: { fontFamily: designFonts.medium },
+  semibold: { fontFamily: designFonts.semibold },
+} as const;
+
 function PrimaryButton({
   label,
   onPress,
@@ -68,16 +74,18 @@ function PrimaryButton({
 }) {
   return (
     <Pressable
+      className={cn(
+        "min-h-12 items-center justify-center rounded-[14px] px-4",
+        tone === "inverted" ? "bg-white" : "bg-[#2563eb]",
+      )}
       disabled={disabled}
       onPress={onPress}
-      style={({ pressed }) => [
-        styles.primaryButton,
-        tone === "inverted" ? styles.primaryButtonInverted : null,
-        disabled ? styles.disabled : null,
-        pressed && !disabled ? styles.pressed : null,
-      ]}
+      style={({ pressed }) => ({ opacity: disabled ? 0.5 : pressed ? 0.72 : 1 })}
     >
-      <Text style={[styles.primaryButtonLabel, tone === "inverted" ? styles.primaryButtonLabelInverted : null]}>
+      <Text
+        className={cn("text-base", tone === "inverted" ? "text-[#2563eb]" : "text-white")}
+        style={fontStyles.medium}
+      >
         {label}
       </Text>
     </Pressable>
@@ -97,16 +105,20 @@ function SecondaryButton({
 }) {
   return (
     <Pressable
+      className={cn(
+        "min-h-11 items-center justify-center rounded-[14px] border bg-white px-[14px]",
+        tone === "danger" ? "border-[rgba(220,38,38,0.16)]" : "border-[#e5e7eb]",
+      )}
       disabled={disabled}
       onPress={onPress}
-      style={({ pressed }) => [
-        styles.secondaryButton,
-        tone === "danger" ? styles.dangerButton : null,
-        disabled ? styles.disabled : null,
-        pressed && !disabled ? styles.pressed : null,
-      ]}
+      style={({ pressed }) => ({ opacity: disabled ? 0.5 : pressed ? 0.72 : 1 })}
     >
-      <Text style={[styles.secondaryButtonLabel, tone === "danger" ? styles.dangerButtonLabel : null]}>{label}</Text>
+      <Text
+        className={cn("text-[15px]", tone === "danger" ? "text-[#dc2626]" : "text-[#030213]")}
+        style={fontStyles.medium}
+      >
+        {label}
+      </Text>
     </Pressable>
   );
 }
@@ -122,14 +134,21 @@ function InlineNotice({
 }) {
   return (
     <View
-      style={[
-        styles.inlineNotice,
-        tone === "warning" ? styles.warningNotice : null,
-        tone === "danger" ? styles.dangerNotice : null,
-      ]}
+      className={cn(
+        "gap-1 rounded-[14px] p-3",
+        tone === "warning"
+          ? "bg-[rgba(217,119,6,0.1)]"
+          : tone === "danger"
+            ? "bg-[rgba(220,38,38,0.08)]"
+            : "bg-[#f9fafb]",
+      )}
     >
-      <Text style={styles.inlineNoticeTitle}>{title}</Text>
-      <Text style={styles.inlineNoticeDescription}>{description}</Text>
+      <Text className={"text-sm text-[#030213]"} style={fontStyles.medium}>
+        {title}
+      </Text>
+      <Text className={"text-[13px] leading-[18px] text-[#6b7280]"} style={fontStyles.regular}>
+        {description}
+      </Text>
     </View>
   );
 }
@@ -148,11 +167,17 @@ function SettingItem({
   onPress?: () => void;
 }) {
   const content = (
-    <View style={styles.settingItem}>
-      <View style={styles.settingIconWrap}>{icon}</View>
-      <View style={styles.settingCopy}>
-        <Text style={styles.settingLabel}>{label}</Text>
-        {description ? <Text style={styles.settingDescription}>{description}</Text> : null}
+    <View className={"min-h-[72px] flex-row items-center gap-3.5 border-b border-[#e5e7eb] bg-white px-4 py-[14px]"}>
+      <View className={"h-9 w-9 items-center justify-center rounded-full bg-[#f3f4f6]"}>{icon}</View>
+      <View className={"flex-1 gap-0.5"}>
+        <Text className={"text-[15px] text-[#030213]"} style={fontStyles.medium}>
+          {label}
+        </Text>
+        {description ? (
+          <Text className={"text-[13px] leading-[18px] text-[#6b7280]"} style={fontStyles.regular}>
+            {description}
+          </Text>
+        ) : null}
       </View>
       {action ?? (onPress ? <ChevronRight color={designTheme.mutedForeground} size={18} strokeWidth={2} /> : null)}
     </View>
@@ -163,7 +188,7 @@ function SettingItem({
   }
 
   return (
-    <Pressable onPress={onPress} style={({ pressed }) => [pressed ? styles.pressed : null]}>
+    <Pressable onPress={onPress} style={({ pressed }) => ({ opacity: pressed ? 0.72 : 1 })}>
       {content}
     </Pressable>
   );
@@ -171,11 +196,13 @@ function SettingItem({
 
 function PremiumBenefit({ label }: { label: string }) {
   return (
-    <View style={styles.benefitRow}>
-      <View style={styles.benefitIconWrap}>
+    <View className={"flex-row items-center gap-2.5"}>
+      <View className={"h-5 w-5 items-center justify-center rounded-full bg-[rgba(22,163,74,0.12)]"}>
         <Check color={designTheme.success} size={12} strokeWidth={2.6} />
       </View>
-      <Text style={styles.benefitLabel}>{label}</Text>
+      <Text className={"flex-1 text-sm text-[#030213]"} style={fontStyles.regular}>
+        {label}
+      </Text>
     </View>
   );
 }
@@ -197,25 +224,32 @@ function PremiumPackageCard({
 
   return (
     <Pressable
+      className={cn(
+        "gap-1.5 rounded-2xl border bg-white p-4",
+        highlighted ? "border-[rgba(37,99,235,0.28)] bg-[rgba(37,99,235,0.05)]" : "border-[#e5e7eb]",
+      )}
       disabled={disabled}
       onPress={onPress}
-      style={({ pressed }) => [
-        styles.packageCard,
-        highlighted ? styles.packageCardHighlighted : null,
-        disabled ? styles.disabled : null,
-        pressed && !disabled ? styles.pressed : null,
-      ]}
+      style={({ pressed }) => ({ opacity: disabled ? 0.5 : pressed ? 0.72 : 1 })}
     >
-      <View style={styles.packageHeader}>
-        <Text style={styles.packageTitle}>{packageTitle}</Text>
+      <View className={"flex-row items-center justify-between"}>
+        <Text className={"text-base text-[#030213]"} style={fontStyles.semibold}>
+          {packageTitle}
+        </Text>
         {highlighted ? (
-          <View style={styles.packageBadge}>
-            <Text style={styles.packageBadgeLabel}>Recommended</Text>
+          <View className={"rounded-full bg-[#2563eb] px-2 py-1"}>
+            <Text className={"text-[11px] text-white"} style={fontStyles.medium}>
+              Recommended
+            </Text>
           </View>
         ) : null}
       </View>
-      <Text style={styles.packagePrice}>{packagePrice}</Text>
-      <Text style={styles.packageDescription}>{packageDescription}</Text>
+      <Text className={"text-[22px] text-[#030213]"} style={fontStyles.semibold}>
+        {packagePrice}
+      </Text>
+      <Text className={"text-[13px] leading-[18px] text-[#6b7280]"} style={fontStyles.regular}>
+        {packageDescription}
+      </Text>
     </Pressable>
   );
 }
@@ -622,23 +656,26 @@ export default function SettingsScreen() {
   return (
     <>
       <ScrollView
+        className={"flex-1 bg-white px-6"}
         contentContainerStyle={{ paddingBottom: bottomPadding }}
         showsVerticalScrollIndicator={false}
-        style={[styles.root, { paddingTop: topInset + 16 }]}
+        style={{ paddingTop: topInset + 16 }}
       >
-        <Text style={styles.title}>Settings</Text>
+        <Text className={"mb-5 text-2xl text-[#030213]"} style={fontStyles.semibold}>
+          Settings
+        </Text>
 
-        <View style={styles.section}>
-          <View style={[styles.heroCard, isPremium ? styles.heroCardActive : null]}>
-            <View style={styles.heroHeader}>
-              <View style={styles.heroIconWrap}>
+        <View className={"mb-6"}>
+          <View className={cn("rounded-[22px] p-5", isPremium ? "bg-[#1d4ed8]" : "bg-[#2563eb]")}>
+            <View className={"mb-[18px] flex-row gap-3.5"}>
+              <View className={"h-14 w-14 items-center justify-center rounded-[18px] bg-[rgba(255,255,255,0.18)]"}>
                 <Crown color={designTheme.primaryForeground} size={28} strokeWidth={1.9} />
               </View>
-              <View style={styles.heroCopy}>
-                <Text style={styles.heroTitle}>
+              <View className={"flex-1 gap-1"}>
+                <Text className={"text-2xl text-white"} style={fontStyles.semibold}>
                   {isPremium ? `${FILE_TRANSFERS_PRO_NAME} active` : `Go ${FILE_TRANSFERS_PRO_NAME}`}
                 </Text>
-                <Text style={styles.heroDescription}>
+                <Text className={"text-sm leading-5 text-[rgba(255,255,255,0.82)]"} style={fontStyles.regular}>
                   {isPremium
                     ? "Unlimited local transfer size and speed are unlocked on this device, and hosted URLs are ready from Transfer when you sign in."
                     : "Unlimited transfer size and speed, hosted browser links from Transfer, and RevenueCat billing."}
@@ -656,15 +693,20 @@ export default function SettingsScreen() {
           </View>
         </View>
 
-        <View style={styles.section}>
-          <Text style={styles.sectionLabel}>Device</Text>
-          <View style={styles.group}>
+        <View className={"mb-6"}>
+          <Text className={"mb-2.5 text-xs uppercase tracking-[0.8px] text-[#6b7280]"} style={fontStyles.medium}>
+            Device
+          </Text>
+          <View className={"overflow-hidden rounded-[18px] border border-[#e5e7eb] bg-white"}>
             {isEditingDeviceName ? (
-              <View style={styles.editRow}>
-                <View style={styles.settingIconWrap}>
+              <View
+                className={"min-h-[72px] flex-row items-center gap-3 border-b border-[#e5e7eb] bg-white px-4 py-[14px]"}
+              >
+                <View className={"h-9 w-9 items-center justify-center rounded-full bg-[#f3f4f6]"}>
                   <Smartphone color={designTheme.secondaryForeground} size={18} strokeWidth={1.9} />
                 </View>
                 <TextInput
+                  className={"min-h-6 flex-1 p-0 text-[15px] text-[#030213]"}
                   autoCapitalize={"words"}
                   onBlur={() => setIsEditingDeviceName(false)}
                   onChangeText={setDraftDeviceName}
@@ -674,7 +716,7 @@ export default function SettingsScreen() {
                   }}
                   placeholder={"My Phone"}
                   placeholderTextColor={designTheme.mutedForeground}
-                  style={styles.deviceInput}
+                  style={fontStyles.medium}
                   value={draftDeviceName}
                 />
                 <SecondaryButton
@@ -699,9 +741,11 @@ export default function SettingsScreen() {
           </View>
         </View>
 
-        <View style={styles.section}>
-          <Text style={styles.sectionLabel}>Premium Features</Text>
-          <View style={styles.group}>
+        <View className={"mb-6"}>
+          <Text className={"mb-2.5 text-xs uppercase tracking-[0.8px] text-[#6b7280]"} style={fontStyles.medium}>
+            Premium Features
+          </Text>
+          <View className={"overflow-hidden rounded-[18px] border border-[#e5e7eb] bg-white"}>
             <SettingItem
               description={
                 isPremium
@@ -728,9 +772,11 @@ export default function SettingsScreen() {
           </View>
         </View>
 
-        <View style={styles.section}>
-          <Text style={styles.sectionLabel}>Transfers</Text>
-          <View style={styles.group}>
+        <View className={"mb-6"}>
+          <Text className={"mb-2.5 text-xs uppercase tracking-[0.8px] text-[#6b7280]"} style={fontStyles.medium}>
+            Transfers
+          </Text>
+          <View className={"overflow-hidden rounded-[18px] border border-[#e5e7eb] bg-white"}>
             <SettingItem
               action={
                 <Switch
@@ -749,9 +795,11 @@ export default function SettingsScreen() {
             />
             <SettingItem
               action={
-                <View style={styles.advancedToggleWrap}>
-                  <Text style={styles.advancedToggleLabel}>{showAdvancedTransferSettings ? "Hide" : "Show"}</Text>
-                  <View style={showAdvancedTransferSettings ? styles.advancedToggleChevronExpanded : null}>
+                <View className={"flex-row items-center gap-2"}>
+                  <Text className={"text-[13px] text-[#6b7280]"} style={fontStyles.medium}>
+                    {showAdvancedTransferSettings ? "Hide" : "Show"}
+                  </Text>
+                  <View style={showAdvancedTransferSettings ? { transform: [{ rotate: "90deg" }] } : undefined}>
                     <ChevronRight color={designTheme.mutedForeground} size={18} strokeWidth={2} />
                   </View>
                 </View>
@@ -766,50 +814,70 @@ export default function SettingsScreen() {
             />
           </View>
           {showAdvancedTransferSettings ? (
-            <View style={[styles.panel, styles.advancedPanel]}>
-              <Text style={styles.panelTitle}>Advanced transfer settings</Text>
-              <Text style={styles.panelCopy}>
+            <View className={"mt-3 gap-3 rounded-[18px] border border-[#e5e7eb] bg-white p-4"}>
+              <Text className={"text-lg text-[#030213]"} style={fontStyles.semibold}>
+                Advanced transfer settings
+              </Text>
+              <Text className={"text-sm leading-5 text-[#6b7280]"} style={fontStyles.regular}>
                 Applies to new nearby send and receive sessions. Larger chunks reduce request overhead, while smaller
                 chunks retry less data after interruptions.
               </Text>
 
-              <View style={styles.advancedField}>
-                <View style={styles.advancedFieldCopy}>
-                  <Text style={styles.advancedFieldLabel}>Premium/direct chunk size</Text>
-                  <Text style={styles.advancedFieldDescription}>
+              <View className={"gap-2.5"}>
+                <View className={"gap-1"}>
+                  <Text className={"text-[15px] text-[#030213]"} style={fontStyles.medium}>
+                    Premium/direct chunk size
+                  </Text>
+                  <Text className={"text-[13px] leading-[18px] text-[#6b7280]"} style={fontStyles.regular}>
                     Used for premium sends and all incoming nearby transfers.
                   </Text>
                 </View>
-                <View style={styles.advancedInputWrap}>
+                <View
+                  className={
+                    "min-h-12 flex-row items-center gap-3 rounded-[14px] border border-[#e5e7eb] bg-[#f3f4f6] px-[14px]"
+                  }
+                >
                   <TextInput
+                    className={"min-h-6 flex-1 p-0 text-[15px] text-[#030213]"}
                     keyboardType={"number-pad"}
                     onChangeText={setDirectChunkMegabytesDraft}
                     placeholder={"45"}
                     placeholderTextColor={designTheme.mutedForeground}
-                    style={styles.advancedInput}
+                    style={fontStyles.medium}
                     value={directChunkMegabytesDraft}
                   />
-                  <Text style={styles.advancedInputSuffix}>MB</Text>
+                  <Text className={"text-[13px] text-[#6b7280]"} style={fontStyles.medium}>
+                    MB
+                  </Text>
                 </View>
               </View>
 
-              <View style={styles.advancedField}>
-                <View style={styles.advancedFieldCopy}>
-                  <Text style={styles.advancedFieldLabel}>Free sender chunk size</Text>
-                  <Text style={styles.advancedFieldDescription}>
+              <View className={"gap-2.5"}>
+                <View className={"gap-1"}>
+                  <Text className={"text-[15px] text-[#030213]"} style={fontStyles.medium}>
+                    Free sender chunk size
+                  </Text>
+                  <Text className={"text-[13px] leading-[18px] text-[#6b7280]"} style={fontStyles.regular}>
                     Used when the sender stays on the free tier for nearby transfers.
                   </Text>
                 </View>
-                <View style={styles.advancedInputWrap}>
+                <View
+                  className={
+                    "min-h-12 flex-row items-center gap-3 rounded-[14px] border border-[#e5e7eb] bg-[#f3f4f6] px-[14px]"
+                  }
+                >
                   <TextInput
+                    className={"min-h-6 flex-1 p-0 text-[15px] text-[#030213]"}
                     keyboardType={"number-pad"}
                     onChangeText={setFreeChunkMegabytesDraft}
                     placeholder={"1"}
                     placeholderTextColor={designTheme.mutedForeground}
-                    style={styles.advancedInput}
+                    style={fontStyles.medium}
                     value={freeChunkMegabytesDraft}
                   />
-                  <Text style={styles.advancedInputSuffix}>MB</Text>
+                  <Text className={"text-[13px] text-[#6b7280]"} style={fontStyles.medium}>
+                    MB
+                  </Text>
                 </View>
               </View>
 
@@ -821,7 +889,7 @@ export default function SettingsScreen() {
                 />
               ) : null}
 
-              <View style={styles.advancedActions}>
+              <View className={"gap-2.5"}>
                 <PrimaryButton label={"Save chunk sizes"} onPress={handleSaveTransferChunkSettings} />
                 <SecondaryButton label={"Reset defaults"} onPress={handleResetTransferChunkSettings} />
               </View>
@@ -829,9 +897,11 @@ export default function SettingsScreen() {
           ) : null}
         </View>
 
-        <View style={styles.section}>
-          <Text style={styles.sectionLabel}>General</Text>
-          <View style={styles.group}>
+        <View className={"mb-6"}>
+          <Text className={"mb-2.5 text-xs uppercase tracking-[0.8px] text-[#6b7280]"} style={fontStyles.medium}>
+            General
+          </Text>
+          <View className={"overflow-hidden rounded-[18px] border border-[#e5e7eb] bg-white"}>
             <SettingItem
               icon={<HelpCircle color={designTheme.secondaryForeground} size={18} strokeWidth={1.9} />}
               label={"Help & FAQ"}
@@ -853,12 +923,16 @@ export default function SettingsScreen() {
           </View>
         </View>
 
-        <View style={styles.section}>
-          <Text style={styles.sectionLabel}>FAQ</Text>
-          <View style={styles.panel}>
-            <View style={styles.faqItem}>
-              <Text style={styles.faqQuestion}>Why can't I see the other device?</Text>
-              <Text style={styles.faqAnswer}>
+        <View className={"mb-6"}>
+          <Text className={"mb-2.5 text-xs uppercase tracking-[0.8px] text-[#6b7280]"} style={fontStyles.medium}>
+            FAQ
+          </Text>
+          <View className={"gap-3 rounded-[18px] border border-[#e5e7eb] bg-white p-4"}>
+            <View className={"gap-1.5"}>
+              <Text className={"text-[15px] text-[#030213]"} style={fontStyles.medium}>
+                Why can't I see the other device?
+              </Text>
+              <Text className={"text-sm leading-5 text-[#6b7280]"} style={fontStyles.regular}>
                 Nearby transfers only work when both devices are connected to the same Wi-Fi network. If one device is
                 on cellular, guest Wi-Fi, or a different router, discovery will usually fail.
               </Text>
@@ -867,9 +941,11 @@ export default function SettingsScreen() {
         </View>
 
         {canShowLocalPremiumOverride ? (
-          <View style={styles.section}>
-            <Text style={styles.sectionLabel}>{isTestFlight && !__DEV__ ? "Preview" : "Developer"}</Text>
-            <View style={styles.group}>
+          <View className={"mb-6"}>
+            <Text className={"mb-2.5 text-xs uppercase tracking-[0.8px] text-[#6b7280]"} style={fontStyles.medium}>
+              {isTestFlight && !__DEV__ ? "Preview" : "Developer"}
+            </Text>
+            <View className={"overflow-hidden rounded-[18px] border border-[#e5e7eb] bg-white"}>
               <SettingItem
                 action={
                   <Switch
@@ -891,8 +967,8 @@ export default function SettingsScreen() {
           </View>
         ) : null}
 
-        <View style={styles.footerNote}>
-          <Text style={styles.footerNoteText}>
+        <View className={"mt-2 rounded-2xl bg-[#f9fafb] p-4"}>
+          <Text className={"text-xs leading-[18px] text-[#6b7280]"} style={fontStyles.regular}>
             Free senders stay anonymous over nearby WiFi with up to 100 MB and 5 MB/s. Premium removes the sender limits
             and adds hosted URLs you create from Transfer and manage in Files.
           </Text>
@@ -905,27 +981,32 @@ export default function SettingsScreen() {
         transparent
         visible={showPremiumDetails}
       >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalCard}>
+        <View className={"flex-1 items-center justify-center bg-[rgba(3,2,19,0.42)] p-6"}>
+          <View className={"max-h-[88%] w-full rounded-[24px] bg-white pt-5"}>
             <Pressable
+              className={"mr-4 h-9 w-9 self-end items-center justify-center"}
               hitSlop={12}
               onPress={() => setShowPremiumDetails(false)}
-              style={({ pressed }) => [styles.modalCloseButton, pressed ? styles.pressed : null]}
+              style={({ pressed }) => ({ opacity: pressed ? 0.72 : 1 })}
             >
               <X color={designTheme.mutedForeground} size={18} strokeWidth={2.2} />
             </Pressable>
 
-            <ScrollView contentContainerStyle={styles.modalContent} showsVerticalScrollIndicator={false}>
-              <View style={styles.modalHeroIcon}>
+            <ScrollView contentContainerClassName={"gap-3.5 px-5 pb-5"} showsVerticalScrollIndicator={false}>
+              <View
+                className={"h-16 w-16 self-center items-center justify-center rounded-full bg-[rgba(37,99,235,0.1)]"}
+              >
                 <Crown color={designTheme.primary} size={28} strokeWidth={1.9} />
               </View>
-              <Text style={styles.modalTitle}>{FILE_TRANSFERS_PRO_NAME}</Text>
-              <Text style={styles.modalDescription}>
+              <Text className={"text-center text-[28px] text-[#030213]"} style={fontStyles.semibold}>
+                {FILE_TRANSFERS_PRO_NAME}
+              </Text>
+              <Text className={"text-center text-sm leading-5 text-[#6b7280]"} style={fontStyles.regular}>
                 RevenueCat manages the subscription lifecycle while the app keeps transfer speed and hosted-link access
                 in sync with customer info.
               </Text>
 
-              <View style={styles.modalBenefits}>
+              <View className={"mt-1 gap-2.5"}>
                 <PremiumBenefit label={"Unlimited local transfer size and speed"} />
                 <PremiumBenefit label={"Hosted file links in the browser"} />
                 <PremiumBenefit label={"Up to 10 GB per file"} />
@@ -948,14 +1029,16 @@ export default function SettingsScreen() {
                 />
               ) : null}
 
-              <View style={styles.modalSection}>
+              <View className={"gap-3"}>
                 {sessionUser ? (
                   <>
                     {hasConfiguredRevenueCat ? (
                       isLoadingOfferings && !plans.availablePackages.length ? (
-                        <View style={styles.loadingRow}>
+                        <View className={"flex-row items-center gap-3"}>
                           <ActivityIndicator color={designTheme.primary} />
-                          <Text style={styles.loadingLabel}>Loading {FILE_TRANSFERS_PRO_NAME} plans...</Text>
+                          <Text className={"text-sm text-[#6b7280]"} style={fontStyles.regular}>
+                            Loading {FILE_TRANSFERS_PRO_NAME} plans...
+                          </Text>
                         </View>
                       ) : plans.availablePackages.length ? (
                         plans.availablePackages.map((selectedPackage) => (
@@ -1073,465 +1156,3 @@ export default function SettingsScreen() {
     </>
   );
 }
-
-const styles = StyleSheet.create({
-  root: {
-    backgroundColor: designTheme.background,
-    flex: 1,
-    paddingHorizontal: 24,
-  },
-  title: {
-    color: designTheme.foreground,
-    fontFamily: designFonts.semibold,
-    fontSize: 24,
-    marginBottom: 20,
-  },
-  section: {
-    marginBottom: 24,
-  },
-  sectionLabel: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.medium,
-    fontSize: 12,
-    letterSpacing: 0.8,
-    marginBottom: 10,
-    textTransform: "uppercase",
-  },
-  group: {
-    backgroundColor: designTheme.card,
-    borderColor: designTheme.border,
-    borderRadius: 18,
-    borderWidth: 1,
-    overflow: "hidden",
-  },
-  heroCard: {
-    backgroundColor: designTheme.primary,
-    borderRadius: 22,
-    padding: 20,
-  },
-  heroCardActive: {
-    backgroundColor: "#1d4ed8",
-  },
-  heroHeader: {
-    flexDirection: "row",
-    gap: 14,
-    marginBottom: 18,
-  },
-  heroIconWrap: {
-    alignItems: "center",
-    backgroundColor: "rgba(255, 255, 255, 0.18)",
-    borderRadius: 18,
-    height: 56,
-    justifyContent: "center",
-    width: 56,
-  },
-  heroCopy: {
-    flex: 1,
-    gap: 4,
-  },
-  heroTitle: {
-    color: designTheme.primaryForeground,
-    fontFamily: designFonts.semibold,
-    fontSize: 24,
-  },
-  heroDescription: {
-    color: "rgba(255, 255, 255, 0.82)",
-    fontFamily: designFonts.regular,
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  settingItem: {
-    alignItems: "center",
-    backgroundColor: designTheme.card,
-    borderBottomColor: designTheme.border,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    flexDirection: "row",
-    gap: 14,
-    minHeight: 72,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-  },
-  settingIconWrap: {
-    alignItems: "center",
-    backgroundColor: designTheme.secondary,
-    borderRadius: 999,
-    height: 36,
-    justifyContent: "center",
-    width: 36,
-  },
-  settingCopy: {
-    flex: 1,
-    gap: 2,
-  },
-  settingLabel: {
-    color: designTheme.foreground,
-    fontFamily: designFonts.medium,
-    fontSize: 15,
-  },
-  settingDescription: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 13,
-    lineHeight: 18,
-  },
-  advancedToggleWrap: {
-    alignItems: "center",
-    flexDirection: "row",
-    gap: 8,
-  },
-  advancedToggleLabel: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.medium,
-    fontSize: 13,
-  },
-  advancedToggleChevronExpanded: {
-    transform: [{ rotate: "90deg" }],
-  },
-  editRow: {
-    alignItems: "center",
-    backgroundColor: designTheme.card,
-    borderBottomColor: designTheme.border,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    flexDirection: "row",
-    gap: 12,
-    minHeight: 72,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-  },
-  deviceInput: {
-    color: designTheme.foreground,
-    flex: 1,
-    fontFamily: designFonts.medium,
-    fontSize: 15,
-    minHeight: 24,
-    paddingVertical: 0,
-  },
-  panel: {
-    backgroundColor: designTheme.card,
-    borderColor: designTheme.border,
-    borderRadius: 18,
-    borderWidth: 1,
-    gap: 12,
-    padding: 16,
-  },
-  advancedPanel: {
-    marginTop: 12,
-  },
-  panelTitle: {
-    color: designTheme.foreground,
-    fontFamily: designFonts.semibold,
-    fontSize: 18,
-  },
-  panelCopy: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  faqItem: {
-    gap: 6,
-  },
-  faqQuestion: {
-    color: designTheme.foreground,
-    fontFamily: designFonts.medium,
-    fontSize: 15,
-  },
-  faqAnswer: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  advancedField: {
-    gap: 10,
-  },
-  advancedFieldCopy: {
-    gap: 4,
-  },
-  advancedFieldLabel: {
-    color: designTheme.foreground,
-    fontFamily: designFonts.medium,
-    fontSize: 15,
-  },
-  advancedFieldDescription: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 13,
-    lineHeight: 18,
-  },
-  advancedInputWrap: {
-    alignItems: "center",
-    backgroundColor: designTheme.input,
-    borderColor: designTheme.border,
-    borderRadius: 14,
-    borderWidth: 1,
-    flexDirection: "row",
-    gap: 12,
-    minHeight: 48,
-    paddingHorizontal: 14,
-  },
-  advancedInput: {
-    color: designTheme.foreground,
-    flex: 1,
-    fontFamily: designFonts.medium,
-    fontSize: 15,
-    minHeight: 24,
-    paddingVertical: 0,
-  },
-  advancedInputSuffix: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.medium,
-    fontSize: 13,
-  },
-  advancedActions: {
-    gap: 10,
-  },
-  hostedInput: {
-    backgroundColor: designTheme.input,
-    borderColor: designTheme.border,
-    borderRadius: 14,
-    borderWidth: 1,
-    color: designTheme.foreground,
-    fontFamily: designFonts.regular,
-    fontSize: 15,
-    minHeight: 48,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-  },
-  hostedList: {
-    gap: 10,
-  },
-  hostedFileRow: {
-    backgroundColor: designTheme.muted,
-    borderRadius: 14,
-    gap: 12,
-    padding: 14,
-  },
-  hostedFileCopy: {
-    gap: 4,
-  },
-  hostedFileName: {
-    color: designTheme.foreground,
-    fontFamily: designFonts.medium,
-    fontSize: 15,
-  },
-  hostedFileMeta: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 13,
-  },
-  hostedActions: {
-    flexDirection: "row",
-    gap: 10,
-  },
-  footerNote: {
-    backgroundColor: designTheme.muted,
-    borderRadius: 16,
-    marginTop: 8,
-    padding: 16,
-  },
-  footerNoteText: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 12,
-    lineHeight: 18,
-  },
-  primaryButton: {
-    alignItems: "center",
-    backgroundColor: designTheme.primary,
-    borderRadius: 14,
-    justifyContent: "center",
-    minHeight: 48,
-    paddingHorizontal: 16,
-  },
-  primaryButtonInverted: {
-    backgroundColor: designTheme.card,
-  },
-  primaryButtonLabel: {
-    color: designTheme.primaryForeground,
-    fontFamily: designFonts.medium,
-    fontSize: 16,
-  },
-  primaryButtonLabelInverted: {
-    color: designTheme.primary,
-  },
-  secondaryButton: {
-    alignItems: "center",
-    backgroundColor: designTheme.card,
-    borderColor: designTheme.border,
-    borderRadius: 14,
-    borderWidth: 1,
-    justifyContent: "center",
-    minHeight: 44,
-    paddingHorizontal: 14,
-  },
-  secondaryButtonLabel: {
-    color: designTheme.foreground,
-    fontFamily: designFonts.medium,
-    fontSize: 15,
-  },
-  dangerButton: {
-    borderColor: "rgba(220, 38, 38, 0.16)",
-  },
-  dangerButtonLabel: {
-    color: designTheme.destructive,
-  },
-  inlineNotice: {
-    backgroundColor: designTheme.muted,
-    borderRadius: 14,
-    gap: 4,
-    padding: 12,
-  },
-  warningNotice: {
-    backgroundColor: "rgba(217, 119, 6, 0.1)",
-  },
-  dangerNotice: {
-    backgroundColor: "rgba(220, 38, 38, 0.08)",
-  },
-  inlineNoticeTitle: {
-    color: designTheme.foreground,
-    fontFamily: designFonts.medium,
-    fontSize: 14,
-  },
-  inlineNoticeDescription: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 13,
-    lineHeight: 18,
-  },
-  modalOverlay: {
-    alignItems: "center",
-    backgroundColor: "rgba(3, 2, 19, 0.42)",
-    flex: 1,
-    justifyContent: "center",
-    padding: 24,
-  },
-  modalCard: {
-    backgroundColor: designTheme.card,
-    borderRadius: 24,
-    maxHeight: "88%",
-    paddingTop: 20,
-    width: "100%",
-  },
-  modalCloseButton: {
-    alignItems: "center",
-    alignSelf: "flex-end",
-    height: 36,
-    justifyContent: "center",
-    marginRight: 16,
-    width: 36,
-  },
-  modalContent: {
-    gap: 14,
-    paddingHorizontal: 20,
-    paddingBottom: 20,
-  },
-  modalHeroIcon: {
-    alignItems: "center",
-    alignSelf: "center",
-    backgroundColor: "rgba(37, 99, 235, 0.1)",
-    borderRadius: 999,
-    height: 64,
-    justifyContent: "center",
-    width: 64,
-  },
-  modalTitle: {
-    color: designTheme.foreground,
-    fontFamily: designFonts.semibold,
-    fontSize: 28,
-    textAlign: "center",
-  },
-  modalDescription: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 14,
-    lineHeight: 20,
-    textAlign: "center",
-  },
-  modalBenefits: {
-    gap: 10,
-    marginTop: 4,
-  },
-  benefitRow: {
-    alignItems: "center",
-    flexDirection: "row",
-    gap: 10,
-  },
-  benefitIconWrap: {
-    alignItems: "center",
-    backgroundColor: "rgba(22, 163, 74, 0.12)",
-    borderRadius: 999,
-    height: 20,
-    justifyContent: "center",
-    width: 20,
-  },
-  benefitLabel: {
-    color: designTheme.foreground,
-    flex: 1,
-    fontFamily: designFonts.regular,
-    fontSize: 14,
-  },
-  modalSection: {
-    gap: 12,
-  },
-  loadingRow: {
-    alignItems: "center",
-    flexDirection: "row",
-    gap: 12,
-  },
-  loadingLabel: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 14,
-  },
-  packageCard: {
-    backgroundColor: designTheme.card,
-    borderColor: designTheme.border,
-    borderRadius: 16,
-    borderWidth: 1,
-    gap: 6,
-    padding: 16,
-  },
-  packageCardHighlighted: {
-    backgroundColor: "rgba(37, 99, 235, 0.05)",
-    borderColor: "rgba(37, 99, 235, 0.28)",
-  },
-  packageHeader: {
-    alignItems: "center",
-    flexDirection: "row",
-    justifyContent: "space-between",
-  },
-  packageTitle: {
-    color: designTheme.foreground,
-    fontFamily: designFonts.semibold,
-    fontSize: 16,
-  },
-  packageBadge: {
-    backgroundColor: designTheme.primary,
-    borderRadius: 999,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-  },
-  packageBadgeLabel: {
-    color: designTheme.primaryForeground,
-    fontFamily: designFonts.medium,
-    fontSize: 11,
-  },
-  packagePrice: {
-    color: designTheme.foreground,
-    fontFamily: designFonts.semibold,
-    fontSize: 22,
-  },
-  packageDescription: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 13,
-    lineHeight: 18,
-  },
-  disabled: {
-    opacity: 0.5,
-  },
-  pressed: {
-    opacity: 0.72,
-  },
-});

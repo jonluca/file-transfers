@@ -1,6 +1,6 @@
 import { router } from "expo-router";
 import React from "react";
-import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Alert, Pressable, ScrollView, Text, View } from "react-native";
 import {
   Check,
   Download,
@@ -26,6 +26,12 @@ import {
 } from "@/lib/file-transfer";
 import { getTabScreenTopInset } from "@/lib/design/tab-screen-insets";
 import { useRecentTransfers } from "@/store";
+
+const fontStyles = {
+  regular: { fontFamily: designFonts.regular },
+  medium: { fontFamily: designFonts.medium },
+  semibold: { fontFamily: designFonts.semibold },
+} as const;
 
 function FilePreviewIcon({ type }: { type: string }) {
   if (type.startsWith("image/")) {
@@ -152,77 +158,96 @@ function HistoryRow({ entry }: { entry: TransferHistoryEntry }) {
       : `${entry.direction === "send" ? "Sent" : "Received"} ${fileLabel} • ${formatBytes(entry.totalBytes)}`;
 
   return (
-    <View style={styles.row}>
-      <View style={styles.rowHeader}>
-        <View style={styles.rowLead}>
-          <View style={styles.iconWell}>
+    <View className={"gap-3 border-b border-[#e5e7eb] px-[18px] py-4"}>
+      <View className={"flex-row items-start justify-between"}>
+        <View className={"flex-1 flex-row gap-3.5"}>
+          <View className={"mt-0.5 h-10 w-10 items-center justify-center rounded-full bg-[#f3f4f6]"}>
             <DirectionIcon color={designTheme.mutedForeground} size={18} strokeWidth={2} />
           </View>
-          <View style={styles.copy}>
-            <Text numberOfLines={1} style={styles.deviceName}>
+          <View className={"flex-1 gap-0.5"}>
+            <Text className={"text-base text-[#030213]"} numberOfLines={1} style={fontStyles.medium}>
               {entry.deviceName}
             </Text>
-            <Text numberOfLines={1} style={styles.fileLabel}>
+            <Text className={"text-sm leading-5 text-[#6b7280]"} numberOfLines={1} style={fontStyles.regular}>
               {summaryLabel}
             </Text>
-            <Text style={styles.timeLabel}>{formatRelativeTime(entry.updatedAt)}</Text>
+            <Text className={"mt-0.5 text-xs text-[#6b7280]"} style={fontStyles.regular}>
+              {formatRelativeTime(entry.updatedAt)}
+            </Text>
           </View>
         </View>
 
-        <View style={[styles.statusIconWrap, { backgroundColor: statusTone.backgroundColor }]}>{statusTone.icon}</View>
+        <View
+          className={"ml-3 h-[26px] w-[26px] items-center justify-center rounded-full"}
+          style={{ backgroundColor: statusTone.backgroundColor }}
+        >
+          {statusTone.icon}
+        </View>
       </View>
 
-      <View style={styles.filePreviewRow}>
-        <View style={styles.filePreviewIcon}>
+      <View className={"flex-row items-center gap-2.5 rounded-[14px] bg-[#f9fafb] px-3 py-2.5"}>
+        <View className={"h-8 w-8 items-center justify-center rounded-[10px] bg-white"}>
           <FilePreviewIcon type={firstFile?.mimeType ?? "application/octet-stream"} />
         </View>
-        <Text numberOfLines={1} style={styles.filePreviewLabel}>
+        <Text className={"flex-1 text-sm text-[#030213]"} numberOfLines={1} style={fontStyles.medium}>
           {fileLabel}
         </Text>
       </View>
 
       {entry.direction === "receive" && entry.status === "completed" && firstFile ? (
-        <View style={styles.actionRow}>
+        <View className={"flex-row gap-2.5"}>
           <Pressable
+            className={
+              "min-h-[42px] flex-1 flex-row items-center justify-center gap-2 rounded-full border border-[#2563eb] bg-[#2563eb] px-[14px] py-2.5"
+            }
             onPress={() => {
               void handleOpenReceivedFile(firstFile);
             }}
-            style={({ pressed }) => [styles.actionButton, styles.actionButtonPrimary, pressed ? styles.pressed : null]}
+            style={({ pressed }) => ({ opacity: pressed ? 0.72 : 1 })}
           >
             <FolderOpen color={designTheme.primaryForeground} size={16} strokeWidth={2.2} />
-            <Text style={[styles.actionButtonLabel, styles.actionButtonLabelPrimary]}>Open</Text>
+            <Text className={"text-sm text-white"} style={fontStyles.semibold}>
+              Open
+            </Text>
           </Pressable>
           <Pressable
+            className={
+              "min-h-[42px] flex-1 flex-row items-center justify-center gap-2 rounded-full border border-[rgba(37,99,235,0.14)] bg-[rgba(37,99,235,0.08)] px-[14px] py-2.5"
+            }
             onPress={() => {
               void handleShareReceivedFile(firstFile);
             }}
-            style={({ pressed }) => [
-              styles.actionButton,
-              styles.actionButtonSecondary,
-              pressed ? styles.pressed : null,
-            ]}
+            style={({ pressed }) => ({ opacity: pressed ? 0.72 : 1 })}
           >
             <Share2 color={designTheme.primary} size={16} strokeWidth={2.2} />
-            <Text style={[styles.actionButtonLabel, styles.actionButtonLabelSecondary]}>Share</Text>
+            <Text className={"text-sm text-[#2563eb]"} style={fontStyles.semibold}>
+              Share
+            </Text>
           </Pressable>
         </View>
       ) : null}
 
       {entry.status === "failed" ? (
         <Pressable
+          className={"self-start rounded-full bg-[#f3f4f6] px-3 py-2"}
           onPress={() => router.navigate("/")}
-          style={({ pressed }) => [styles.rowButton, pressed ? styles.pressed : null]}
+          style={({ pressed }) => ({ opacity: pressed ? 0.72 : 1 })}
         >
-          <Text style={styles.rowButtonLabel}>Retry</Text>
+          <Text className={"text-[13px] text-[#2563eb]"} style={fontStyles.medium}>
+            Retry
+          </Text>
         </Pressable>
       ) : null}
 
       {entry.status === "paused" ? (
         <Pressable
+          className={"self-start rounded-full bg-[#f3f4f6] px-3 py-2"}
           onPress={() => router.navigate("/")}
-          style={({ pressed }) => [styles.rowButton, pressed ? styles.pressed : null]}
+          style={({ pressed }) => ({ opacity: pressed ? 0.72 : 1 })}
         >
-          <Text style={styles.rowButtonLabel}>Resume</Text>
+          <Text className={"text-[13px] text-[#2563eb]"} style={fontStyles.medium}>
+            Resume
+          </Text>
         </Pressable>
       ) : null}
     </View>
@@ -236,24 +261,32 @@ export default function HistoryScreen() {
 
   if (recentTransfers.length === 0) {
     return (
-      <View style={[styles.root, styles.emptyRoot, { paddingTop: topInset }]}>
-        <View style={styles.emptyIconWrap}>
+      <View className={"flex-1 items-center justify-center bg-white px-6 pb-6"} style={{ paddingTop: topInset }}>
+        <View className={"mb-6 h-[88px] w-[88px] items-center justify-center rounded-full bg-[#f3f4f6]"}>
           <File color={designTheme.mutedForeground} size={36} strokeWidth={1.8} />
         </View>
-        <Text style={styles.emptyTitle}>No transfers yet</Text>
-        <Text style={styles.emptyCopy}>Your sent and received files will appear here</Text>
+        <Text className={"mb-2 text-2xl text-[#030213]"} style={fontStyles.semibold}>
+          No transfers yet
+        </Text>
+        <Text className={"text-center text-[15px] leading-[22px] text-[#6b7280]"} style={fontStyles.regular}>
+          Your sent and received files will appear here
+        </Text>
       </View>
     );
   }
 
   return (
     <ScrollView
-      contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 24) + 16 }}
+      contentContainerClassName={"pb-10"}
       showsVerticalScrollIndicator={false}
-      style={[styles.root, { paddingTop: topInset + 16 }]}
+      className={"flex-1 bg-white px-6"}
+      contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 24) + 16 }}
+      style={{ paddingTop: topInset + 16 }}
     >
-      <Text style={styles.title}>History</Text>
-      <View style={styles.list}>
+      <Text className={"mb-4 text-2xl text-[#030213]"} style={fontStyles.semibold}>
+        History
+      </Text>
+      <View className={"overflow-hidden rounded-[20px] border border-[#e5e7eb] bg-white"}>
         {recentTransfers.map((entry) => (
           <HistoryRow key={entry.id} entry={entry} />
         ))}
@@ -261,178 +294,3 @@ export default function HistoryScreen() {
     </ScrollView>
   );
 }
-
-const styles = StyleSheet.create({
-  root: {
-    backgroundColor: designTheme.background,
-    flex: 1,
-    paddingHorizontal: 24,
-  },
-  emptyRoot: {
-    alignItems: "center",
-    justifyContent: "center",
-    paddingBottom: 24,
-  },
-  emptyIconWrap: {
-    alignItems: "center",
-    backgroundColor: designTheme.secondary,
-    borderRadius: 999,
-    height: 88,
-    justifyContent: "center",
-    marginBottom: 24,
-    width: 88,
-  },
-  emptyTitle: {
-    color: designTheme.foreground,
-    fontFamily: designFonts.semibold,
-    fontSize: 24,
-    marginBottom: 8,
-  },
-  emptyCopy: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 15,
-    lineHeight: 22,
-    textAlign: "center",
-  },
-  title: {
-    color: designTheme.foreground,
-    fontFamily: designFonts.semibold,
-    fontSize: 24,
-    marginBottom: 16,
-  },
-  list: {
-    backgroundColor: designTheme.card,
-    borderColor: designTheme.border,
-    borderRadius: 20,
-    borderWidth: 1,
-    overflow: "hidden",
-  },
-  row: {
-    borderBottomColor: designTheme.border,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    gap: 12,
-    paddingHorizontal: 18,
-    paddingVertical: 16,
-  },
-  rowHeader: {
-    alignItems: "flex-start",
-    flexDirection: "row",
-    justifyContent: "space-between",
-  },
-  rowLead: {
-    flex: 1,
-    flexDirection: "row",
-    gap: 14,
-  },
-  iconWell: {
-    alignItems: "center",
-    backgroundColor: designTheme.secondary,
-    borderRadius: 999,
-    height: 40,
-    justifyContent: "center",
-    marginTop: 2,
-    width: 40,
-  },
-  copy: {
-    flex: 1,
-    gap: 2,
-  },
-  deviceName: {
-    color: designTheme.foreground,
-    fontFamily: designFonts.medium,
-    fontSize: 16,
-  },
-  fileLabel: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  timeLabel: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 12,
-    marginTop: 2,
-  },
-  statusIconWrap: {
-    alignItems: "center",
-    borderRadius: 999,
-    height: 26,
-    justifyContent: "center",
-    marginLeft: 12,
-    width: 26,
-  },
-  filePreviewRow: {
-    alignItems: "center",
-    backgroundColor: designTheme.muted,
-    borderRadius: 14,
-    flexDirection: "row",
-    gap: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-  },
-  filePreviewIcon: {
-    alignItems: "center",
-    backgroundColor: designTheme.card,
-    borderRadius: 10,
-    height: 32,
-    justifyContent: "center",
-    width: 32,
-  },
-  filePreviewLabel: {
-    color: designTheme.foreground,
-    flex: 1,
-    fontFamily: designFonts.medium,
-    fontSize: 14,
-  },
-  actionRow: {
-    flexDirection: "row",
-    gap: 10,
-  },
-  actionButton: {
-    alignItems: "center",
-    borderRadius: 999,
-    borderWidth: 1,
-    flex: 1,
-    flexDirection: "row",
-    gap: 8,
-    justifyContent: "center",
-    minHeight: 42,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-  },
-  actionButtonPrimary: {
-    backgroundColor: designTheme.primary,
-    borderColor: designTheme.primary,
-  },
-  actionButtonSecondary: {
-    backgroundColor: "rgba(37, 99, 235, 0.08)",
-    borderColor: "rgba(37, 99, 235, 0.14)",
-  },
-  actionButtonLabel: {
-    fontFamily: designFonts.semibold,
-    fontSize: 14,
-  },
-  actionButtonLabelPrimary: {
-    color: designTheme.primaryForeground,
-  },
-  actionButtonLabelSecondary: {
-    color: designTheme.primary,
-  },
-  rowButton: {
-    alignSelf: "flex-start",
-    backgroundColor: designTheme.secondary,
-    borderRadius: 999,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-  },
-  rowButtonLabel: {
-    color: designTheme.primary,
-    fontFamily: designFonts.medium,
-    fontSize: 13,
-  },
-  pressed: {
-    opacity: 0.72,
-  },
-});

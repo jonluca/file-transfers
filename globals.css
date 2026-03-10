@@ -1,3 +1,6 @@
+@import "tailwindcss";
+@import "uniwind";
+
 :root {
   --background: #fafafa;
   --foreground: #171717;

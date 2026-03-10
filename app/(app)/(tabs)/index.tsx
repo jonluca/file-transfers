@@ -3,19 +3,7 @@ import { useIsFocused } from "@react-navigation/native";
 import * as Burnt from "burnt";
 import { createUploadTask, type UploadProgressData } from "expo-file-system/legacy";
 import React, { startTransition, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
-import {
-  ActivityIndicator,
-  AppState,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  type StyleProp,
-  Text,
-  TextInput,
-  type TextStyle,
-  View,
-  type ViewStyle,
-} from "react-native";
+import { ActivityIndicator, AppState, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import QRCode from "react-native-qrcode-svg";
 import {
   Download,
@@ -40,6 +28,7 @@ import {
 } from "@/hooks/queries";
 import { usePremiumAccess } from "@/hooks/use-premium-access";
 import { useSession } from "@/lib/auth-client";
+import { cn } from "@/lib/cn";
 import { designFonts, designTheme } from "@/lib/design/theme";
 import {
   acceptIncomingTransferOffer,
@@ -83,6 +72,11 @@ interface HostedUploadProgressState {
 }
 
 const TRANSFER_SCREEN_DEBUG_PREFIX = "[TransferScreen]";
+const fontStyles = {
+  regular: { fontFamily: designFonts.regular },
+  medium: { fontFamily: designFonts.medium },
+  semibold: { fontFamily: designFonts.semibold },
+} as const;
 
 function showBanner({ description, title }: TransferSizeLimitNotice) {
   void Burnt.toast({
@@ -359,15 +353,17 @@ function LargeActionCard({
 }) {
   return (
     <Pressable
+      className={cn(
+        "min-h-[196px] w-full max-w-[320px] items-center justify-center gap-3.5 rounded-[20px] px-6 py-7",
+        primary ? "bg-[#2563eb]" : "bg-[#f3f4f6]",
+      )}
       onPress={onPress}
-      style={({ pressed }) => [
-        styles.actionCard,
-        primary ? styles.primaryActionCard : styles.secondaryActionCard,
-        pressed ? styles.pressed : null,
-      ]}
+      style={({ pressed }) => ({ opacity: pressed ? 0.72 : 1 })}
     >
       {icon}
-      <Text style={[styles.actionCardLabel, primary ? styles.primaryActionLabel : null]}>{label}</Text>
+      <Text className={cn("text-2xl", primary ? "text-white" : "text-[#030213]")} style={fontStyles.medium}>
+        {label}
+      </Text>
     </Pressable>
   );
 }
@@ -375,9 +371,10 @@ function LargeActionCard({
 function HeaderButton({ onPress }: { onPress: () => void }) {
   return (
     <Pressable
+      className={"min-h-9 min-w-9 items-center justify-center rounded-full bg-[#f3f4f6]"}
       onPress={onPress}
       hitSlop={12}
-      style={({ pressed }) => [styles.iconButton, pressed ? styles.pressed : null]}
+      style={({ pressed }) => ({ opacity: pressed ? 0.72 : 1 })}
     >
       <X color={designTheme.mutedForeground} size={24} strokeWidth={2} />
     </Pressable>
@@ -389,29 +386,30 @@ function PrimaryButton({
   onPress,
   icon,
   disabled = false,
-  style,
-  labelStyle,
+  className,
+  labelClassName,
 }: {
   label: string;
   onPress: () => void;
   icon?: React.ReactNode;
   disabled?: boolean;
-  style?: StyleProp<ViewStyle>;
-  labelStyle?: StyleProp<TextStyle>;
+  className?: string;
+  labelClassName?: string;
 }) {
   return (
     <Pressable
+      className={cn(
+        "min-h-[50px] flex-row items-center justify-center gap-2 rounded-[14px] bg-[#2563eb] px-[18px]",
+        className,
+      )}
       disabled={disabled}
       onPress={onPress}
-      style={({ pressed }) => [
-        styles.primaryButton,
-        style,
-        disabled ? styles.disabled : null,
-        pressed && !disabled ? styles.pressed : null,
-      ]}
+      style={({ pressed }) => ({ opacity: disabled ? 0.5 : pressed ? 0.72 : 1 })}
     >
       {icon}
-      <Text style={[styles.primaryButtonLabel, labelStyle]}>{label}</Text>
+      <Text className={cn("text-base text-white", labelClassName)} style={fontStyles.medium}>
+        {label}
+      </Text>
     </Pressable>
   );
 }
@@ -420,22 +418,28 @@ function OutlineButton({
   label,
   onPress,
   icon,
-  style,
-  labelStyle,
+  className,
+  labelClassName,
 }: {
   label: string;
   onPress: () => void;
   icon?: React.ReactNode;
-  style?: StyleProp<ViewStyle>;
-  labelStyle?: StyleProp<TextStyle>;
+  className?: string;
+  labelClassName?: string;
 }) {
   return (
     <Pressable
+      className={cn(
+        "min-h-11 self-center flex-row items-center justify-center gap-2 rounded-[14px] bg-[#f3f4f6] px-[18px]",
+        className,
+      )}
       onPress={onPress}
-      style={({ pressed }) => [styles.outlineButton, style, pressed ? styles.pressed : null]}
+      style={({ pressed }) => ({ opacity: pressed ? 0.72 : 1 })}
     >
       {icon}
-      <Text style={[styles.outlineButtonLabel, labelStyle]}>{label}</Text>
+      <Text className={cn("text-[15px] text-[#030213]", labelClassName)} style={fontStyles.medium}>
+        {label}
+      </Text>
     </Pressable>
   );
 }
@@ -448,21 +452,24 @@ function FileRow({
   onRemove?: () => void;
 }) {
   return (
-    <View style={styles.fileRow}>
-      <View style={styles.fileIconWrap}>
+    <View className={"flex-row items-center gap-3.5 rounded-[14px] bg-[#f9fafb] p-[14px]"}>
+      <View className={"h-10 w-10 items-center justify-center rounded-xl bg-white"}>
         <MimeIcon type={file.mimeType} />
       </View>
-      <View style={styles.fileCopy}>
-        <Text numberOfLines={1} style={styles.fileName}>
+      <View className={"flex-1 gap-0.5"}>
+        <Text className={"text-[15px] text-[#030213]"} numberOfLines={1} style={fontStyles.medium}>
           {file.name}
         </Text>
-        <Text style={styles.fileMeta}>{formatBytes(file.sizeBytes)}</Text>
+        <Text className={"text-[13px] text-[#6b7280]"} style={fontStyles.regular}>
+          {formatBytes(file.sizeBytes)}
+        </Text>
       </View>
       {onRemove ? (
         <Pressable
+          className={"min-h-9 min-w-9 items-center justify-center rounded-full bg-[#f3f4f6]"}
           onPress={onRemove}
           hitSlop={12}
-          style={({ pressed }) => [styles.iconButton, pressed ? styles.pressed : null]}
+          style={({ pressed }) => ({ opacity: pressed ? 0.72 : 1 })}
         >
           <X color={designTheme.mutedForeground} size={20} strokeWidth={2} />
         </Pressable>
@@ -473,13 +480,21 @@ function FileRow({
 
 function NearbyDeviceRow({ record, onPress }: { record: DiscoveryRecord; onPress: () => void }) {
   return (
-    <Pressable onPress={onPress} style={({ pressed }) => [styles.deviceRow, pressed ? styles.pressed : null]}>
-      <View style={styles.deviceAvatar}>
+    <Pressable
+      className={"flex-row items-center gap-3 rounded-[14px] bg-[#f9fafb] p-[14px]"}
+      onPress={onPress}
+      style={({ pressed }) => ({ opacity: pressed ? 0.72 : 1 })}
+    >
+      <View className={"h-10 w-10 items-center justify-center rounded-full bg-white"}>
         <Smartphone color={designTheme.secondaryForeground} size={18} strokeWidth={2} />
       </View>
-      <View style={styles.deviceCopy}>
-        <Text style={styles.deviceName}>{record.deviceName}</Text>
-        <Text style={styles.deviceMeta}>Ready to receive files</Text>
+      <View className={"flex-1 gap-0.5"}>
+        <Text className={"text-[15px] text-[#030213]"} style={fontStyles.medium}>
+          {record.deviceName}
+        </Text>
+        <Text className={"text-[13px] text-[#6b7280]"} style={fontStyles.regular}>
+          Ready to receive files
+        </Text>
       </View>
       <Upload color={designTheme.primary} size={18} strokeWidth={2} />
     </Pressable>
@@ -488,8 +503,13 @@ function NearbyDeviceRow({ record, onPress }: { record: DiscoveryRecord; onPress
 
 function WaitingPulse({ tone = "primary" }: { tone?: "primary" | "neutral" }) {
   return (
-    <View style={styles.waitingPulseWrap}>
-      <View style={[styles.waitingPulseOuter, tone === "neutral" ? styles.waitingPulseOuterNeutral : null]}>
+    <View className={"mb-6 items-center justify-center"}>
+      <View
+        className={cn(
+          "h-24 w-24 items-center justify-center rounded-[48px]",
+          tone === "neutral" ? "bg-[#f3f4f6]" : "bg-[rgba(37,99,235,0.08)]",
+        )}
+      >
         <ActivityIndicator
           color={tone === "primary" ? designTheme.primary : designTheme.mutedForeground}
           size={"large"}
@@ -1590,8 +1610,11 @@ export default function TransferScreen() {
 
   if (mode === "idle") {
     return (
-      <View style={[styles.root, { paddingTop: screenTopPadding, paddingBottom: compactBottomPadding }]}>
-        <View style={styles.idleWrap}>
+      <View
+        className={"flex-1 bg-white px-6"}
+        style={{ paddingBottom: compactBottomPadding, paddingTop: screenTopPadding }}
+      >
+        <View className={"flex-1 items-center justify-center gap-3.5"}>
           <LargeActionCard
             icon={<Upload color={designTheme.primaryForeground} size={48} strokeWidth={1.7} />}
             label={"Send files"}
@@ -1608,11 +1631,15 @@ export default function TransferScreen() {
             }}
           />
           {selectionError ? (
-            <View style={styles.noticeCardWrap}>
+            <View className={"w-full max-w-[320px]"}>
               <InlineNotice description={selectionError.description} title={selectionError.title} tone={"danger"} />
             </View>
           ) : null}
-          {notice ? <Text style={styles.centerNotice}>{notice}</Text> : null}
+          {notice ? (
+            <Text className={"mt-3 text-center text-[13px] leading-5 text-[#6b7280]"} style={fontStyles.regular}>
+              {notice}
+            </Text>
+          ) : null}
         </View>
       </View>
     );
@@ -1620,9 +1647,11 @@ export default function TransferScreen() {
 
   if (mode === "sending") {
     return (
-      <View style={[styles.root, { paddingTop: screenTopPadding }]}>
-        <View style={styles.topBar}>
-          <Text style={styles.sectionTitle}>Ready to send</Text>
+      <View className={"flex-1 bg-white px-6"} style={{ paddingTop: screenTopPadding }}>
+        <View className={"mb-[18px] flex-row items-center justify-between border-b border-[#e5e7eb] pb-[14px]"}>
+          <Text className={"text-xl text-[#030213]"} style={fontStyles.semibold}>
+            Ready to send
+          </Text>
           <HeaderButton
             onPress={() => {
               void handleCancel();
@@ -1630,39 +1659,42 @@ export default function TransferScreen() {
           />
         </View>
 
-        <ScrollView
-          showsVerticalScrollIndicator={false}
-          contentContainerStyle={{ paddingBottom: 24 }}
-          style={styles.flex}
-        >
+        <ScrollView className={"flex-1"} contentContainerClassName={"pb-6"} showsVerticalScrollIndicator={false}>
           <ScrollView
+            className={"max-h-[280px]"}
+            contentContainerClassName={"gap-2.5"}
             nestedScrollEnabled
             showsVerticalScrollIndicator={stagedFiles.length > 3}
-            style={styles.stagedFilesList}
-            contentContainerStyle={styles.stack}
           >
             {stagedFiles.map((file, index) => (
               <FileRow key={file.id} file={file} onRemove={() => handleRemoveFile(index)} />
             ))}
           </ScrollView>
           <Pressable
+            className={"mt-4 items-center rounded-[14px] bg-[#f3f4f6] px-4 py-[14px]"}
             onPress={() => {
               void handlePickFiles(true);
             }}
-            style={({ pressed }) => [styles.addFilesButton, pressed ? styles.pressed : null]}
+            style={({ pressed }) => ({ opacity: pressed ? 0.72 : 1 })}
           >
-            <Text style={styles.addFilesLabel}>Add more files</Text>
+            <Text className={"text-[15px] text-[#030213]"} style={fontStyles.medium}>
+              Add more files
+            </Text>
           </Pressable>
           {selectionError ? (
             <InlineNotice description={selectionError.description} title={selectionError.title} tone={"danger"} />
           ) : null}
 
-          <View style={styles.discoverySection}>
-            <Text style={styles.discoveryTitle}>Choose a receiver</Text>
-            <Text style={styles.discoveryHint}>Pick a nearby device or scan its QR code.</Text>
+          <View className={"mb-[18px] mt-6 gap-1.5"}>
+            <Text className={"text-lg text-[#030213]"} style={fontStyles.semibold}>
+              Choose a receiver
+            </Text>
+            <Text className={"text-sm leading-5 text-[#6b7280]"} style={fontStyles.regular}>
+              Pick a nearby device or scan its QR code.
+            </Text>
           </View>
 
-          <View style={styles.browserShareAction}>
+          <View className={"mb-6"}>
             <OutlineButton
               label={"Scan QR code"}
               icon={<QrCode color={designTheme.primary} size={16} strokeWidth={2} />}
@@ -1671,7 +1703,7 @@ export default function TransferScreen() {
           </View>
 
           {nearbyRecords.length > 0 ? (
-            <View style={styles.stack}>
+            <View className={"gap-2.5"}>
               {nearbyRecords.map((record) => (
                 <NearbyDeviceRow
                   key={`${record.sessionId}-${record.method}`}
@@ -1681,18 +1713,22 @@ export default function TransferScreen() {
               ))}
             </View>
           ) : (
-            <View style={styles.emptySearchState}>
-              <View style={styles.emptySearchIcon}>
+            <View className={"items-center justify-center py-8"}>
+              <View className={"mb-4 h-16 w-16 items-center justify-center rounded-full bg-[#f3f4f6]"}>
                 <ActivityIndicator color={designTheme.mutedForeground} size={"small"} />
               </View>
-              <Text style={styles.emptySearchLabel}>Looking for receivers...</Text>
+              <Text className={"text-[15px] text-[#6b7280]"} style={fontStyles.regular}>
+                Looking for receivers...
+              </Text>
             </View>
           )}
 
-          <View style={styles.shareOptionCard}>
-            <View style={styles.hostedHeader}>
-              <Text style={styles.discoveryTitle}>Share over local WiFi</Text>
-              <Text style={styles.discoveryHint}>
+          <View className={"mb-3 mt-6 gap-3.5 rounded-[20px] border border-[#e5e7eb] bg-white p-[18px]"}>
+            <View className={"gap-1.5"}>
+              <Text className={"text-lg text-[#030213]"} style={fontStyles.semibold}>
+                Share over local WiFi
+              </Text>
+              <Text className={"text-sm leading-5 text-[#6b7280]"} style={fontStyles.regular}>
                 Open a temporary browser page on this device for anyone on the same WiFi network.
               </Text>
             </View>
@@ -1705,22 +1741,30 @@ export default function TransferScreen() {
             />
           </View>
 
-          <View style={styles.hostedCard}>
-            <View style={styles.hostedHeader}>
-              <Text style={styles.discoveryTitle}>Hosted URL</Text>
-              <Text style={styles.discoveryHint}>Upload these files for 30 days and share a download link.</Text>
+          <View className={"mb-3 gap-3.5 rounded-[20px] border border-[#e5e7eb] bg-white p-[18px]"}>
+            <View className={"gap-1.5"}>
+              <Text className={"text-lg text-[#030213]"} style={fontStyles.semibold}>
+                Hosted URL
+              </Text>
+              <Text className={"text-sm leading-5 text-[#6b7280]"} style={fontStyles.regular}>
+                Upload these files for 30 days and share a download link.
+              </Text>
             </View>
 
             {hostedUploadProgress ? (
-              <View style={styles.hostedProgressCard}>
-                <View style={styles.hostedProgressHeader}>
-                  <Text style={styles.hostedProgressTitle}>{hostedUploadProgress.detail}</Text>
-                  <Text style={styles.hostedProgressPercent}>{hostedUploadPercent}%</Text>
+              <View className={"rounded-2xl border border-[#e5e7eb] bg-[#f9fafb] p-[14px]"}>
+                <View className={"flex-row items-center justify-between gap-3"}>
+                  <Text className={"flex-1 text-sm text-[#030213]"} style={fontStyles.medium}>
+                    {hostedUploadProgress.detail}
+                  </Text>
+                  <Text className={"text-[13px] text-[#6b7280]"} style={fontStyles.medium}>
+                    {hostedUploadPercent}%
+                  </Text>
                 </View>
-                <View style={styles.progressTrack}>
+                <View className={"mb-2 mt-3 h-1.5 overflow-hidden rounded-full bg-[#f3f4f6]"}>
                   <View
                     style={[
-                      styles.progressFill,
+                      { borderRadius: 999, height: "100%" },
                       {
                         width: `${Math.max(0, Math.min(hostedUploadPercent, 100))}%`,
                         backgroundColor: hostedUploadPercent >= 100 ? designTheme.success : designTheme.primary,
@@ -1729,9 +1773,11 @@ export default function TransferScreen() {
                   />
                 </View>
                 {hostedUploadProgress.currentFileName ? (
-                  <Text style={styles.hostedProgressFileName}>{hostedUploadProgress.currentFileName}</Text>
+                  <Text className={"mt-0.5 text-sm text-[#030213]"} style={fontStyles.medium}>
+                    {hostedUploadProgress.currentFileName}
+                  </Text>
                 ) : null}
-                <Text style={styles.hostedProgressMeta}>
+                <Text className={"text-[13px] leading-5 text-[#6b7280]"} style={fontStyles.regular}>
                   {formatBytes(hostedUploadProgress.bytesUploaded)} of {formatBytes(hostedUploadProgress.totalBytes)} ·
                   File {Math.max(1, hostedUploadProgress.currentFileIndex)} of {hostedUploadProgress.totalFiles}
                 </Text>
@@ -1741,27 +1787,30 @@ export default function TransferScreen() {
             {isSignedIn && premiumAccess.isPremium ? (
               <>
                 <TextInput
+                  className={
+                    "min-h-[50px] rounded-[14px] border border-[#e5e7eb] bg-[#f3f4f6] px-[14px] text-[15px] text-[#030213]"
+                  }
                   keyboardType={"number-pad"}
                   maxLength={6}
                   onChangeText={setHostedPasscode}
                   placeholder={"Optional shared 6-digit passcode"}
                   placeholderTextColor={designTheme.mutedForeground}
-                  style={styles.hostedInput}
+                  style={fontStyles.medium}
                   value={hostedPasscode}
                 />
                 <PrimaryButton
+                  className={"self-stretch"}
                   disabled={isCreatingHostedLinks}
                   icon={isCreatingHostedLinks ? <ActivityIndicator color={designTheme.primaryForeground} /> : undefined}
                   label={isCreatingHostedLinks ? "Creating hosted URLs..." : "Create hosted URLs"}
                   onPress={() => {
                     void handleStartHostedShare();
                   }}
-                  style={styles.hostedPrimaryButton}
                 />
               </>
             ) : (
               <>
-                <Text style={styles.hostedGateCopy}>
+                <Text className={"text-sm leading-[21px] text-[#6b7280]"} style={fontStyles.regular}>
                   {isSignedIn
                     ? `Upgrade to ${FILE_TRANSFERS_PRO_NAME} in Settings to create hosted links.`
                     : `Sign in from Settings, then upgrade to ${FILE_TRANSFERS_PRO_NAME} to create hosted links.`}
@@ -1779,11 +1828,18 @@ export default function TransferScreen() {
           </View>
         </ScrollView>
 
-        <View style={[styles.footerArea, { paddingBottom: footerBottomPadding }]}>
-          <Text style={styles.footerMeta}>
+        <View
+          className={"gap-3 border-t border-[#e5e7eb] pb-3 pt-[14px]"}
+          style={{ paddingBottom: footerBottomPadding }}
+        >
+          <Text className={"text-center text-[13px] text-[#6b7280]"} style={fontStyles.regular}>
             {stagedFiles.length} file{stagedFiles.length === 1 ? "" : "s"} · {formatBytes(totalStagedBytes)}
           </Text>
-          {notice ? <Text style={styles.footerNotice}>{notice}</Text> : null}
+          {notice ? (
+            <Text className={"text-center text-[13px] leading-[18px] text-[#6b7280]"} style={fontStyles.regular}>
+              {notice}
+            </Text>
+          ) : null}
         </View>
       </View>
     );
@@ -1791,18 +1847,21 @@ export default function TransferScreen() {
 
   if (mode === "waiting") {
     return (
-      <View style={[styles.root, { paddingTop: screenTopPadding, paddingBottom: regularBottomPadding }]}>
-        <View style={styles.centerWrap}>
+      <View
+        className={"flex-1 bg-white px-6"}
+        style={{ paddingBottom: regularBottomPadding, paddingTop: screenTopPadding }}
+      >
+        <View className={"flex-1 items-center justify-center"}>
           <WaitingPulse />
-          <Text style={styles.centerTitle}>
+          <Text className={"mb-2 text-center text-[28px] text-[#030213]"} style={fontStyles.semibold}>
             {activeSendSession?.awaitingReceiverResponse ? "Waiting for receiver" : "Preparing transfer"}
           </Text>
-          <Text style={styles.centerSubtitle}>
+          <Text className={"mb-4 text-center text-[15px] leading-[22px] text-[#6b7280]"} style={fontStyles.regular}>
             {activeSendSession?.awaitingReceiverResponse
               ? `${activeSendSession.peerDeviceName ?? "Nearby device"} needs to accept this transfer.`
               : (currentProgress?.detail ?? "Connecting to the receiver.")}
           </Text>
-          <Text style={styles.centerMeta}>
+          <Text className={"mb-6 text-[13px] text-[#6b7280]"} style={fontStyles.regular}>
             {stagedFiles.length} file{stagedFiles.length === 1 ? "" : "s"} · {formatBytes(totalStagedBytes)}
           </Text>
           <OutlineButton
@@ -1811,7 +1870,11 @@ export default function TransferScreen() {
               void handleCancel();
             }}
           />
-          {notice ? <Text style={styles.centerNotice}>{notice}</Text> : null}
+          {notice ? (
+            <Text className={"mt-3 text-center text-[13px] leading-5 text-[#6b7280]"} style={fontStyles.regular}>
+              {notice}
+            </Text>
+          ) : null}
         </View>
       </View>
     );
@@ -1820,53 +1883,66 @@ export default function TransferScreen() {
   if (mode === "receiving") {
     if (incomingOffer && activeReceiveSession?.status === "waiting") {
       return (
-        <View style={[styles.root, { paddingTop: screenTopPadding, paddingBottom: regularBottomPadding }]}>
-          <View style={styles.centerWrap}>
-            <View style={styles.transferAvatar}>
+        <View
+          className={"flex-1 bg-white px-6"}
+          style={{ paddingBottom: regularBottomPadding, paddingTop: screenTopPadding }}
+        >
+          <View className={"flex-1 items-center justify-center"}>
+            <View className={"mb-5 h-[72px] w-[72px] items-center justify-center rounded-full bg-[#f3f4f6]"}>
               <Smartphone color={designTheme.secondaryForeground} size={30} strokeWidth={1.8} />
             </View>
 
-            <Text style={styles.centerTitle}>{incomingOffer.senderDeviceName}</Text>
-            <Text style={styles.centerSubtitle}>wants to send files to this device</Text>
-            <Text style={styles.centerMeta}>
+            <Text className={"mb-2 text-center text-[28px] text-[#030213]"} style={fontStyles.semibold}>
+              {incomingOffer.senderDeviceName}
+            </Text>
+            <Text className={"mb-4 text-center text-[15px] leading-[22px] text-[#6b7280]"} style={fontStyles.regular}>
+              wants to send files to this device
+            </Text>
+            <Text className={"mb-6 text-[13px] text-[#6b7280]"} style={fontStyles.regular}>
               {incomingOffer.fileCount} file{incomingOffer.fileCount === 1 ? "" : "s"} ·{" "}
               {formatBytes(incomingOffer.totalBytes)}
             </Text>
 
-            <View style={styles.approvalActions}>
-              <View style={styles.approvalAction}>
+            <View className={"mt-2 w-full max-w-[320px] flex-row gap-3"}>
+              <View className={"flex-1"}>
                 <OutlineButton
+                  className={"min-h-[50px] w-full"}
                   label={"Decline"}
                   icon={<X color={designTheme.foreground} size={18} strokeWidth={2} />}
-                  labelStyle={styles.approvalActionLabel}
+                  labelClassName={"text-base"}
                   onPress={() => {
                     void handleDeclineIncomingOffer();
                   }}
-                  style={styles.approvalActionButton}
                 />
               </View>
-              <View style={styles.approvalAction}>
+              <View className={"flex-1"}>
                 <PrimaryButton
+                  className={"min-h-[50px] w-full"}
                   label={"Accept"}
                   icon={<Download color={designTheme.primaryForeground} size={18} strokeWidth={2} />}
-                  labelStyle={styles.approvalActionLabel}
+                  labelClassName={"text-base"}
                   onPress={() => {
                     void handleAcceptIncomingOffer();
                   }}
-                  style={styles.approvalActionButton}
                 />
               </View>
             </View>
-            {notice ? <Text style={styles.centerNotice}>{notice}</Text> : null}
+            {notice ? (
+              <Text className={"mt-3 text-center text-[13px] leading-5 text-[#6b7280]"} style={fontStyles.regular}>
+                {notice}
+              </Text>
+            ) : null}
           </View>
         </View>
       );
     }
 
     return (
-      <View style={[styles.root, { paddingTop: screenTopPadding }]}>
-        <View style={styles.topBar}>
-          <Text style={styles.sectionTitle}>Ready to receive</Text>
+      <View className={"flex-1 bg-white px-6"} style={{ paddingTop: screenTopPadding }}>
+        <View className={"mb-[18px] flex-row items-center justify-between border-b border-[#e5e7eb] pb-[14px]"}>
+          <Text className={"text-xl text-[#030213]"} style={fontStyles.semibold}>
+            Ready to receive
+          </Text>
           <HeaderButton
             onPress={() => {
               void handleCancel();
@@ -1874,43 +1950,52 @@ export default function TransferScreen() {
           />
         </View>
 
-        <ScrollView
-          showsVerticalScrollIndicator={false}
-          contentContainerStyle={{ paddingBottom: 24 }}
-          style={styles.flex}
-        >
-          <View style={styles.discoverySection}>
-            <Text style={styles.discoveryTitle}>{deviceName}</Text>
-            <Text style={styles.discoveryHint}>Senders can choose this device from nearby discovery or with QR.</Text>
+        <ScrollView className={"flex-1"} contentContainerClassName={"pb-6"} showsVerticalScrollIndicator={false}>
+          <View className={"mb-[18px] mt-6 gap-1.5"}>
+            <Text className={"text-lg text-[#030213]"} style={fontStyles.semibold}>
+              {deviceName}
+            </Text>
+            <Text className={"text-sm leading-5 text-[#6b7280]"} style={fontStyles.regular}>
+              Senders can choose this device from nearby discovery or with QR.
+            </Text>
           </View>
 
-          <View style={styles.emptySearchState}>
-            <View style={styles.emptySearchIcon}>
+          <View className={"items-center justify-center py-8"}>
+            <View className={"mb-4 h-16 w-16 items-center justify-center rounded-full bg-[#f3f4f6]"}>
               <ActivityIndicator color={designTheme.primary} size={"small"} />
             </View>
-            <Text style={styles.emptySearchLabel}>Listening for incoming transfers...</Text>
+            <Text className={"text-[15px] text-[#6b7280]"} style={fontStyles.regular}>
+              Listening for incoming transfers...
+            </Text>
           </View>
 
           {canShowReceiverQr ? (
             <>
               <Pressable
+                className={"mt-4 px-3 py-2"}
                 onPress={() => setShowQrCode((current) => !current)}
-                style={({ pressed }) => [styles.textButton, pressed ? styles.pressed : null]}
+                style={({ pressed }) => ({ opacity: pressed ? 0.72 : 1 })}
               >
-                <View style={styles.textButtonContent}>
+                <View className={"flex-row items-center gap-2"}>
                   <QrCode color={designTheme.primary} size={16} strokeWidth={2} />
-                  <Text style={styles.textButtonLabel}>{showQrCode ? "Hide QR code" : "Show QR code"}</Text>
+                  <Text className={"text-[15px] text-[#2563eb]"} style={fontStyles.medium}>
+                    {showQrCode ? "Hide QR code" : "Show QR code"}
+                  </Text>
                 </View>
               </Pressable>
               {showQrCode ? (
-                <View style={styles.qrCard}>
+                <View className={"mt-3 items-center rounded-[18px] border border-[#e5e7eb] bg-[#f9fafb] p-4"}>
                   <QRCode value={activeReceiveSession?.qrPayload ?? ""} size={172} color={designTheme.foreground} />
                 </View>
               ) : null}
             </>
           ) : null}
 
-          {notice ? <Text style={styles.receivingNotice}>{notice}</Text> : null}
+          {notice ? (
+            <Text className={"mt-4 text-center text-[13px] leading-5 text-[#6b7280]"} style={fontStyles.regular}>
+              {notice}
+            </Text>
+          ) : null}
         </ScrollView>
         <View style={{ paddingBottom: bottomLinkPadding }} />
       </View>
@@ -1919,9 +2004,11 @@ export default function TransferScreen() {
 
   if (mode === "sharing" && activeHttpShareSession) {
     return (
-      <View style={[styles.root, { paddingTop: screenTopPadding }]}>
-        <View style={styles.topBar}>
-          <Text style={styles.sectionTitle}>Sharing in browser</Text>
+      <View className={"flex-1 bg-white px-6"} style={{ paddingTop: screenTopPadding }}>
+        <View className={"mb-[18px] flex-row items-center justify-between border-b border-[#e5e7eb] pb-[14px]"}>
+          <Text className={"text-xl text-[#030213]"} style={fontStyles.semibold}>
+            Sharing in browser
+          </Text>
           <HeaderButton
             onPress={() => {
               void handleCancel();
@@ -1929,60 +2016,77 @@ export default function TransferScreen() {
           />
         </View>
 
-        <ScrollView
-          showsVerticalScrollIndicator={false}
-          contentContainerStyle={{ paddingBottom: 24 }}
-          style={styles.flex}
-        >
-          <View style={styles.discoverySection}>
-            <Text style={styles.discoveryTitle}>{deviceName}</Text>
-            <Text style={styles.discoveryHint}>
+        <ScrollView className={"flex-1"} contentContainerClassName={"pb-6"} showsVerticalScrollIndicator={false}>
+          <View className={"mb-[18px] mt-6 gap-1.5"}>
+            <Text className={"text-lg text-[#030213]"} style={fontStyles.semibold}>
+              {deviceName}
+            </Text>
+            <Text className={"text-sm leading-5 text-[#6b7280]"} style={fontStyles.regular}>
               Open this QR code or URL from another device on the same WiFi network.
             </Text>
           </View>
 
-          <View style={styles.qrCard}>
+          <View className={"items-center rounded-[18px] border border-[#e5e7eb] bg-[#f9fafb] p-4"}>
             <QRCode value={activeHttpShareSession.qrValue} size={172} color={designTheme.foreground} />
           </View>
 
-          <View style={styles.shareCard}>
-            <Text style={styles.shareCardTitle}>Share URL</Text>
-            <Text selectable style={styles.shareUrlValue}>
+          <View className={"mt-5 gap-3 rounded-[18px] border border-[#e5e7eb] bg-[#f9fafb] p-4"}>
+            <Text className={"text-base text-[#030213]"} style={fontStyles.semibold}>
+              Share URL
+            </Text>
+            <Text className={"text-sm leading-[21px] text-[#030213]"} selectable style={fontStyles.medium}>
               {activeHttpShareSession.shareUrl}
             </Text>
-            <View style={styles.shareMetaRow}>
-              <Text style={styles.shareMetaLabel}>Files</Text>
-              <Text style={styles.shareMetaValue}>
+            <View className={"flex-row justify-between gap-3"}>
+              <Text className={"text-[13px] text-[#6b7280]"} style={fontStyles.regular}>
+                Files
+              </Text>
+              <Text className={"flex-1 text-right text-[13px] text-[#030213]"} style={fontStyles.medium}>
                 {activeHttpShareSession.files.length} file{activeHttpShareSession.files.length === 1 ? "" : "s"}
               </Text>
             </View>
-            <View style={styles.shareMetaRow}>
-              <Text style={styles.shareMetaLabel}>Total size</Text>
-              <Text style={styles.shareMetaValue}>{formatBytes(activeHttpShareSession.totalBytes)}</Text>
+            <View className={"flex-row justify-between gap-3"}>
+              <Text className={"text-[13px] text-[#6b7280]"} style={fontStyles.regular}>
+                Total size
+              </Text>
+              <Text className={"flex-1 text-right text-[13px] text-[#030213]"} style={fontStyles.medium}>
+                {formatBytes(activeHttpShareSession.totalBytes)}
+              </Text>
             </View>
           </View>
 
-          <View style={styles.discoverySection}>
-            <Text style={styles.discoveryTitle}>Files</Text>
-            <Text style={styles.discoveryHint}>
+          <View className={"mb-[18px] mt-6 gap-1.5"}>
+            <Text className={"text-lg text-[#030213]"} style={fontStyles.semibold}>
+              Files
+            </Text>
+            <Text className={"text-sm leading-5 text-[#6b7280]"} style={fontStyles.regular}>
               These files stay available only while the app is active on this screen.
             </Text>
           </View>
 
-          <View style={styles.stack}>
+          <View className={"gap-2.5"}>
             {activeHttpShareSession.files.map((file) => (
               <FileRow key={file.id} file={file} />
             ))}
           </View>
 
           {activeHttpShareSession.detail ? (
-            <Text style={styles.receivingNotice}>{activeHttpShareSession.detail}</Text>
+            <Text className={"mt-4 text-center text-[13px] leading-5 text-[#6b7280]"} style={fontStyles.regular}>
+              {activeHttpShareSession.detail}
+            </Text>
           ) : null}
-          {notice ? <Text style={styles.receivingNotice}>{notice}</Text> : null}
+          {notice ? (
+            <Text className={"mt-4 text-center text-[13px] leading-5 text-[#6b7280]"} style={fontStyles.regular}>
+              {notice}
+            </Text>
+          ) : null}
         </ScrollView>
 
-        <View style={[styles.footerArea, { paddingBottom: footerBottomPadding }]}>
-          <Text style={styles.footerMeta}>
+        <View
+          className={"gap-3 border-t border-[#e5e7eb] pb-3 pt-[14px]"}
+          style={{ paddingBottom: footerBottomPadding }}
+        >
+          <Text className={"text-center text-[13px] text-[#6b7280]"} style={fontStyles.regular}>
             {activeHttpShareSession.files.length} file{activeHttpShareSession.files.length === 1 ? "" : "s"} ·{" "}
             {formatBytes(activeHttpShareSession.totalBytes)}
           </Text>
@@ -1999,18 +2103,27 @@ export default function TransferScreen() {
   }
 
   return (
-    <View style={[styles.root, { paddingTop: screenTopPadding, paddingBottom: roomyBottomPadding }]}>
-      <View style={styles.transferWrap}>
-        <View style={styles.transferAvatar}>
-          <Text style={styles.transferAvatarLabel}>{currentTransferName.charAt(0).toUpperCase()}</Text>
+    <View
+      className={"flex-1 bg-white px-6"}
+      style={{ paddingBottom: roomyBottomPadding, paddingTop: screenTopPadding }}
+    >
+      <View className={"flex-1 items-center justify-center"}>
+        <View className={"mb-5 h-[72px] w-[72px] items-center justify-center rounded-full bg-[#f3f4f6]"}>
+          <Text className={"text-[28px] text-[#4b5563]"} style={fontStyles.semibold}>
+            {currentTransferName.charAt(0).toUpperCase()}
+          </Text>
         </View>
-        <Text style={styles.transferTitle}>{transferTitle}</Text>
-        <Text style={styles.transferSubtitle}>{currentTransferName}</Text>
-        <View style={styles.progressWrap}>
-          <View style={styles.progressTrack}>
+        <Text className={"mb-2 text-center text-[28px] text-[#030213]"} style={fontStyles.semibold}>
+          {transferTitle}
+        </Text>
+        <Text className={"mb-6 text-center text-[15px] text-[#6b7280]"} style={fontStyles.regular}>
+          {currentTransferName}
+        </Text>
+        <View className={"w-full max-w-[320px]"}>
+          <View className={"mb-2 h-1.5 overflow-hidden rounded-full bg-[#f3f4f6]"}>
             <View
               style={[
-                styles.progressFill,
+                { borderRadius: 999, height: "100%" },
                 {
                   width: `${Math.max(0, Math.min(progressPercent, 100))}%`,
                   backgroundColor: progressPercent >= 100 ? designTheme.success : designTheme.primary,
@@ -2018,25 +2131,45 @@ export default function TransferScreen() {
               ]}
             />
           </View>
-          <Text style={styles.progressLabel}>{progressPercent}%</Text>
+          <Text className={"text-center text-[13px] text-[#6b7280]"} style={fontStyles.regular}>
+            {progressPercent}%
+          </Text>
         </View>
         {shouldShowTransferMetrics ? (
-          <View style={styles.transferMetricsRow}>
-            <View style={styles.transferMetricCard}>
-              <Text style={styles.transferMetricLabel}>Speed</Text>
-              <Text style={styles.transferMetricValue}>{transferSpeedLabel}</Text>
+          <View className={"mt-[14px] flex-row gap-2.5 w-full max-w-[320px]"}>
+            <View className={"flex-1 gap-1 rounded-[14px] border border-[#e5e7eb] bg-[#f9fafb] px-[14px] py-3"}>
+              <Text className={"text-xs uppercase text-[#6b7280]"} style={fontStyles.regular}>
+                Speed
+              </Text>
+              <Text className={"text-[15px] text-[#030213]"} style={fontStyles.medium}>
+                {transferSpeedLabel}
+              </Text>
             </View>
-            <View style={styles.transferMetricCard}>
-              <Text style={styles.transferMetricLabel}>ETA</Text>
-              <Text style={styles.transferMetricValue}>{transferEtaLabel}</Text>
+            <View className={"flex-1 gap-1 rounded-[14px] border border-[#e5e7eb] bg-[#f9fafb] px-[14px] py-3"}>
+              <Text className={"text-xs uppercase text-[#6b7280]"} style={fontStyles.regular}>
+                ETA
+              </Text>
+              <Text className={"text-[15px] text-[#030213]"} style={fontStyles.medium}>
+                {transferEtaLabel}
+              </Text>
             </View>
           </View>
         ) : null}
         {currentProgress?.currentFileName ? (
-          <Text style={styles.transferFileName}>{currentProgress.currentFileName}</Text>
+          <Text className={"mt-4 text-center text-sm leading-5 text-[#030213]"} style={fontStyles.regular}>
+            {currentProgress.currentFileName}
+          </Text>
         ) : null}
-        {currentProgress?.detail ? <Text style={styles.transferDetail}>{currentProgress.detail}</Text> : null}
-        {notice ? <Text style={styles.centerNotice}>{notice}</Text> : null}
+        {currentProgress?.detail ? (
+          <Text className={"mt-2.5 text-center text-[13px] leading-5 text-[#6b7280]"} style={fontStyles.regular}>
+            {currentProgress.detail}
+          </Text>
+        ) : null}
+        {notice ? (
+          <Text className={"mt-3 text-center text-[13px] leading-5 text-[#6b7280]"} style={fontStyles.regular}>
+            {notice}
+          </Text>
+        ) : null}
         {progressPercent < 100 && activeSendSession && activeSendSession.status !== "transferring" ? (
           <OutlineButton
             label={"Cancel"}
@@ -2049,568 +2182,3 @@ export default function TransferScreen() {
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  root: {
-    backgroundColor: designTheme.background,
-    flex: 1,
-    paddingHorizontal: 24,
-  },
-  flex: {
-    flex: 1,
-  },
-  stack: {
-    gap: 10,
-  },
-  stagedFilesList: {
-    maxHeight: 280,
-  },
-  noticeCardWrap: {
-    maxWidth: 320,
-    width: "100%",
-  },
-  idleWrap: {
-    alignItems: "center",
-    flex: 1,
-    gap: 14,
-    justifyContent: "center",
-  },
-  actionCard: {
-    alignItems: "center",
-    borderRadius: 20,
-    gap: 14,
-    justifyContent: "center",
-    maxWidth: 320,
-    minHeight: 196,
-    paddingHorizontal: 24,
-    paddingVertical: 28,
-    width: "100%",
-  },
-  primaryActionCard: {
-    backgroundColor: designTheme.primary,
-  },
-  secondaryActionCard: {
-    backgroundColor: designTheme.secondary,
-  },
-  actionCardLabel: {
-    color: designTheme.foreground,
-    fontFamily: designFonts.medium,
-    fontSize: 24,
-  },
-  primaryActionLabel: {
-    color: designTheme.primaryForeground,
-  },
-  topBar: {
-    alignItems: "center",
-    borderBottomColor: designTheme.border,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    flexDirection: "row",
-    justifyContent: "space-between",
-    marginBottom: 18,
-    paddingBottom: 14,
-  },
-  sectionTitle: {
-    color: designTheme.foreground,
-    fontFamily: designFonts.semibold,
-    fontSize: 20,
-  },
-  iconButton: {
-    alignItems: "center",
-    backgroundColor: designTheme.secondary,
-    borderRadius: 999,
-    justifyContent: "center",
-    minHeight: 36,
-    minWidth: 36,
-  },
-  fileRow: {
-    alignItems: "center",
-    backgroundColor: designTheme.muted,
-    borderRadius: 14,
-    flexDirection: "row",
-    gap: 14,
-    padding: 14,
-  },
-  fileIconWrap: {
-    alignItems: "center",
-    backgroundColor: designTheme.card,
-    borderRadius: 12,
-    height: 40,
-    justifyContent: "center",
-    width: 40,
-  },
-  fileCopy: {
-    flex: 1,
-    gap: 2,
-  },
-  fileName: {
-    color: designTheme.foreground,
-    fontFamily: designFonts.medium,
-    fontSize: 15,
-  },
-  fileMeta: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 13,
-  },
-  addFilesButton: {
-    alignItems: "center",
-    backgroundColor: designTheme.secondary,
-    borderRadius: 14,
-    marginTop: 16,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-  },
-  addFilesLabel: {
-    color: designTheme.foreground,
-    fontFamily: designFonts.medium,
-    fontSize: 15,
-  },
-  browserShareAction: {
-    marginBottom: 24,
-  },
-  shareOptionCard: {
-    backgroundColor: designTheme.card,
-    borderColor: designTheme.border,
-    borderRadius: 20,
-    borderWidth: 1,
-    gap: 14,
-    marginBottom: 12,
-    marginTop: 24,
-    padding: 18,
-  },
-  hostedCard: {
-    backgroundColor: designTheme.card,
-    borderColor: designTheme.border,
-    borderRadius: 20,
-    borderWidth: 1,
-    gap: 14,
-    marginBottom: 12,
-    padding: 18,
-  },
-  hostedHeader: {
-    gap: 6,
-  },
-  hostedInput: {
-    backgroundColor: designTheme.secondary,
-    borderColor: designTheme.border,
-    borderRadius: 14,
-    borderWidth: 1,
-    color: designTheme.foreground,
-    fontFamily: designFonts.medium,
-    fontSize: 15,
-    minHeight: 50,
-    paddingHorizontal: 14,
-  },
-  hostedPrimaryButton: {
-    alignSelf: "stretch",
-  },
-  hostedGateCopy: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 14,
-    lineHeight: 21,
-  },
-  hostedProgressCard: {
-    backgroundColor: designTheme.muted,
-    borderColor: designTheme.border,
-    borderRadius: 16,
-    borderWidth: 1,
-    padding: 14,
-  },
-  hostedProgressHeader: {
-    alignItems: "center",
-    flexDirection: "row",
-    gap: 12,
-    justifyContent: "space-between",
-  },
-  hostedProgressTitle: {
-    color: designTheme.foreground,
-    flex: 1,
-    fontFamily: designFonts.medium,
-    fontSize: 14,
-  },
-  hostedProgressPercent: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.medium,
-    fontSize: 13,
-  },
-  hostedProgressFileName: {
-    color: designTheme.foreground,
-    fontFamily: designFonts.medium,
-    fontSize: 14,
-    marginTop: 2,
-  },
-  hostedProgressMeta: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 13,
-    lineHeight: 20,
-  },
-  footerArea: {
-    borderTopColor: designTheme.border,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    gap: 12,
-    paddingBottom: 12,
-    paddingTop: 14,
-  },
-  footerMeta: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 13,
-    textAlign: "center",
-  },
-  footerNotice: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 13,
-    lineHeight: 18,
-    textAlign: "center",
-  },
-  discoverySection: {
-    gap: 6,
-    marginBottom: 18,
-    marginTop: 24,
-  },
-  discoveryTitle: {
-    color: designTheme.foreground,
-    fontFamily: designFonts.semibold,
-    fontSize: 18,
-  },
-  discoveryHint: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  primaryButton: {
-    alignItems: "center",
-    backgroundColor: designTheme.primary,
-    borderRadius: 14,
-    flexDirection: "row",
-    gap: 8,
-    justifyContent: "center",
-    minHeight: 50,
-    paddingHorizontal: 18,
-  },
-  primaryButtonLabel: {
-    color: designTheme.primaryForeground,
-    fontFamily: designFonts.medium,
-    fontSize: 16,
-  },
-  outlineButton: {
-    alignItems: "center",
-    alignSelf: "center",
-    backgroundColor: designTheme.secondary,
-    borderColor: designTheme.border,
-    borderRadius: 14,
-    borderWidth: 0,
-    flexDirection: "row",
-    gap: 8,
-    justifyContent: "center",
-    minHeight: 44,
-    paddingHorizontal: 18,
-  },
-  outlineButtonLabel: {
-    color: designTheme.foreground,
-    fontFamily: designFonts.medium,
-    fontSize: 15,
-  },
-  disabled: {
-    opacity: 0.5,
-  },
-  waitingPulseWrap: {
-    alignItems: "center",
-    justifyContent: "center",
-    marginBottom: 24,
-  },
-  waitingPulseOuter: {
-    alignItems: "center",
-    backgroundColor: "rgba(37, 99, 235, 0.08)",
-    borderRadius: 48,
-    height: 96,
-    justifyContent: "center",
-    width: 96,
-  },
-  waitingPulseOuterNeutral: {
-    backgroundColor: designTheme.secondary,
-  },
-  centerWrap: {
-    alignItems: "center",
-    flex: 1,
-    justifyContent: "center",
-  },
-  centerTitle: {
-    color: designTheme.foreground,
-    fontFamily: designFonts.semibold,
-    fontSize: 28,
-    marginBottom: 8,
-    textAlign: "center",
-  },
-  centerSubtitle: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 15,
-    lineHeight: 22,
-    marginBottom: 16,
-    textAlign: "center",
-  },
-  centerMeta: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 13,
-    marginBottom: 24,
-  },
-  approvalActions: {
-    flexDirection: "row",
-    gap: 12,
-    marginTop: 8,
-    width: "100%",
-    maxWidth: 320,
-  },
-  approvalAction: {
-    flex: 1,
-  },
-  approvalActionButton: {
-    minHeight: 50,
-    width: "100%",
-  },
-  approvalActionLabel: {
-    fontSize: 16,
-  },
-  centerNotice: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 13,
-    lineHeight: 20,
-    marginTop: 12,
-    textAlign: "center",
-  },
-  textButton: {
-    marginTop: 16,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-  },
-  textButtonContent: {
-    alignItems: "center",
-    flexDirection: "row",
-    gap: 8,
-  },
-  textButtonLabel: {
-    color: designTheme.primary,
-    fontFamily: designFonts.medium,
-    fontSize: 15,
-  },
-  qrCard: {
-    backgroundColor: designTheme.muted,
-    borderColor: designTheme.border,
-    borderRadius: 18,
-    borderWidth: 1,
-    marginTop: 12,
-    padding: 16,
-  },
-  shareCard: {
-    backgroundColor: designTheme.muted,
-    borderColor: designTheme.border,
-    borderRadius: 18,
-    borderWidth: 1,
-    gap: 12,
-    marginTop: 20,
-    padding: 16,
-  },
-  shareCardTitle: {
-    color: designTheme.foreground,
-    fontFamily: designFonts.semibold,
-    fontSize: 16,
-  },
-  shareUrlValue: {
-    color: designTheme.foreground,
-    fontFamily: designFonts.medium,
-    fontSize: 14,
-    lineHeight: 21,
-  },
-  shareMetaRow: {
-    flexDirection: "row",
-    gap: 12,
-    justifyContent: "space-between",
-  },
-  shareMetaLabel: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 13,
-  },
-  shareMetaValue: {
-    color: designTheme.foreground,
-    flex: 1,
-    fontFamily: designFonts.medium,
-    fontSize: 13,
-    textAlign: "right",
-  },
-  deviceRow: {
-    alignItems: "center",
-    backgroundColor: designTheme.muted,
-    borderRadius: 14,
-    flexDirection: "row",
-    gap: 12,
-    padding: 14,
-  },
-  deviceAvatar: {
-    alignItems: "center",
-    backgroundColor: designTheme.card,
-    borderRadius: 999,
-    height: 40,
-    justifyContent: "center",
-    width: 40,
-  },
-  deviceCopy: {
-    flex: 1,
-    gap: 2,
-  },
-  deviceName: {
-    color: designTheme.foreground,
-    fontFamily: designFonts.medium,
-    fontSize: 15,
-  },
-  deviceMeta: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 13,
-  },
-  emptySearchState: {
-    alignItems: "center",
-    justifyContent: "center",
-    paddingVertical: 32,
-  },
-  emptySearchIcon: {
-    alignItems: "center",
-    backgroundColor: designTheme.secondary,
-    borderRadius: 999,
-    height: 64,
-    justifyContent: "center",
-    marginBottom: 16,
-    width: 64,
-  },
-  emptySearchLabel: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 15,
-  },
-  receivingNotice: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 13,
-    lineHeight: 20,
-    marginTop: 16,
-    textAlign: "center",
-  },
-  bottomLink: {
-    alignItems: "center",
-    paddingVertical: 16,
-  },
-  bottomLinkLabel: {
-    color: designTheme.primary,
-    fontFamily: designFonts.medium,
-    fontSize: 15,
-    textAlign: "center",
-  },
-  transferWrap: {
-    alignItems: "center",
-    flex: 1,
-    justifyContent: "center",
-  },
-  transferAvatar: {
-    alignItems: "center",
-    backgroundColor: designTheme.secondary,
-    borderRadius: 999,
-    height: 72,
-    justifyContent: "center",
-    marginBottom: 20,
-    width: 72,
-  },
-  transferAvatarLabel: {
-    color: designTheme.secondaryForeground,
-    fontFamily: designFonts.semibold,
-    fontSize: 28,
-  },
-  transferTitle: {
-    color: designTheme.foreground,
-    fontFamily: designFonts.semibold,
-    fontSize: 28,
-    marginBottom: 8,
-    textAlign: "center",
-  },
-  transferSubtitle: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 15,
-    marginBottom: 24,
-    textAlign: "center",
-  },
-  progressWrap: {
-    maxWidth: 320,
-    width: "100%",
-  },
-  progressTrack: {
-    backgroundColor: designTheme.secondary,
-    borderRadius: 999,
-    height: 6,
-    marginBottom: 8,
-    overflow: "hidden",
-  },
-  progressFill: {
-    borderRadius: 999,
-    height: "100%",
-  },
-  progressLabel: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 13,
-    textAlign: "center",
-  },
-  transferMetricsRow: {
-    flexDirection: "row",
-    gap: 10,
-    marginTop: 14,
-    maxWidth: 320,
-    width: "100%",
-  },
-  transferMetricCard: {
-    backgroundColor: designTheme.muted,
-    borderColor: designTheme.border,
-    borderRadius: 14,
-    borderWidth: 1,
-    flex: 1,
-    gap: 4,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-  },
-  transferMetricLabel: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 12,
-    textTransform: "uppercase",
-  },
-  transferMetricValue: {
-    color: designTheme.foreground,
-    fontFamily: designFonts.medium,
-    fontSize: 15,
-  },
-  transferFileName: {
-    color: designTheme.foreground,
-    fontFamily: designFonts.regular,
-    fontSize: 14,
-    lineHeight: 20,
-    marginTop: 16,
-    textAlign: "center",
-  },
-  transferDetail: {
-    color: designTheme.mutedForeground,
-    fontFamily: designFonts.regular,
-    fontSize: 13,
-    lineHeight: 20,
-    marginTop: 10,
-    textAlign: "center",
-  },
-  pressed: {
-    opacity: 0.72,
-  },
-});
