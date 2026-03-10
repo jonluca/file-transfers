@@ -1320,197 +1320,198 @@ export default function TransferScreen() {
     const cleanupFailures: string[] = [];
     let uploadedBytes = 0;
 
-    try {
-      for (const [index, stagedFile] of stagedFiles.entries()) {
-        const fileIndex = index + 1;
-        const uploadedBytesBeforeFile = uploadedBytes;
-        let createdHostedFileId: string | null = null;
-        let completedHostedFileId: string | null = null;
+    for (const [index, stagedFile] of stagedFiles.entries()) {
+      const fileIndex = index + 1;
+      const uploadedBytesBeforeFile = uploadedBytes;
+      let createdHostedFileId: string | null = null;
+      let completedHostedFileId: string | null = null;
 
+      updateHostedUploadProgress(setHostedUploadProgress, {
+        bytesUploaded: uploadedBytesBeforeFile,
+        totalBytes,
+        currentFileName: stagedFile.name,
+        currentFileIndex: fileIndex,
+        totalFiles,
+        detail: getHostedUploadDetail("preparing", fileIndex, totalFiles),
+      });
+
+      try {
+        const createResult = await createHostedUploadMutation.mutateAsync({
+          fileName: stagedFile.name,
+          mimeType: stagedFile.mimeType,
+          sizeBytes: stagedFile.sizeBytes,
+          passcode,
+        });
+
+        createdHostedFileId = createResult.hostedFile.id;
+
+        await uploadHostedFileAsync({
+          fileUri: stagedFile.uri,
+          uploadHeaders: createResult.uploadHeaders,
+          uploadMethod: createResult.uploadMethod,
+          uploadUrl: createResult.uploadUrl,
+          onProgress: (progress) => {
+            const nextUploadedBytes = uploadedBytesBeforeFile + Math.min(progress.totalBytesSent, stagedFile.sizeBytes);
+            updateHostedUploadProgress(setHostedUploadProgress, {
+              bytesUploaded: Math.min(nextUploadedBytes, totalBytes),
+              totalBytes,
+              currentFileName: stagedFile.name,
+              currentFileIndex: fileIndex,
+              totalFiles,
+              detail: getHostedUploadDetail("uploading", fileIndex, totalFiles),
+            });
+          },
+        });
+
+        uploadedBytes = uploadedBytesBeforeFile + stagedFile.sizeBytes;
         updateHostedUploadProgress(setHostedUploadProgress, {
-          bytesUploaded: uploadedBytesBeforeFile,
+          bytesUploaded: Math.min(uploadedBytes, totalBytes),
           totalBytes,
           currentFileName: stagedFile.name,
           currentFileIndex: fileIndex,
           totalFiles,
-          detail: getHostedUploadDetail("preparing", fileIndex, totalFiles),
+          detail: getHostedUploadDetail("finalizing", fileIndex, totalFiles),
         });
 
-        try {
-          const createResult = await createHostedUploadMutation.mutateAsync({
-            fileName: stagedFile.name,
-            mimeType: stagedFile.mimeType,
-            sizeBytes: stagedFile.sizeBytes,
-            passcode,
-          });
+        const completed = await completeHostedUploadMutation.mutateAsync({
+          hostedFileId: createResult.hostedFile.id,
+        });
 
-          createdHostedFileId = createResult.hostedFile.id;
+        completedHostedFileId = completed.id;
 
-          await uploadHostedFileAsync({
-            fileUri: stagedFile.uri,
-            uploadHeaders: createResult.uploadHeaders,
-            uploadMethod: createResult.uploadMethod,
-            uploadUrl: createResult.uploadUrl,
-            onProgress: (progress) => {
-              const nextUploadedBytes =
-                uploadedBytesBeforeFile + Math.min(progress.totalBytesSent, stagedFile.sizeBytes);
-              updateHostedUploadProgress(setHostedUploadProgress, {
-                bytesUploaded: Math.min(nextUploadedBytes, totalBytes),
-                totalBytes,
-                currentFileName: stagedFile.name,
-                currentFileIndex: fileIndex,
-                totalFiles,
-                detail: getHostedUploadDetail("uploading", fileIndex, totalFiles),
-              });
-            },
-          });
+        const shareResult = await createHostedShareLinkMutation.mutateAsync({
+          hostedFileId: completed.id,
+          passcode,
+        });
 
-          uploadedBytes = uploadedBytesBeforeFile + stagedFile.sizeBytes;
-          updateHostedUploadProgress(setHostedUploadProgress, {
-            bytesUploaded: Math.min(uploadedBytes, totalBytes),
-            totalBytes,
-            currentFileName: stagedFile.name,
-            currentFileIndex: fileIndex,
-            totalFiles,
-            detail: getHostedUploadDetail("finalizing", fileIndex, totalFiles),
-          });
+        sharedLinks.push({
+          fileName: stagedFile.name,
+          shareUrl: shareResult.shareUrl,
+        });
+      } catch (error) {
+        logTransferScreenDebug("Hosted share failed for staged file", {
+          fileName: stagedFile.name,
+          hostedFileId: getDebugSessionId(createdHostedFileId),
+          ...getDebugErrorDetails(error),
+        });
 
-          const completed = await completeHostedUploadMutation.mutateAsync({
-            hostedFileId: createResult.hostedFile.id,
-          });
-
-          completedHostedFileId = completed.id;
-
-          const shareResult = await createHostedShareLinkMutation.mutateAsync({
-            hostedFileId: completed.id,
-            passcode,
-          });
-
-          sharedLinks.push({
-            fileName: stagedFile.name,
-            shareUrl: shareResult.shareUrl,
-          });
-        } catch (error) {
-          logTransferScreenDebug("Hosted share failed for staged file", {
-            fileName: stagedFile.name,
-            hostedFileId: getDebugSessionId(createdHostedFileId),
-            ...getDebugErrorDetails(error),
-          });
-
-          updateHostedUploadProgress(setHostedUploadProgress, {
-            bytesUploaded: Math.min(uploadedBytes, totalBytes),
-            totalBytes,
-            currentFileName: stagedFile.name,
-            currentFileIndex: fileIndex,
-            totalFiles,
-            detail: "Upload failed. Continuing with the remaining files...",
-          });
-
-          if (completedHostedFileId) {
-            createdButUnsharedFiles.push(stagedFile.name);
-            continue;
-          }
-
-          retryFiles.push(stagedFile);
-
-          if (!createdHostedFileId) {
-            continue;
-          }
-
-          try {
-            await deleteHostedFileMutation.mutateAsync({
-              hostedFileId: createdHostedFileId,
-            });
-          } catch (cleanupError) {
-            cleanupFailures.push(stagedFile.name);
-            logTransferScreenDebug("Hosted share cleanup failed", {
-              fileName: stagedFile.name,
-              hostedFileId: getDebugSessionId(createdHostedFileId),
-              ...getDebugErrorDetails(cleanupError),
-            });
-          }
-        }
-      }
-
-      let shareSheetError: string | null = null;
-
-      if (sharedLinks.length > 0) {
         updateHostedUploadProgress(setHostedUploadProgress, {
           bytesUploaded: Math.min(uploadedBytes, totalBytes),
           totalBytes,
-          currentFileName: sharedLinks.at(-1)?.fileName ?? null,
-          currentFileIndex: totalFiles,
+          currentFileName: stagedFile.name,
+          currentFileIndex: fileIndex,
           totalFiles,
-          detail: getHostedUploadDetail("sharing", totalFiles, totalFiles),
+          detail: "Upload failed. Continuing with the remaining files...",
         });
 
+        if (completedHostedFileId) {
+          createdButUnsharedFiles.push(stagedFile.name);
+          continue;
+        }
+
+        retryFiles.push(stagedFile);
+
+        if (!createdHostedFileId) {
+          continue;
+        }
+
         try {
-          await shareHostedLinksAsync(sharedLinks, passcode);
-        } catch (error) {
-          shareSheetError =
-            error instanceof Error ? error.message : "Hosted URLs were created but could not be shared.";
+          await deleteHostedFileMutation.mutateAsync({
+            hostedFileId: createdHostedFileId,
+          });
+        } catch (cleanupError) {
+          cleanupFailures.push(stagedFile.name);
+          logTransferScreenDebug("Hosted share cleanup failed", {
+            fileName: stagedFile.name,
+            hostedFileId: getDebugSessionId(createdHostedFileId),
+            ...getDebugErrorDetails(cleanupError),
+          });
         }
       }
+    }
 
-      if (retryFiles.length === 0 && createdButUnsharedFiles.length === 0) {
-        setHostedPasscode("");
-        setHostedNotice(null);
-        setStagedFiles([]);
-        setMode("idle");
-        setNotice(
-          shareSheetError
-            ? "Hosted URLs were created. Open Files to share them again."
-            : `Hosted URLs ready for ${sharedLinks.length} file${sharedLinks.length === 1 ? "" : "s"}.`,
-        );
-        return;
+    let shareSheetError: string | null = null;
+
+    if (sharedLinks.length > 0) {
+      updateHostedUploadProgress(setHostedUploadProgress, {
+        bytesUploaded: Math.min(uploadedBytes, totalBytes),
+        totalBytes,
+        currentFileName: sharedLinks[sharedLinks.length - 1]?.fileName ?? null,
+        currentFileIndex: totalFiles,
+        totalFiles,
+        detail: getHostedUploadDetail("sharing", totalFiles, totalFiles),
+      });
+
+      try {
+        await shareHostedLinksAsync(sharedLinks, passcode);
+      } catch (error) {
+        shareSheetError = error instanceof Error ? error.message : "Hosted URLs were created but could not be shared.";
       }
+    }
 
-      setStagedFiles(retryFiles);
-      setMode(retryFiles.length > 0 ? "sending" : "idle");
-
-      const nextHostedMessages: string[] = [];
-
-      if (sharedLinks.length > 0) {
-        nextHostedMessages.push(
-          `Shared ${sharedLinks.length} hosted URL${sharedLinks.length === 1 ? "" : "s"}${passcode ? ` with passcode ${passcode}.` : "."}`,
-        );
-      } else {
-        nextHostedMessages.push("No hosted URLs were shared.");
-      }
-
-      if (retryFiles.length > 0) {
-        nextHostedMessages.push(
-          `${retryFiles.length} file${retryFiles.length === 1 ? "" : "s"} could not be uploaded and remain staged.`,
-        );
-      }
-
-      if (createdButUnsharedFiles.length > 0) {
-        nextHostedMessages.push(
-          `${createdButUnsharedFiles.length} file${createdButUnsharedFiles.length === 1 ? "" : "s"} uploaded successfully but could not generate a share link. Open Files to share them again.`,
-        );
-      }
-
-      if (cleanupFailures.length > 0) {
-        nextHostedMessages.push("Delete any incomplete hosted items from Files if they appear.");
-      }
-
-      if (shareSheetError) {
-        nextHostedMessages.push("The system share sheet did not open. Open Files to share the generated URLs again.");
-      }
-
-      const nextHostedMessage = nextHostedMessages.join(" ");
-      if (retryFiles.length > 0) {
-        setHostedNotice(nextHostedMessage);
-        return;
-      }
-
+    if (retryFiles.length === 0 && createdButUnsharedFiles.length === 0) {
+      finishHostedUploadProgress({
+        setHostedUploadProgress,
+        setIsCreatingHostedLinks,
+      });
       setHostedPasscode("");
       setHostedNotice(null);
-      setNotice(nextHostedMessage);
-    } finally {
-      setIsCreatingHostedLinks(false);
-      updateHostedUploadProgress(setHostedUploadProgress, null);
+      setStagedFiles([]);
+      setMode("idle");
+      setNotice(
+        shareSheetError
+          ? "Hosted URLs were created. Open Files to share them again."
+          : `Hosted URLs ready for ${sharedLinks.length} file${sharedLinks.length === 1 ? "" : "s"}.`,
+      );
+      return;
     }
+
+    finishHostedUploadProgress({
+      setHostedUploadProgress,
+      setIsCreatingHostedLinks,
+    });
+    setStagedFiles(retryFiles);
+    setMode(retryFiles.length > 0 ? "sending" : "idle");
+
+    const nextHostedMessages: string[] = [];
+
+    if (sharedLinks.length > 0) {
+      nextHostedMessages.push(
+        `Shared ${sharedLinks.length} hosted URL${sharedLinks.length === 1 ? "" : "s"}${passcode ? ` with passcode ${passcode}.` : "."}`,
+      );
+    } else {
+      nextHostedMessages.push("No hosted URLs were shared.");
+    }
+
+    if (retryFiles.length > 0) {
+      nextHostedMessages.push(
+        `${retryFiles.length} file${retryFiles.length === 1 ? "" : "s"} could not be uploaded and remain staged.`,
+      );
+    }
+
+    if (createdButUnsharedFiles.length > 0) {
+      nextHostedMessages.push(
+        `${createdButUnsharedFiles.length} file${createdButUnsharedFiles.length === 1 ? "" : "s"} uploaded successfully but could not generate a share link. Open Files to share them again.`,
+      );
+    }
+
+    if (cleanupFailures.length > 0) {
+      nextHostedMessages.push("Delete any incomplete hosted items from Files if they appear.");
+    }
+
+    if (shareSheetError) {
+      nextHostedMessages.push("The system share sheet did not open. Open Files to share the generated URLs again.");
+    }
+
+    const nextHostedMessage = nextHostedMessages.join(" ");
+    if (retryFiles.length > 0) {
+      setHostedNotice(nextHostedMessage);
+      return;
+    }
+
+    setHostedPasscode("");
+    setHostedNotice(null);
+    setNotice(nextHostedMessage);
   }
 
   async function handleAcceptIncomingOffer() {

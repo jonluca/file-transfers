@@ -12,141 +12,135 @@ The recommended pattern combines TanStack Router's loaders with TanStack Query's
 // Only using Query in component - loading waterfall
 function PostsPage() {
   const { data, isLoading } = useQuery({
-    queryKey: ['posts'],
+    queryKey: ["posts"],
     queryFn: fetchPosts,
-  })
+  });
 
-  if (isLoading) return <Loading />
-  return <PostList posts={data} />
+  if (isLoading) return <Loading />;
+  return <PostList posts={data} />;
 }
 
 // Only using loader - no cache management
-export const Route = createFileRoute('/posts')({
+export const Route = createFileRoute("/posts")({
   loader: async () => {
-    const posts = await fetchPosts()  // Not cached
-    return { posts }
+    const posts = await fetchPosts(); // Not cached
+    return { posts };
   },
-})
+});
 ```
 
 ## Good Example
 
 ```tsx
 // lib/queries/posts.ts - Define queryOptions
-import { queryOptions } from '@tanstack/react-query'
+import { queryOptions } from "@tanstack/react-query";
 
 export const postQueries = {
-  all: () => queryOptions({
-    queryKey: ['posts'],
-    queryFn: fetchPosts,
-    staleTime: 5 * 60 * 1000,
-  }),
-  detail: (id: string) => queryOptions({
-    queryKey: ['posts', id],
-    queryFn: () => fetchPost(id),
-    staleTime: 5 * 60 * 1000,
-  }),
-}
+  all: () =>
+    queryOptions({
+      queryKey: ["posts"],
+      queryFn: fetchPosts,
+      staleTime: 5 * 60 * 1000,
+    }),
+  detail: (id: string) =>
+    queryOptions({
+      queryKey: ["posts", id],
+      queryFn: () => fetchPost(id),
+      staleTime: 5 * 60 * 1000,
+    }),
+};
 
 // routes/posts.tsx
-import { createFileRoute } from '@tanstack/react-router'
-import { useSuspenseQuery } from '@tanstack/react-query'
-import { postQueries } from '@/lib/queries/posts'
+import { createFileRoute } from "@tanstack/react-router";
+import { useSuspenseQuery } from "@tanstack/react-query";
+import { postQueries } from "@/lib/queries/posts";
 
-export const Route = createFileRoute('/posts')({
+export const Route = createFileRoute("/posts")({
   loader: async ({ context: { queryClient } }) => {
     // Prefetch in loader - runs during navigation
-    await queryClient.ensureQueryData(postQueries.all())
+    await queryClient.ensureQueryData(postQueries.all());
   },
   component: PostsPage,
-})
+});
 
 function PostsPage() {
   // Data guaranteed by loader - no loading state needed
-  const { data: posts } = useSuspenseQuery(postQueries.all())
+  const { data: posts } = useSuspenseQuery(postQueries.all());
 
-  return <PostList posts={posts} />
+  return <PostList posts={posts} />;
 }
 
 // routes/posts/$postId.tsx
-export const Route = createFileRoute('/posts/$postId')({
+export const Route = createFileRoute("/posts/$postId")({
   loader: async ({ params, context: { queryClient } }) => {
-    await queryClient.ensureQueryData(postQueries.detail(params.postId))
+    await queryClient.ensureQueryData(postQueries.detail(params.postId));
   },
   component: PostDetailPage,
-})
+});
 
 function PostDetailPage() {
-  const { postId } = Route.useParams()
-  const { data: post } = useSuspenseQuery(postQueries.detail(postId))
+  const { postId } = Route.useParams();
+  const { data: post } = useSuspenseQuery(postQueries.detail(postId));
 
-  return <PostContent post={post} />
+  return <PostContent post={post} />;
 }
 ```
 
 ## Good Example: Parallel Data Loading
 
 ```tsx
-export const Route = createFileRoute('/dashboard')({
+export const Route = createFileRoute("/dashboard")({
   loader: async ({ context: { queryClient } }) => {
     // Load multiple queries in parallel
     await Promise.all([
       queryClient.ensureQueryData(statsQueries.overview()),
       queryClient.ensureQueryData(activityQueries.recent()),
       queryClient.ensureQueryData(userQueries.current()),
-    ])
+    ]);
   },
   component: DashboardPage,
-})
+});
 
 function DashboardPage() {
   // All data ready - no loading states
-  const { data: stats } = useSuspenseQuery(statsQueries.overview())
-  const { data: activity } = useSuspenseQuery(activityQueries.recent())
-  const { data: user } = useSuspenseQuery(userQueries.current())
+  const { data: stats } = useSuspenseQuery(statsQueries.overview());
+  const { data: activity } = useSuspenseQuery(activityQueries.recent());
+  const { data: user } = useSuspenseQuery(userQueries.current());
 
-  return (
-    <Dashboard
-      stats={stats}
-      activity={activity}
-      user={user}
-    />
-  )
+  return <Dashboard stats={stats} activity={activity} user={user} />;
 }
 ```
 
 ## Good Example: Optional Prefetch with Non-Critical Data
 
 ```tsx
-export const Route = createFileRoute('/posts/$postId')({
+export const Route = createFileRoute("/posts/$postId")({
   loader: async ({ params, context: { queryClient } }) => {
     // Critical data - await it
-    await queryClient.ensureQueryData(postQueries.detail(params.postId))
+    await queryClient.ensureQueryData(postQueries.detail(params.postId));
 
     // Non-critical - prefetch but don't await
-    queryClient.prefetchQuery(postQueries.comments(params.postId))
-    queryClient.prefetchQuery(postQueries.related(params.postId))
+    queryClient.prefetchQuery(postQueries.comments(params.postId));
+    queryClient.prefetchQuery(postQueries.related(params.postId));
   },
   component: PostPage,
-})
+});
 
 function PostPage() {
-  const { postId } = Route.useParams()
+  const { postId } = Route.useParams();
 
   // Critical - guaranteed by loader
-  const { data: post } = useSuspenseQuery(postQueries.detail(postId))
+  const { data: post } = useSuspenseQuery(postQueries.detail(postId));
 
   // Non-critical - may still be loading
-  const { data: comments, isLoading: commentsLoading } = useQuery(
-    postQueries.comments(postId)
-  )
+  const { data: comments, isLoading: commentsLoading } = useQuery(postQueries.comments(postId));
 
   return (
     <article>
       <PostContent post={post} />
       {commentsLoading ? <CommentsSkeleton /> : <Comments data={comments} />}
     </article>
-  )
+  );
 }
 ```
 
