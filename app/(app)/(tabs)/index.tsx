@@ -1476,11 +1476,16 @@ export default function TransferScreen() {
           contentContainerStyle={{ paddingBottom: 24 }}
           style={styles.flex}
         >
-          <View style={styles.stack}>
+          <ScrollView
+            nestedScrollEnabled
+            showsVerticalScrollIndicator={stagedFiles.length > 3}
+            style={styles.stagedFilesList}
+            contentContainerStyle={styles.stack}
+          >
             {stagedFiles.map((file, index) => (
               <FileRow key={file.id} file={file} onRemove={() => handleRemoveFile(index)} />
             ))}
-          </View>
+          </ScrollView>
           <Pressable
             onPress={() => {
               void handlePickFiles(true);
@@ -1870,6 +1875,9 @@ const styles = StyleSheet.create({
   },
   stack: {
     gap: 10,
+  },
+  stagedFilesList: {
+    maxHeight: 280,
   },
   noticeCardWrap: {
     maxWidth: 320,

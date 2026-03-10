@@ -838,7 +838,7 @@ export default function SettingsScreen() {
               onPress={() => {
                 Alert.alert(
                   "Help & FAQ",
-                  "Free senders can transfer up to 100 MB at up to 5 MB/s over nearby WiFi. Premium senders remove those limits and can still send larger files to free receivers.",
+                  "Nearby transfers only work when both devices are on the same Wi-Fi network. If one device is on cellular, guest Wi-Fi, or a different router, it may not appear.\n\nFree senders can transfer up to 100 MB at up to 5 MB/s over nearby Wi-Fi. Premium senders remove those limits and can still send larger files to free receivers.",
                 );
               }}
             />
@@ -850,6 +850,19 @@ export default function SettingsScreen() {
                 Alert.alert("About", `File Share\nVersion ${Constants.expoConfig?.version ?? "1.0.0"}`);
               }}
             />
+          </View>
+        </View>
+
+        <View style={styles.section}>
+          <Text style={styles.sectionLabel}>FAQ</Text>
+          <View style={styles.panel}>
+            <View style={styles.faqItem}>
+              <Text style={styles.faqQuestion}>Why can't I see the other device?</Text>
+              <Text style={styles.faqAnswer}>
+                Nearby transfers only work when both devices are connected to the same Wi-Fi network. If one device is
+                on cellular, guest Wi-Fi, or a different router, discovery will usually fail.
+              </Text>
+            </View>
           </View>
         </View>
 
@@ -1210,6 +1223,20 @@ const styles = StyleSheet.create({
     fontSize: 18,
   },
   panelCopy: {
+    color: designTheme.mutedForeground,
+    fontFamily: designFonts.regular,
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  faqItem: {
+    gap: 6,
+  },
+  faqQuestion: {
+    color: designTheme.foreground,
+    fontFamily: designFonts.medium,
+    fontSize: 15,
+  },
+  faqAnswer: {
     color: designTheme.mutedForeground,
     fontFamily: designFonts.regular,
     fontSize: 14,
