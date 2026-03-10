@@ -86,6 +86,32 @@ function normalizeTransferChunkBytes(value: number, fallback: number) {
   return Math.min(MAX_TRANSFER_CHUNK_BYTES, Math.max(MIN_TRANSFER_CHUNK_BYTES, roundedValue));
 }
 
+function removeReceivedFileFromTransfer(entry: TransferHistoryEntry, uri: string): TransferHistoryEntry {
+  if (entry.direction !== "receive" || entry.files.length === 0) {
+    return entry;
+  }
+
+  const nextFiles = entry.files.filter((file) => file.uri !== uri);
+  if (nextFiles.length === entry.files.length) {
+    return entry;
+  }
+
+  const remainingBytes = nextFiles.reduce((sum, file) => sum + file.sizeBytes, 0);
+
+  return {
+    ...entry,
+    files: nextFiles,
+    fileCount: nextFiles.length,
+    totalBytes: remainingBytes,
+    bytesTransferred: remainingBytes,
+    detail:
+      nextFiles.length === 0
+        ? "Received files were deleted from this device."
+        : `${nextFiles.length} received file${nextFiles.length === 1 ? "" : "s"} remain on this device.`,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
 interface AppState {
   hasHydrated: boolean;
   deviceName: string;
@@ -105,6 +131,7 @@ interface AppState {
   setPendingScannedReceiver: (value: DiscoveryRecord | null) => void;
   resetTransferChunkBytes: () => void;
   upsertRecentTransfer: (value: TransferHistoryEntry) => void;
+  removeReceivedFileByUri: (uri: string) => void;
   clearRecentTransfers: () => void;
 }
 
@@ -187,6 +214,10 @@ export const useAppStore = create<AppState>()(
             recentTransfers: nextTransfers.slice(0, 40),
           };
         }),
+      removeReceivedFileByUri: (uri) =>
+        set((state) => ({
+          recentTransfers: state.recentTransfers.map((entry) => removeReceivedFileFromTransfer(entry, uri)),
+        })),
       clearRecentTransfers: () =>
         set({
           recentTransfers: [],

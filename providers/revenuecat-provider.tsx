@@ -50,7 +50,7 @@ interface RevenueCatContextValue {
   presentPaywall: () => Promise<PAYWALL_RESULT | null>;
   purchasePackage: (selectedPackage: RevenueCatPackage) => Promise<RevenueCatCustomerInfo | null>;
   restorePurchases: () => Promise<RevenueCatCustomerInfo | null>;
-  presentCustomerCenter: () => Promise<void>;
+  presentCustomerCenter: () => Promise<string | null>;
   clearError: () => void;
 }
 
@@ -327,8 +327,9 @@ export function RevenueCatProvider({ children }: { children: React.ReactNode }) 
 
   async function presentCustomerCenter() {
     if (!isConfigured) {
-      setLastError("RevenueCat is not configured for this build.");
-      return;
+      const message = "RevenueCat is not configured for this build.";
+      setLastError(message);
+      return message;
     }
 
     try {
@@ -348,9 +349,12 @@ export function RevenueCatProvider({ children }: { children: React.ReactNode }) 
           },
         },
       });
+      return null;
     } catch (error) {
       console.error("Unable to present RevenueCat Customer Center", error);
-      setLastError(getPurchaseErrorMessage(error));
+      const message = getPurchaseErrorMessage(error);
+      setLastError(message);
+      return message;
     }
   }
 

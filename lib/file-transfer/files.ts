@@ -10,6 +10,30 @@ import DirectTransferNative from "@/modules/direct-transfer-native";
 import type { ReceivedFileRecord, SelectedTransferFile } from "./types";
 import { RECEIVED_FILES_DIRECTORY_NAME, RECEIVED_FILES_STAGING_DIRECTORY_NAME } from "./constants";
 
+export interface DownloadsFolderEntry {
+  kind: "directory" | "file";
+  uri: string;
+  name: string;
+  sizeBytes: number;
+  modificationTime: number | null;
+  creationTime: number | null;
+  childCount: number | null;
+  mimeType: string | null;
+}
+
+export interface DownloadsFolderBreadcrumb {
+  label: string;
+  uri: string;
+}
+
+export interface DownloadsFolderSnapshot {
+  rootUri: string;
+  uri: string;
+  name: string;
+  breadcrumbs: DownloadsFolderBreadcrumb[];
+  entries: DownloadsFolderEntry[];
+}
+
 const ALWAYS_PLACEHOLDER_FILE_BASENAMES = new Set(["unknown", "untitled"]);
 const MAYBE_PLACEHOLDER_FILE_BASENAMES = new Set(["document", "file"]);
 const ANDROID_GRANT_READ_URI_PERMISSION_FLAG = 1;
@@ -41,6 +65,14 @@ function normalizeMimeType(value: string | null | undefined) {
   return value?.trim() ? value : "application/octet-stream";
 }
 
+function decodeUriSegment(value: string) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
 function normalizeCandidateFileName(value: string | null | undefined) {
   return value?.trim() || null;
 }
@@ -62,6 +94,70 @@ function decodeUriFileName(uri: string) {
 
   const scopedName = lastPathSegment.split(":").pop()?.trim() ?? lastPathSegment;
   return scopedName || null;
+}
+
+function getDecodedUriPathSegments(uri: string) {
+  const cleanUri = uri.split(/[?#]/, 1)[0] ?? uri;
+  const withoutScheme = cleanUri.replace(/^[a-z]+:\/\//i, "");
+
+  return withoutScheme
+    .replace(/\/+$/g, "")
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => decodeUriSegment(segment));
+}
+
+function buildDownloadsFolderBreadcrumbs(
+  rootDirectory: Directory,
+  currentDirectory: Directory,
+): DownloadsFolderBreadcrumb[] {
+  const rootSegments = getDecodedUriPathSegments(rootDirectory.uri);
+  const currentSegments = getDecodedUriPathSegments(currentDirectory.uri);
+
+  if (
+    currentSegments.length < rootSegments.length ||
+    rootSegments.some((segment, index) => currentSegments[index] !== segment)
+  ) {
+    return [
+      {
+        label: decodeUriFileName(rootDirectory.uri) ?? RECEIVED_FILES_DIRECTORY_NAME,
+        uri: rootDirectory.uri,
+      },
+    ];
+  }
+
+  const breadcrumbs: DownloadsFolderBreadcrumb[] = [
+    {
+      label: decodeUriFileName(rootDirectory.uri) ?? RECEIVED_FILES_DIRECTORY_NAME,
+      uri: rootDirectory.uri,
+    },
+  ];
+
+  let breadcrumbDirectory = rootDirectory;
+  for (const segment of currentSegments.slice(rootSegments.length)) {
+    breadcrumbDirectory = new Directory(breadcrumbDirectory, segment);
+    breadcrumbs.push({
+      label: segment,
+      uri: breadcrumbDirectory.uri,
+    });
+  }
+
+  return breadcrumbs;
+}
+
+function compareDownloadsFolderEntries(left: DownloadsFolderEntry, right: DownloadsFolderEntry) {
+  if (left.kind !== right.kind) {
+    return left.kind === "directory" ? -1 : 1;
+  }
+
+  if (left.kind === "file" && right.kind === "file" && left.modificationTime !== right.modificationTime) {
+    return (right.modificationTime ?? 0) - (left.modificationTime ?? 0);
+  }
+
+  return left.name.localeCompare(right.name, undefined, {
+    numeric: true,
+    sensitivity: "base",
+  });
 }
 
 function getFileExtension(name: string) {
@@ -169,10 +265,70 @@ export function getReceivedFilesDirectory() {
   return directory;
 }
 
+export function getReceivedFilesDirectoryUri() {
+  return getReceivedFilesDirectory().uri;
+}
+
 export function getReceivedFilesStagingDirectory() {
   const directory = new Directory(Paths.cache, RECEIVED_FILES_STAGING_DIRECTORY_NAME);
   directory.create({ idempotent: true, intermediates: true });
   return directory;
+}
+
+export function isReceivedFileInDownloadsFolder(uri: string) {
+  const rootSegments = getDecodedUriPathSegments(getReceivedFilesDirectory().uri);
+  const candidateSegments = getDecodedUriPathSegments(uri);
+
+  if (candidateSegments.length < rootSegments.length) {
+    return false;
+  }
+
+  return rootSegments.every((segment, index) => candidateSegments[index] === segment);
+}
+
+export function listDownloadsFolder(directoryUri?: string): DownloadsFolderSnapshot {
+  const rootDirectory = getReceivedFilesDirectory();
+  const directory = directoryUri ? new Directory(directoryUri) : rootDirectory;
+  const activeDirectory = directory.exists ? directory : rootDirectory;
+
+  const entries = activeDirectory
+    .list()
+    .map((entry) => {
+      if (entry instanceof Directory) {
+        const info = entry.info();
+        return {
+          kind: "directory",
+          uri: entry.uri,
+          name: decodeUriFileName(entry.uri) ?? "Folder",
+          sizeBytes: info.size ?? 0,
+          modificationTime: info.modificationTime ?? null,
+          creationTime: info.creationTime ?? null,
+          childCount: info.files?.length ?? 0,
+          mimeType: null,
+        } satisfies DownloadsFolderEntry;
+      }
+
+      const info = entry.info();
+      return {
+        kind: "file",
+        uri: entry.uri,
+        name: decodeUriFileName(entry.uri) ?? "File",
+        sizeBytes: info.size ?? entry.size ?? 0,
+        modificationTime: info.modificationTime ?? entry.modificationTime ?? null,
+        creationTime: info.creationTime ?? entry.creationTime ?? null,
+        childCount: null,
+        mimeType: entry.type || null,
+      } satisfies DownloadsFolderEntry;
+    })
+    .sort(compareDownloadsFolderEntries);
+
+  return {
+    rootUri: rootDirectory.uri,
+    uri: activeDirectory.uri,
+    name: decodeUriFileName(activeDirectory.uri) ?? RECEIVED_FILES_DIRECTORY_NAME,
+    breadcrumbs: buildDownloadsFolderBreadcrumbs(rootDirectory, activeDirectory),
+    entries,
+  };
 }
 
 function sanitizeFileName(name: string) {
@@ -347,6 +503,18 @@ export async function openReceivedFileAsync(file: Pick<ReceivedFileRecord, "uri"
     flags: ANDROID_GRANT_READ_URI_PERMISSION_FLAG,
     type: file.mimeType,
   });
+}
+
+export async function deleteReceivedFileAsync(file: Pick<ReceivedFileRecord, "uri">) {
+  if (Platform.OS === "android" && typeof DirectTransferNative?.deleteFileUri === "function") {
+    await DirectTransferNative.deleteFileUri(file.uri);
+    return;
+  }
+
+  const targetFile = new File(file.uri);
+  if (targetFile.exists) {
+    targetFile.delete();
+  }
 }
 
 export async function shareReceivedFileAsync(file: Pick<ReceivedFileRecord, "uri" | "mimeType">) {

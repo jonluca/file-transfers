@@ -52,6 +52,17 @@ export default function TabLayout() {
             />
           </NativeTabs.Trigger>
           <NativeTabs.Trigger
+            name={"files"}
+            contentStyle={screenContentStyle}
+            disableAutomaticContentInsets={disableAutomaticContentInsets}
+          >
+            <NativeTabs.Trigger.Label>Files</NativeTabs.Trigger.Label>
+            <NativeTabs.Trigger.Icon
+              sf={{ default: "folder", selected: "folder.fill" }}
+              src={<NativeTabs.Trigger.VectorIcon family={MaterialIcons} name={"folder"} />}
+            />
+          </NativeTabs.Trigger>
+          <NativeTabs.Trigger
             name={"history"}
             contentStyle={screenContentStyle}
             disableAutomaticContentInsets={disableAutomaticContentInsets}

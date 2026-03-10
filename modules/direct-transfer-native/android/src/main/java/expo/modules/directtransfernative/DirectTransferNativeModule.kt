@@ -347,6 +347,10 @@ class DirectTransferNativeModule : Module() {
       metrics.map { metric -> metric.toMap() }
     }.runOnQueue(Queues.DEFAULT)
 
+    AsyncFunction("deleteFileUri") { uri: String ->
+      deleteFileUri(uri)
+    }.runOnQueue(Queues.DEFAULT)
+
     AsyncFunction("exportFileToDownloads") { options: Map<String, Any?> ->
       exportFileToDownloads(
         sourceUri = options.requiredString("sourceUri"),
@@ -784,6 +788,33 @@ class DirectTransferNativeModule : Module() {
     return mapOf(
       "uri" to Uri.fromFile(destinationFile).toString(),
     )
+  }
+
+  private fun deleteFileUri(uri: String) {
+    val context = appContext.reactContext ?: throw IllegalStateException("React context is unavailable.")
+    val parsedUri = Uri.parse(uri)
+
+    when (parsedUri.scheme) {
+      "content" -> {
+        context.contentResolver.delete(parsedUri, null, null)
+      }
+
+      null,
+      "",
+      "file" -> {
+        val path = parsedUri.path ?: uri.removePrefix("file://")
+        if (path.isBlank()) {
+          throw IllegalStateException("Unable to resolve the selected file path.")
+        }
+
+        val file = File(path)
+        if (file.exists() && !file.delete()) {
+          throw IllegalStateException("Unable to delete the selected file.")
+        }
+      }
+
+      else -> throw IllegalStateException("Unsupported file URI for deletion.")
+    }
   }
 
   private fun shareFileUri(uri: String, mimeType: String) {

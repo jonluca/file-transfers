@@ -1,5 +1,6 @@
 import { useEntitlements } from "@/hooks/queries";
 import { useRevenueCat } from "@/providers/revenuecat-provider";
+import { canUseLocalPremiumOverride } from "@/lib/build-environment";
 import { useDevPremiumOverrideEnabled } from "@/store";
 
 export function usePremiumAccess() {
@@ -9,14 +10,16 @@ export function usePremiumAccess() {
 
   const serverEntitlement = entitlementsQuery.data;
   const localEntitlement = revenueCat.entitlement;
-  const isDevPremiumOverrideEnabled = __DEV__ && devPremiumOverrideEnabled;
-  const isPremium = Boolean(isDevPremiumOverrideEnabled || serverEntitlement?.isPremium || localEntitlement.isPremium);
+  const isLocalPremiumOverrideEnabled = canUseLocalPremiumOverride() && devPremiumOverrideEnabled;
+  const isPremium = Boolean(
+    isLocalPremiumOverrideEnabled || serverEntitlement?.isPremium || localEntitlement.isPremium,
+  );
 
   return {
     entitlement: {
       isAuthenticated: Boolean(serverEntitlement?.isAuthenticated || localEntitlement.isAuthenticated),
       isPremium,
-      source: isDevPremiumOverrideEnabled
+      source: isLocalPremiumOverrideEnabled
         ? "preview"
         : serverEntitlement?.isPremium
           ? serverEntitlement.source
@@ -24,7 +27,8 @@ export function usePremiumAccess() {
       managementUrl: serverEntitlement?.managementUrl ?? localEntitlement.managementUrl,
       expiresAt: serverEntitlement?.expiresAt ?? localEntitlement.expiresAt,
     },
-    isDevPremiumOverrideEnabled,
+    isDevPremiumOverrideEnabled: isLocalPremiumOverrideEnabled,
+    isLocalPremiumOverrideEnabled,
     isLoading: entitlementsQuery.isLoading || revenueCat.isLoadingCustomerInfo,
     isPremium,
     query: entitlementsQuery,

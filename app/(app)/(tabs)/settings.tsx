@@ -5,6 +5,7 @@ import React, { useEffect, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  InteractionManager,
   Modal,
   Platform,
   Pressable,
@@ -15,7 +16,7 @@ import {
   TextInput,
   View,
 } from "react-native";
-import type { PurchasesPackage } from "react-native-purchases";
+import { PACKAGE_TYPE, type PurchasesPackage } from "react-native-purchases";
 import {
   Check,
   ChevronRight,
@@ -35,6 +36,7 @@ import { useCompleteHostedUpload, useCreateHostedUpload, useDeleteHostedFile, us
 import { usePremiumAccess } from "@/hooks/use-premium-access";
 import { useAppleSignIn } from "@/hooks/use-apple-sign-in";
 import { signOut, useSession } from "@/lib/auth-client";
+import { canUseLocalPremiumOverride, isTestFlightBuild } from "@/lib/build-environment";
 import { getTabScreenBottomPadding, getTabScreenTopInset } from "@/lib/design/tab-screen-insets";
 import { designFonts, designTheme } from "@/lib/design/theme";
 import { pickTransferFiles } from "@/lib/file-transfer";
@@ -44,7 +46,7 @@ import {
   TRANSFER_CHUNK_SIZE_STEP_BYTES,
 } from "@/lib/file-transfer/constants";
 import { getPaywallResultMessage, mapCustomerInfoToEntitlement, REVENUECAT_PAYWALL_RESULT } from "@/lib/purchases";
-import { FILE_TRANSFERS_PRO_NAME, PREMIUM_PRODUCT_IDS } from "@/lib/subscriptions";
+import { FILE_TRANSFERS_PRO_NAME } from "@/lib/subscriptions";
 import { useRevenueCat } from "@/providers/revenuecat-provider";
 import {
   useAppStore,
@@ -189,6 +191,10 @@ function PremiumPackageCard({
   onPress: () => void;
   highlighted: boolean;
 }) {
+  const packageTitle = getPremiumPackageTitle(selectedPackage);
+  const packagePrice = getPremiumPackagePriceLabel(selectedPackage);
+  const packageDescription = getPremiumPackageDescription(selectedPackage);
+
   return (
     <Pressable
       onPress={onPress}
@@ -199,17 +205,15 @@ function PremiumPackageCard({
       ]}
     >
       <View style={styles.packageHeader}>
-        <Text style={styles.packageTitle}>{selectedPackage.product.title}</Text>
+        <Text style={styles.packageTitle}>{packageTitle}</Text>
         {highlighted ? (
           <View style={styles.packageBadge}>
             <Text style={styles.packageBadgeLabel}>Recommended</Text>
           </View>
         ) : null}
       </View>
-      <Text style={styles.packagePrice}>{selectedPackage.product.priceString}</Text>
-      {selectedPackage.product.description ? (
-        <Text style={styles.packageDescription}>{selectedPackage.product.description}</Text>
-      ) : null}
+      <Text style={styles.packagePrice}>{packagePrice}</Text>
+      <Text style={styles.packageDescription}>{packageDescription}</Text>
     </Pressable>
   );
 }
@@ -246,6 +250,163 @@ function parseChunkMegabytesDraft(value: string) {
   }
 
   return megabytes * TRANSFER_CHUNK_SIZE_STEP_BYTES;
+}
+
+type PackageIntervalUnit = "day" | "week" | "month" | "year";
+
+interface PackageInterval {
+  count: number;
+  unit: PackageIntervalUnit;
+}
+
+function parseSubscriptionInterval(subscriptionPeriod: string | null): PackageInterval | null {
+  if (!subscriptionPeriod) {
+    return null;
+  }
+
+  const match = /^P(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)W)?(?:(\d+)D)?$/i.exec(subscriptionPeriod);
+  if (!match) {
+    return null;
+  }
+
+  const [, years, months, weeks, days] = match;
+  const periodValues = [
+    years ? { count: Number(years), unit: "year" as const } : null,
+    months ? { count: Number(months), unit: "month" as const } : null,
+    weeks ? { count: Number(weeks), unit: "week" as const } : null,
+    days ? { count: Number(days), unit: "day" as const } : null,
+  ];
+
+  return periodValues.find((value) => value && value.count > 0) ?? null;
+}
+
+function getPackageInterval(selectedPackage: PurchasesPackage): PackageInterval | null {
+  const subscriptionInterval = parseSubscriptionInterval(selectedPackage.product.subscriptionPeriod);
+  if (subscriptionInterval) {
+    return subscriptionInterval;
+  }
+
+  switch (selectedPackage.packageType) {
+    case PACKAGE_TYPE.ANNUAL:
+      return { count: 1, unit: "year" };
+    case PACKAGE_TYPE.SIX_MONTH:
+      return { count: 6, unit: "month" };
+    case PACKAGE_TYPE.THREE_MONTH:
+      return { count: 3, unit: "month" };
+    case PACKAGE_TYPE.TWO_MONTH:
+      return { count: 2, unit: "month" };
+    case PACKAGE_TYPE.MONTHLY:
+      return { count: 1, unit: "month" };
+    case PACKAGE_TYPE.WEEKLY:
+      return { count: 1, unit: "week" };
+    default:
+      return null;
+  }
+}
+
+function formatPackageInterval(interval: PackageInterval, options?: { compact?: boolean }) {
+  const baseUnit =
+    interval.unit === "day" ? "day" : interval.unit === "week" ? "week" : interval.unit === "month" ? "month" : "year";
+
+  if (options?.compact) {
+    return interval.count === 1 ? baseUnit : `${interval.count} ${baseUnit}s`;
+  }
+
+  if (interval.count === 1) {
+    return `1 ${baseUnit}`;
+  }
+
+  return `${interval.count} ${baseUnit}s`;
+}
+
+function getPremiumPackageTitle(selectedPackage: PurchasesPackage) {
+  if (selectedPackage.packageType === PACKAGE_TYPE.LIFETIME) {
+    return "Lifetime access";
+  }
+
+  const interval = getPackageInterval(selectedPackage);
+  if (!interval) {
+    return selectedPackage.product.title || FILE_TRANSFERS_PRO_NAME;
+  }
+
+  if (interval.count === 1) {
+    switch (interval.unit) {
+      case "day":
+        return "Daily plan";
+      case "week":
+        return "Weekly plan";
+      case "month":
+        return "Monthly plan";
+      case "year":
+        return "Yearly plan";
+    }
+  }
+
+  return `Every ${formatPackageInterval(interval)}`;
+}
+
+function getPremiumPackagePriceLabel(selectedPackage: PurchasesPackage) {
+  if (selectedPackage.packageType === PACKAGE_TYPE.LIFETIME) {
+    return selectedPackage.product.priceString;
+  }
+
+  const interval = getPackageInterval(selectedPackage);
+  if (!interval) {
+    return selectedPackage.product.priceString;
+  }
+
+  return `${selectedPackage.product.priceString} / ${formatPackageInterval(interval, { compact: true })}`;
+}
+
+function getPremiumPackageDescription(selectedPackage: PurchasesPackage) {
+  if (selectedPackage.packageType === PACKAGE_TYPE.LIFETIME) {
+    return "One-time purchase through your app store account.";
+  }
+
+  const interval = getPackageInterval(selectedPackage);
+  if (!interval) {
+    return selectedPackage.product.description || "Billed through your app store account.";
+  }
+
+  if (interval.count === 1) {
+    switch (interval.unit) {
+      case "day":
+        return "Billed daily through your app store account.";
+      case "week":
+        return "Billed weekly through your app store account.";
+      case "month":
+        return "Billed monthly through your app store account.";
+      case "year":
+        return "Billed annually through your app store account.";
+    }
+  }
+
+  return `Billed every ${formatPackageInterval(interval)} through your app store account.`;
+}
+
+function getRecommendedPackageIdentifier(availablePackages: PurchasesPackage[]) {
+  const packagesWithMonthlyEquivalent = availablePackages.filter((selectedPackage) =>
+    Number.isFinite(selectedPackage.product.pricePerMonth),
+  );
+
+  if (packagesWithMonthlyEquivalent.length > 0) {
+    return packagesWithMonthlyEquivalent.reduce((bestPackage, selectedPackage) => {
+      const bestPricePerMonth = bestPackage.product.pricePerMonth ?? Number.POSITIVE_INFINITY;
+      const candidatePricePerMonth = selectedPackage.product.pricePerMonth ?? Number.POSITIVE_INFINITY;
+      return candidatePricePerMonth < bestPricePerMonth ? selectedPackage : bestPackage;
+    }).identifier;
+  }
+
+  const annualPackage = availablePackages.find(
+    (selectedPackage) => selectedPackage.packageType === PACKAGE_TYPE.ANNUAL,
+  );
+  return annualPackage?.identifier ?? availablePackages[0]?.identifier ?? null;
+}
+
+function waitForModalDismissal() {
+  return new Promise<void>((resolve) => {
+    InteractionManager.runAfterInteractions(() => resolve());
+  });
 }
 
 export default function SettingsScreen() {
@@ -303,7 +464,10 @@ export default function SettingsScreen() {
   const [hostedNotice, setHostedNotice] = useState<string | null>(null);
   const [hostedPasscode, setHostedPasscode] = useState("");
   const isPremium = premiumAccess.isPremium;
+  const isTestFlight = isTestFlightBuild();
+  const canShowLocalPremiumOverride = canUseLocalPremiumOverride();
   const showHostedLinksPanel = wantsHostedLinksPanel && isPremium;
+  const recommendedPackageIdentifier = getRecommendedPackageIdentifier(plans.availablePackages);
 
   useEffect(() => {
     setDirectChunkMegabytesDraft(String(chunkBytesToMegabytes(directTransferChunkBytes)));
@@ -399,11 +563,17 @@ export default function SettingsScreen() {
   }
 
   async function handleOpenCustomerCenter() {
-    await presentCustomerCenter();
+    setPurchaseNotice(null);
+    setShowPremiumDetails(false);
+    await waitForModalDismissal();
 
-    if (revenueCatError) {
-      setPurchaseNotice(revenueCatError);
+    const customerCenterError = await presentCustomerCenter();
+    if (!customerCenterError) {
+      return;
     }
+
+    setPurchaseNotice(customerCenterError);
+    setShowPremiumDetails(true);
   }
 
   async function handleCreateHostedUpload() {
@@ -593,14 +763,16 @@ export default function SettingsScreen() {
                 setWantsHostedLinksPanel((current) => !current);
               }}
             />
-            <SettingItem
-              description={`Restore ${FILE_TRANSFERS_PRO_NAME} from the current store account`}
-              icon={<RefreshCw color={designTheme.secondaryForeground} size={18} strokeWidth={1.9} />}
-              label={"Restore Purchase"}
-              onPress={() => {
-                void handleRestorePurchases();
-              }}
-            />
+            {!isPremium ? (
+              <SettingItem
+                description={`Restore ${FILE_TRANSFERS_PRO_NAME} from the current store account`}
+                icon={<RefreshCw color={designTheme.secondaryForeground} size={18} strokeWidth={1.9} />}
+                label={"Restore Purchase"}
+                onPress={() => {
+                  void handleRestorePurchases();
+                }}
+              />
+            ) : null}
           </View>
         </View>
 
@@ -807,9 +979,9 @@ export default function SettingsScreen() {
           </View>
         </View>
 
-        {__DEV__ ? (
+        {canShowLocalPremiumOverride ? (
           <View style={styles.section}>
-            <Text style={styles.sectionLabel}>Developer</Text>
+            <Text style={styles.sectionLabel}>{isTestFlight && !__DEV__ ? "Preview" : "Developer"}</Text>
             <View style={styles.group}>
               <SettingItem
                 action={
@@ -820,7 +992,11 @@ export default function SettingsScreen() {
                     value={devPremiumOverrideEnabled}
                   />
                 }
-                description={"Debug only. Forces local premium feature gating on this device."}
+                description={
+                  isTestFlight && !__DEV__
+                    ? "TestFlight only. Forces local premium feature gating on this device."
+                    : "Debug only. Forces local premium feature gating on this device."
+                }
                 icon={<Crown color={designTheme.secondaryForeground} size={18} strokeWidth={1.9} />}
                 label={"Premium override"}
               />
@@ -894,10 +1070,10 @@ export default function SettingsScreen() {
                       <Text style={styles.loadingLabel}>Loading {FILE_TRANSFERS_PRO_NAME} plans...</Text>
                     </View>
                   ) : plans.availablePackages.length ? (
-                    plans.availablePackages.map((selectedPackage, index) => (
+                    plans.availablePackages.map((selectedPackage) => (
                       <PremiumPackageCard
                         key={selectedPackage.identifier}
-                        highlighted={selectedPackage.product.identifier === PREMIUM_PRODUCT_IDS.yearly || index === 0}
+                        highlighted={selectedPackage.identifier === recommendedPackageIdentifier}
                         onPress={() => {
                           void handlePurchase(selectedPackage);
                         }}
@@ -906,7 +1082,9 @@ export default function SettingsScreen() {
                     ))
                   ) : (
                     <InlineNotice
-                      description={`Create a current offering in RevenueCat and attach products ${PREMIUM_PRODUCT_IDS.monthly} and ${PREMIUM_PRODUCT_IDS.yearly}.`}
+                      description={
+                        "Create a current offering in RevenueCat and attach the subscription packages you want to sell in this build."
+                      }
                       title={"Offering setup required"}
                       tone={"warning"}
                     />
@@ -939,22 +1117,12 @@ export default function SettingsScreen() {
                   }}
                 />
 
-                {hasConfiguredRevenueCat ? (
+                {hasConfiguredRevenueCat && !isPremium ? (
                   <SecondaryButton
                     disabled={isLoadingCustomerInfo}
                     label={"Restore purchases"}
                     onPress={() => {
                       void handleRestorePurchases();
-                    }}
-                  />
-                ) : null}
-
-                {hasConfiguredRevenueCat && isPremium ? (
-                  <SecondaryButton
-                    disabled={isLoadingCustomerInfo}
-                    label={"Refresh customer info"}
-                    onPress={() => {
-                      void refreshCustomerInfo();
                     }}
                   />
                 ) : null}

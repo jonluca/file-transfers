@@ -185,6 +185,22 @@ function formatTransferEta(progress: TransferProgress) {
   return minutes === 0 ? `${hours}h` : `${hours}h ${minutes}m`;
 }
 
+function isSettledSendSession(session: TransferSession | null) {
+  if (!session) {
+    return true;
+  }
+
+  return ["completed", "failed", "canceled"].includes(session.status);
+}
+
+function isBlockingReceiveSession(session: ReceiveSession | null) {
+  if (!session) {
+    return false;
+  }
+
+  return !["discoverable", "completed", "failed", "canceled"].includes(session.status);
+}
+
 function createHistoryEntryFromSendSession(session: TransferSession): TransferHistoryEntry {
   return {
     id: session.id,
@@ -402,11 +418,18 @@ export default function TransferScreen() {
   const stoppingHttpShareSessionIdRef = useRef<string | null>(null);
   const isStartingReceiveAvailabilityRef = useRef(false);
   const receiveAvailabilityKeyRef = useRef<string | null>(null);
+  const activeSendSessionRef = useRef<TransferSession | null>(null);
+  const activeReceiveSessionRef = useRef<ReceiveSession | null>(null);
   const pendingScannedReceiver = useAppStore((state) => state.pendingScannedReceiver);
   const setPendingScannedReceiver = useAppStore((state) => state.setPendingScannedReceiver);
   const ensureReceiveAvailabilityRef = useRef<
     (options?: { preserveNotice?: boolean; showReceivingScreen?: boolean; surfaceErrors?: boolean }) => Promise<boolean>
   >(async () => false);
+
+  useEffect(() => {
+    activeSendSessionRef.current = activeSendSession;
+    activeReceiveSessionRef.current = activeReceiveSession;
+  }, [activeReceiveSession, activeSendSession]);
 
   useEffect(() => {
     const shouldScanNearby = mode === "sending" && !activeHttpShareSession;
@@ -532,21 +555,38 @@ export default function TransferScreen() {
     setMode((current) => (current === "sharing" ? (stagedFiles.length > 0 ? "sending" : "idle") : current));
   });
 
-  function scheduleReset({ clearFiles, nextMode }: { clearFiles: boolean; nextMode: TransferMode }) {
+  function scheduleReset({
+    clearFiles,
+    nextMode,
+    sendSessionId,
+    receiveSessionId,
+  }: {
+    clearFiles: boolean;
+    nextMode: TransferMode;
+    sendSessionId?: string;
+    receiveSessionId?: string;
+  }) {
     if (completionTimeoutRef.current) {
       clearTimeout(completionTimeoutRef.current);
     }
 
     completionTimeoutRef.current = setTimeout(() => {
-      setActiveSendSession(null);
-      setActiveReceiveSession(null);
-      setTransferProgress(null);
-      setNotice(null);
-      setShowQrCode(false);
-      if (clearFiles) {
-        setStagedFiles([]);
+      const hasBlockingTransfer =
+        !isSettledSendSession(activeSendSessionRef.current) ||
+        isBlockingReceiveSession(activeReceiveSessionRef.current);
+
+      setActiveSendSession((current) => (current?.id === sendSessionId ? null : current));
+      setActiveReceiveSession((current) => (current?.id === receiveSessionId ? null : current));
+
+      if (!hasBlockingTransfer) {
+        setTransferProgress(null);
+        setNotice(null);
+        setShowQrCode(false);
+        if (clearFiles) {
+          setStagedFiles([]);
+        }
+        setMode(nextMode);
       }
-      setMode(nextMode);
       completionTimeoutRef.current = null;
     }, 1000);
   }
@@ -590,7 +630,7 @@ export default function TransferScreen() {
         setNotice(getTransferDetail(nextSession.progress.detail, "Transfer complete."));
       });
       setMode("transferring");
-      scheduleReset({ clearFiles: false, nextMode: "idle" });
+      scheduleReset({ clearFiles: false, nextMode: "idle", receiveSessionId: nextSession.id });
       void (async () => {
         await stopReceivingAvailability(nextSession.id).catch(() => {});
         await ensureReceiveAvailabilityRef.current({
@@ -867,7 +907,7 @@ export default function TransferScreen() {
         setNotice(getTransferDetail(nextSession.progress.detail, "Transfer complete."));
       });
       setMode("transferring");
-      scheduleReset({ clearFiles: true, nextMode: "idle" });
+      scheduleReset({ clearFiles: true, nextMode: "idle", sendSessionId: nextSession.id });
       return;
     }
 

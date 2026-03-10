@@ -63,6 +63,7 @@ export interface DirectTransferNativeExportFileToDownloadsResult {
 export interface DirectTransferNativeModuleType {
   cancelRangeDownload(taskId: string): Promise<void>;
   collectPayloadMetrics(sessionId: string): Promise<DirectTransferNativePayloadMetric[]>;
+  deleteFileUri(uri: string): Promise<void>;
   ensurePayloadServerStarted(): Promise<DirectTransferNativePayloadServerInfo>;
   exportFileToDownloads(
     options: DirectTransferNativeExportFileToDownloadsOptions,

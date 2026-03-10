@@ -173,7 +173,7 @@ function HistoryRow({ entry }: { entry: TransferHistoryEntry }) {
         </Text>
       </View>
 
-      {entry.direction === "receive" && entry.status === "completed" ? (
+      {entry.direction === "receive" && entry.status === "completed" && firstFile ? (
         <View style={styles.actionRow}>
           <Pressable
             onPress={() => {
