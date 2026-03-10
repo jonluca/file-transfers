@@ -10,7 +10,7 @@ import {
   buildHostedStorageKey,
   createUploadTarget,
   deleteStoredFile,
-  uploadedFileExists,
+  getUploadedFileSizeBytes,
 } from "../../storage/hosted-storage";
 import { protectedProcedure, router } from "../trpc";
 
@@ -266,11 +266,21 @@ export const hostedFilesRouter = router({
         });
       }
 
-      const exists = await uploadedFileExists(row.storageKey);
-      if (!exists) {
+      const uploadedSizeBytes = await getUploadedFileSizeBytes(row.storageKey);
+      if (uploadedSizeBytes === null) {
         throw new TRPCError({
           code: "BAD_REQUEST",
           message: "The upload has not finished yet.",
+        });
+      }
+
+      if (uploadedSizeBytes !== row.sizeBytes) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message:
+            uploadedSizeBytes === 0 && row.sizeBytes > 0
+              ? "The upload completed without any file data. Please try again."
+              : "The uploaded file size did not match the selected file. Please try again.",
         });
       }
 

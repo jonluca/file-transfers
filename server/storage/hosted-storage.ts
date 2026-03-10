@@ -113,28 +113,28 @@ export async function storeUploadedFile({
   await writeFile(absoluteFilePath, new Uint8Array(body));
 }
 
-export async function uploadedFileExists(storageKey: string) {
+export async function getUploadedFileSizeBytes(storageKey: string) {
   const r2Client = getR2Client();
 
   if (r2Client && serverEnv.r2Bucket) {
     try {
-      await r2Client.send(
+      const result = await r2Client.send(
         new HeadObjectCommand({
           Bucket: serverEnv.r2Bucket,
           Key: storageKey,
         }),
       );
-      return true;
+      return typeof result.ContentLength === "number" ? result.ContentLength : 0;
     } catch {
-      return false;
+      return null;
     }
   }
 
   try {
-    await stat(getLocalFilePath(storageKey));
-    return true;
+    const fileInfo = await stat(getLocalFilePath(storageKey));
+    return fileInfo.size;
   } catch {
-    return false;
+    return null;
   }
 }
 

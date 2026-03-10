@@ -1,7 +1,7 @@
 import { router } from "expo-router";
 import { useIsFocused } from "@react-navigation/native";
 import * as Burnt from "burnt";
-import { File as ExpoFile } from "expo-file-system";
+import { createUploadTask, type UploadProgressData } from "expo-file-system/legacy";
 import React, { startTransition, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -72,6 +72,15 @@ import { FILE_TRANSFERS_PRO_NAME } from "@/lib/subscriptions";
 import { useAppStore, useDeviceName, useServiceInstanceId } from "@/store";
 
 type TransferMode = "idle" | "sending" | "waiting" | "receiving" | "transferring" | "sharing";
+
+interface HostedUploadProgressState {
+  bytesUploaded: number;
+  totalBytes: number;
+  currentFileName: string | null;
+  currentFileIndex: number;
+  totalFiles: number;
+  detail: string;
+}
 
 const TRANSFER_SCREEN_DEBUG_PREFIX = "[TransferScreen]";
 
@@ -163,10 +172,83 @@ function getTransferDetail(value: string | null | undefined, fallback: string) {
   return value ?? fallback;
 }
 
-function ensureHostedUploadSucceeded(response: Response) {
-  if (!response.ok) {
-    throw new Error(`Upload failed with status ${response.status}.`);
+function ensureHostedUploadSucceeded(status: number) {
+  if (status < 200 || status >= 300) {
+    throw new Error(`Upload failed with status ${status}.`);
   }
+}
+
+function getHostedUploadDetail(
+  phase: "preparing" | "uploading" | "finalizing" | "sharing",
+  fileIndex: number,
+  totalFiles: number,
+) {
+  if (phase === "sharing") {
+    return "Opening share sheet...";
+  }
+
+  if (totalFiles <= 1) {
+    if (phase === "preparing") {
+      return "Preparing upload...";
+    }
+
+    if (phase === "uploading") {
+      return "Uploading file...";
+    }
+
+    return "Finalizing hosted link...";
+  }
+
+  if (phase === "preparing") {
+    return `Preparing file ${fileIndex} of ${totalFiles}...`;
+  }
+
+  if (phase === "uploading") {
+    return `Uploading file ${fileIndex} of ${totalFiles}...`;
+  }
+
+  return `Finalizing file ${fileIndex} of ${totalFiles}...`;
+}
+
+async function uploadHostedFileAsync({
+  fileUri,
+  uploadHeaders,
+  uploadMethod,
+  uploadUrl,
+  onProgress,
+}: {
+  fileUri: string;
+  uploadHeaders: Record<string, string>;
+  uploadMethod: "PUT";
+  uploadUrl: string;
+  onProgress?: (progress: UploadProgressData) => void;
+}) {
+  const uploadTask = createUploadTask(
+    uploadUrl,
+    fileUri,
+    {
+      headers: uploadHeaders,
+      httpMethod: uploadMethod,
+    },
+    onProgress,
+  );
+
+  const uploadResult = await uploadTask.uploadAsync();
+
+  if (!uploadResult) {
+    throw new Error("Upload was canceled.");
+  }
+
+  ensureHostedUploadSucceeded(uploadResult.status);
+}
+
+function updateHostedUploadProgress(
+  setHostedUploadProgress: React.Dispatch<React.SetStateAction<HostedUploadProgressState | null>>,
+  nextProgress: HostedUploadProgressState | null,
+) {
+  startTransition(() => {
+    setHostedUploadProgress(nextProgress);
+  });
 }
 
 function formatTransferSpeed(bytesPerSecond: number) {
@@ -437,6 +519,7 @@ export default function TransferScreen() {
   const [notice, setNotice] = useState<string | null>(null);
   const [hostedNotice, setHostedNotice] = useState<string | null>(null);
   const [hostedPasscode, setHostedPasscode] = useState("");
+  const [hostedUploadProgress, setHostedUploadProgress] = useState<HostedUploadProgressState | null>(null);
   const [isCreatingHostedLinks, setIsCreatingHostedLinks] = useState(false);
   const [selectionError, setSelectionError] = useState<TransferSizeLimitNotice | null>(null);
   const [showQrCode, setShowQrCode] = useState(false);
@@ -1216,148 +1299,202 @@ export default function TransferScreen() {
     setSelectionError(null);
     setIsCreatingHostedLinks(true);
 
+    const totalFiles = stagedFiles.length;
+    const totalBytes = totalStagedBytes;
     const sharedLinks: Array<{ fileName: string; shareUrl: string }> = [];
     const retryFiles: SelectedTransferFile[] = [];
     const createdButUnsharedFiles: string[] = [];
     const cleanupFailures: string[] = [];
+    let uploadedBytes = 0;
 
-    for (const stagedFile of stagedFiles) {
-      let createdHostedFileId: string | null = null;
-      let completedHostedFileId: string | null = null;
+    try {
+      for (const [index, stagedFile] of stagedFiles.entries()) {
+        const fileIndex = index + 1;
+        let createdHostedFileId: string | null = null;
+        let completedHostedFileId: string | null = null;
 
-      try {
-        const createResult = await createHostedUploadMutation.mutateAsync({
-          fileName: stagedFile.name,
-          mimeType: stagedFile.mimeType,
-          sizeBytes: stagedFile.sizeBytes,
-          passcode,
+        updateHostedUploadProgress(setHostedUploadProgress, {
+          bytesUploaded: uploadedBytes,
+          totalBytes,
+          currentFileName: stagedFile.name,
+          currentFileIndex: fileIndex,
+          totalFiles,
+          detail: getHostedUploadDetail("preparing", fileIndex, totalFiles),
         });
-
-        createdHostedFileId = createResult.hostedFile.id;
-
-        const uploadResponse = await fetch(createResult.uploadUrl, {
-          method: createResult.uploadMethod,
-          headers: createResult.uploadHeaders,
-          body: new ExpoFile(stagedFile.uri),
-        });
-
-        ensureHostedUploadSucceeded(uploadResponse);
-
-        const completed = await completeHostedUploadMutation.mutateAsync({
-          hostedFileId: createResult.hostedFile.id,
-        });
-
-        completedHostedFileId = completed.id;
-
-        const shareResult = await createHostedShareLinkMutation.mutateAsync({
-          hostedFileId: completed.id,
-          passcode,
-        });
-
-        sharedLinks.push({
-          fileName: stagedFile.name,
-          shareUrl: shareResult.shareUrl,
-        });
-      } catch (error) {
-        logTransferScreenDebug("Hosted share failed for staged file", {
-          fileName: stagedFile.name,
-          hostedFileId: getDebugSessionId(createdHostedFileId),
-          ...getDebugErrorDetails(error),
-        });
-
-        if (completedHostedFileId) {
-          createdButUnsharedFiles.push(stagedFile.name);
-          continue;
-        }
-
-        retryFiles.push(stagedFile);
-
-        if (!createdHostedFileId) {
-          continue;
-        }
 
         try {
-          await deleteHostedFileMutation.mutateAsync({
-            hostedFileId: createdHostedFileId,
+          const createResult = await createHostedUploadMutation.mutateAsync({
+            fileName: stagedFile.name,
+            mimeType: stagedFile.mimeType,
+            sizeBytes: stagedFile.sizeBytes,
+            passcode,
           });
-        } catch (cleanupError) {
-          cleanupFailures.push(stagedFile.name);
-          logTransferScreenDebug("Hosted share cleanup failed", {
+
+          createdHostedFileId = createResult.hostedFile.id;
+
+          await uploadHostedFileAsync({
+            fileUri: stagedFile.uri,
+            uploadHeaders: createResult.uploadHeaders,
+            uploadMethod: createResult.uploadMethod,
+            uploadUrl: createResult.uploadUrl,
+            onProgress: (progress) => {
+              const nextUploadedBytes = uploadedBytes + Math.min(progress.totalBytesSent, stagedFile.sizeBytes);
+              updateHostedUploadProgress(setHostedUploadProgress, {
+                bytesUploaded: Math.min(nextUploadedBytes, totalBytes),
+                totalBytes,
+                currentFileName: stagedFile.name,
+                currentFileIndex: fileIndex,
+                totalFiles,
+                detail: getHostedUploadDetail("uploading", fileIndex, totalFiles),
+              });
+            },
+          });
+
+          uploadedBytes += stagedFile.sizeBytes;
+          updateHostedUploadProgress(setHostedUploadProgress, {
+            bytesUploaded: Math.min(uploadedBytes, totalBytes),
+            totalBytes,
+            currentFileName: stagedFile.name,
+            currentFileIndex: fileIndex,
+            totalFiles,
+            detail: getHostedUploadDetail("finalizing", fileIndex, totalFiles),
+          });
+
+          const completed = await completeHostedUploadMutation.mutateAsync({
+            hostedFileId: createResult.hostedFile.id,
+          });
+
+          completedHostedFileId = completed.id;
+
+          const shareResult = await createHostedShareLinkMutation.mutateAsync({
+            hostedFileId: completed.id,
+            passcode,
+          });
+
+          sharedLinks.push({
+            fileName: stagedFile.name,
+            shareUrl: shareResult.shareUrl,
+          });
+        } catch (error) {
+          logTransferScreenDebug("Hosted share failed for staged file", {
             fileName: stagedFile.name,
             hostedFileId: getDebugSessionId(createdHostedFileId),
-            ...getDebugErrorDetails(cleanupError),
+            ...getDebugErrorDetails(error),
           });
+
+          updateHostedUploadProgress(setHostedUploadProgress, {
+            bytesUploaded: Math.min(uploadedBytes, totalBytes),
+            totalBytes,
+            currentFileName: stagedFile.name,
+            currentFileIndex: fileIndex,
+            totalFiles,
+            detail: "Upload failed. Continuing with the remaining files...",
+          });
+
+          if (completedHostedFileId) {
+            createdButUnsharedFiles.push(stagedFile.name);
+            continue;
+          }
+
+          retryFiles.push(stagedFile);
+
+          if (!createdHostedFileId) {
+            continue;
+          }
+
+          try {
+            await deleteHostedFileMutation.mutateAsync({
+              hostedFileId: createdHostedFileId,
+            });
+          } catch (cleanupError) {
+            cleanupFailures.push(stagedFile.name);
+            logTransferScreenDebug("Hosted share cleanup failed", {
+              fileName: stagedFile.name,
+              hostedFileId: getDebugSessionId(createdHostedFileId),
+              ...getDebugErrorDetails(cleanupError),
+            });
+          }
         }
       }
-    }
 
-    let shareSheetError: string | null = null;
+      let shareSheetError: string | null = null;
 
-    if (sharedLinks.length > 0) {
-      try {
-        await shareHostedLinksAsync(sharedLinks, passcode);
-      } catch (error) {
-        shareSheetError = error instanceof Error ? error.message : "Hosted URLs were created but could not be shared.";
+      if (sharedLinks.length > 0) {
+        updateHostedUploadProgress(setHostedUploadProgress, {
+          bytesUploaded: totalBytes,
+          totalBytes,
+          currentFileName: sharedLinks.at(-1)?.fileName ?? null,
+          currentFileIndex: totalFiles,
+          totalFiles,
+          detail: getHostedUploadDetail("sharing", totalFiles, totalFiles),
+        });
+
+        try {
+          await shareHostedLinksAsync(sharedLinks, passcode);
+        } catch (error) {
+          shareSheetError = error instanceof Error ? error.message : "Hosted URLs were created but could not be shared.";
+        }
       }
-    }
 
-    setIsCreatingHostedLinks(false);
+      if (retryFiles.length === 0 && createdButUnsharedFiles.length === 0) {
+        setHostedPasscode("");
+        setHostedNotice(null);
+        setStagedFiles([]);
+        setMode("idle");
+        setNotice(
+          shareSheetError
+            ? "Hosted URLs were created. Open Files to share them again."
+            : `Hosted URLs ready for ${sharedLinks.length} file${sharedLinks.length === 1 ? "" : "s"}.`,
+        );
+        return;
+      }
 
-    if (retryFiles.length === 0 && createdButUnsharedFiles.length === 0) {
+      setStagedFiles(retryFiles);
+      setMode(retryFiles.length > 0 ? "sending" : "idle");
+
+      const nextHostedMessages: string[] = [];
+
+      if (sharedLinks.length > 0) {
+        nextHostedMessages.push(
+          `Shared ${sharedLinks.length} hosted URL${sharedLinks.length === 1 ? "" : "s"}${passcode ? ` with passcode ${passcode}.` : "."}`,
+        );
+      } else {
+        nextHostedMessages.push("No hosted URLs were shared.");
+      }
+
+      if (retryFiles.length > 0) {
+        nextHostedMessages.push(
+          `${retryFiles.length} file${retryFiles.length === 1 ? "" : "s"} could not be uploaded and remain staged.`,
+        );
+      }
+
+      if (createdButUnsharedFiles.length > 0) {
+        nextHostedMessages.push(
+          `${createdButUnsharedFiles.length} file${createdButUnsharedFiles.length === 1 ? "" : "s"} uploaded successfully but could not generate a share link. Open Files to share them again.`,
+        );
+      }
+
+      if (cleanupFailures.length > 0) {
+        nextHostedMessages.push("Delete any incomplete hosted items from Files if they appear.");
+      }
+
+      if (shareSheetError) {
+        nextHostedMessages.push("The system share sheet did not open. Open Files to share the generated URLs again.");
+      }
+
+      const nextHostedMessage = nextHostedMessages.join(" ");
+      if (retryFiles.length > 0) {
+        setHostedNotice(nextHostedMessage);
+        return;
+      }
+
       setHostedPasscode("");
       setHostedNotice(null);
-      setStagedFiles([]);
-      setMode("idle");
-      setNotice(
-        shareSheetError
-          ? "Hosted URLs were created. Open Files to share them again."
-          : `Hosted URLs ready for ${sharedLinks.length} file${sharedLinks.length === 1 ? "" : "s"}.`,
-      );
-      return;
+      setNotice(nextHostedMessage);
+    } finally {
+      setIsCreatingHostedLinks(false);
+      updateHostedUploadProgress(setHostedUploadProgress, null);
     }
-
-    setStagedFiles(retryFiles);
-    setMode(retryFiles.length > 0 ? "sending" : "idle");
-
-    const nextHostedMessages: string[] = [];
-
-    if (sharedLinks.length > 0) {
-      nextHostedMessages.push(
-        `Shared ${sharedLinks.length} hosted URL${sharedLinks.length === 1 ? "" : "s"}${passcode ? ` with passcode ${passcode}.` : "."}`,
-      );
-    } else {
-      nextHostedMessages.push("No hosted URLs were shared.");
-    }
-
-    if (retryFiles.length > 0) {
-      nextHostedMessages.push(
-        `${retryFiles.length} file${retryFiles.length === 1 ? "" : "s"} could not be uploaded and remain staged.`,
-      );
-    }
-
-    if (createdButUnsharedFiles.length > 0) {
-      nextHostedMessages.push(
-        `${createdButUnsharedFiles.length} file${createdButUnsharedFiles.length === 1 ? "" : "s"} uploaded successfully but could not generate a share link. Open Files to share them again.`,
-      );
-    }
-
-    if (cleanupFailures.length > 0) {
-      nextHostedMessages.push("Delete any incomplete hosted items from Files if they appear.");
-    }
-
-    if (shareSheetError) {
-      nextHostedMessages.push("The system share sheet did not open. Open Files to share the generated URLs again.");
-    }
-
-    const nextHostedMessage = nextHostedMessages.join(" ");
-    if (retryFiles.length > 0) {
-      setHostedNotice(nextHostedMessage);
-      return;
-    }
-
-    setHostedPasscode("");
-    setHostedNotice(null);
-    setNotice(nextHostedMessage);
   }
 
   async function handleAcceptIncomingOffer() {
@@ -1428,6 +1565,10 @@ export default function TransferScreen() {
     ? formatTransferSpeed(currentProgress.speedBytesPerSecond)
     : null;
   const transferEtaLabel = shouldShowTransferMetrics ? formatTransferEta(currentProgress) : null;
+  const hostedUploadPercent =
+    hostedUploadProgress && hostedUploadProgress.totalBytes > 0
+      ? Math.round((hostedUploadProgress.bytesUploaded / hostedUploadProgress.totalBytes) * 100)
+      : 0;
 
   if (mode === "idle") {
     return (
@@ -1551,6 +1692,33 @@ export default function TransferScreen() {
               <Text style={styles.discoveryTitle}>Hosted URL</Text>
               <Text style={styles.discoveryHint}>Upload these files for 30 days and share a download link.</Text>
             </View>
+
+            {hostedUploadProgress ? (
+              <View style={styles.hostedProgressCard}>
+                <View style={styles.hostedProgressHeader}>
+                  <Text style={styles.hostedProgressTitle}>{hostedUploadProgress.detail}</Text>
+                  <Text style={styles.hostedProgressPercent}>{hostedUploadPercent}%</Text>
+                </View>
+                <View style={styles.progressTrack}>
+                  <View
+                    style={[
+                      styles.progressFill,
+                      {
+                        width: `${Math.max(0, Math.min(hostedUploadPercent, 100))}%`,
+                        backgroundColor: hostedUploadPercent >= 100 ? designTheme.success : designTheme.primary,
+                      },
+                    ]}
+                  />
+                </View>
+                {hostedUploadProgress.currentFileName ? (
+                  <Text style={styles.hostedProgressFileName}>{hostedUploadProgress.currentFileName}</Text>
+                ) : null}
+                <Text style={styles.hostedProgressMeta}>
+                  {formatBytes(hostedUploadProgress.bytesUploaded)} of {formatBytes(hostedUploadProgress.totalBytes)} · File{" "}
+                  {Math.max(1, hostedUploadProgress.currentFileIndex)} of {hostedUploadProgress.totalFiles}
+                </Text>
+              </View>
+            ) : null}
 
             {isSignedIn && premiumAccess.isPremium ? (
               <>
