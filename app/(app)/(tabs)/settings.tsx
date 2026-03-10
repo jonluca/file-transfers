@@ -1,5 +1,4 @@
 import Constants from "expo-constants";
-import { File } from "expo-file-system";
 import * as Linking from "expo-linking";
 import React, { useEffect, useState } from "react";
 import {
@@ -33,14 +32,12 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { ContinueWithAppleButton, ContinueWithGoogleButton } from "@/components/auth";
 import { useGoogleSignIn } from "@/hooks/use-google-sign-in";
-import { useCompleteHostedUpload, useCreateHostedUpload, useDeleteHostedFile, useHostedFiles } from "@/hooks/queries";
 import { usePremiumAccess } from "@/hooks/use-premium-access";
 import { useAppleSignIn } from "@/hooks/use-apple-sign-in";
 import { signOut, useSession } from "@/lib/auth-client";
 import { canUseLocalPremiumOverride, isTestFlightBuild } from "@/lib/build-environment";
 import { getTabScreenBottomPadding, getTabScreenTopInset } from "@/lib/design/tab-screen-insets";
 import { designFonts, designTheme } from "@/lib/design/theme";
-import { pickTransferFiles } from "@/lib/file-transfer";
 import {
   MAX_TRANSFER_CHUNK_SIZE_MEGABYTES,
   MIN_TRANSFER_CHUNK_SIZE_MEGABYTES,
@@ -450,10 +447,6 @@ export default function SettingsScreen() {
     refreshCustomerInfo,
     restorePurchases,
   } = useRevenueCat();
-  const hostedFilesQuery = useHostedFiles(Boolean(sessionUser && premiumAccess.isPremium));
-  const createHostedUploadMutation = useCreateHostedUpload();
-  const completeHostedUploadMutation = useCompleteHostedUpload();
-  const deleteHostedFileMutation = useDeleteHostedFile();
   const {
     errorMessage: appleError,
     isSigningIn: isSigningInWithApple,
@@ -471,7 +464,6 @@ export default function SettingsScreen() {
   const [draftDeviceName, setDraftDeviceName] = useState(deviceName);
   const [isEditingDeviceName, setIsEditingDeviceName] = useState(false);
   const [showPremiumDetails, setShowPremiumDetails] = useState(false);
-  const [wantsHostedLinksPanel, setWantsHostedLinksPanel] = useState(false);
   const [showAdvancedTransferSettings, setShowAdvancedTransferSettings] = useState(false);
   const [directChunkMegabytesDraft, setDirectChunkMegabytesDraft] = useState(() =>
     String(chunkBytesToMegabytes(directTransferChunkBytes)),
@@ -484,12 +476,9 @@ export default function SettingsScreen() {
     tone: "default" | "warning";
   } | null>(null);
   const [purchaseNotice, setPurchaseNotice] = useState<string | null>(null);
-  const [hostedNotice, setHostedNotice] = useState<string | null>(null);
-  const [hostedPasscode, setHostedPasscode] = useState("");
   const isPremium = premiumAccess.isPremium;
   const isTestFlight = isTestFlightBuild();
   const canShowLocalPremiumOverride = canUseLocalPremiumOverride();
-  const showHostedLinksPanel = wantsHostedLinksPanel && isPremium;
   const recommendedPackageIdentifier = getRecommendedPackageIdentifier(plans.availablePackages);
   const isSubscriptionActionDisabled = !isSignedIn || isLoadingCustomerInfo;
 
@@ -602,62 +591,6 @@ export default function SettingsScreen() {
     setShowPremiumDetails(true);
   }
 
-  async function handleCreateHostedUpload() {
-    if (!sessionUser) {
-      setShowPremiumDetails(true);
-      setHostedNotice("Sign in first to use hosted links.");
-      return;
-    }
-
-    if (!isPremium) {
-      setShowPremiumDetails(true);
-      setHostedNotice(`${FILE_TRANSFERS_PRO_NAME} is required to create hosted links.`);
-      return;
-    }
-
-    const files = await pickTransferFiles();
-    const [selectedFile] = files;
-
-    if (!selectedFile) {
-      return;
-    }
-
-    const trimmedPasscode = hostedPasscode.trim();
-    const passcode = trimmedPasscode.length > 0 ? trimmedPasscode : null;
-
-    try {
-      setHostedNotice(null);
-      const createResult = await createHostedUploadMutation.mutateAsync({
-        fileName: selectedFile.name,
-        mimeType: selectedFile.mimeType,
-        sizeBytes: selectedFile.sizeBytes,
-        passcode,
-      });
-
-      const uploadFile = new File(selectedFile.uri);
-      const uploadResponse = await fetch(createResult.uploadUrl, {
-        method: createResult.uploadMethod,
-        headers: createResult.uploadHeaders,
-        body: uploadFile,
-      });
-
-      if (!uploadResponse.ok) {
-        setHostedNotice(`Upload failed with status ${uploadResponse.status}.`);
-        return;
-      }
-
-      const completed = await completeHostedUploadMutation.mutateAsync({
-        hostedFileId: createResult.hostedFile.id,
-      });
-
-      setHostedPasscode("");
-      setHostedNotice(`Hosted link ready: ${completed.downloadPageUrl}`);
-      setWantsHostedLinksPanel(true);
-    } catch (error) {
-      setHostedNotice(error instanceof Error ? error.message : "Unable to upload the hosted file.");
-    }
-  }
-
   function handleSaveTransferChunkSettings() {
     const nextDirectTransferChunkBytes = parseChunkMegabytesDraft(directChunkMegabytesDraft);
     const nextFreeTransferChunkBytes = parseChunkMegabytesDraft(freeChunkMegabytesDraft);
@@ -707,8 +640,8 @@ export default function SettingsScreen() {
                 </Text>
                 <Text style={styles.heroDescription}>
                   {isPremium
-                    ? "Unlimited local transfer size and speed are unlocked on this device, and hosted links are ready when you sign in."
-                    : "Unlimited transfer size and speed, hosted browser links, and RevenueCat billing."}
+                    ? "Unlimited local transfer size and speed are unlocked on this device, and hosted URLs are ready from Transfer when you sign in."
+                    : "Unlimited transfer size and speed, hosted browser links from Transfer, and RevenueCat billing."}
                 </Text>
               </View>
             </View>
@@ -771,23 +704,12 @@ export default function SettingsScreen() {
           <View style={styles.group}>
             <SettingItem
               description={
-                isPremium ? "Create and manage browser download links" : `${FILE_TRANSFERS_PRO_NAME} feature`
+                isPremium
+                  ? "Create hosted URLs from Transfer and reshare or delete them from Files."
+                  : `${FILE_TRANSFERS_PRO_NAME} adds hosted URLs from Transfer and management in Files.`
               }
               icon={<Link color={designTheme.secondaryForeground} size={18} strokeWidth={1.9} />}
               label={"Hosted Links"}
-              onPress={() => {
-                if (!isPremium) {
-                  setShowPremiumDetails(true);
-                  setHostedNotice(
-                    isSignedIn
-                      ? `${FILE_TRANSFERS_PRO_NAME} is required to create hosted links.`
-                      : `Sign in first, then upgrade to ${FILE_TRANSFERS_PRO_NAME} to create hosted links.`,
-                  );
-                  return;
-                }
-
-                setWantsHostedLinksPanel((current) => !current);
-              }}
             />
             {!isPremium ? (
               <SettingItem
@@ -805,84 +727,6 @@ export default function SettingsScreen() {
             ) : null}
           </View>
         </View>
-
-        {showHostedLinksPanel ? (
-          <View style={styles.section}>
-            <View style={styles.panel}>
-              <Text style={styles.panelTitle}>Hosted links</Text>
-              <Text style={styles.panelCopy}>Create a browser download link with an optional 6-digit passcode.</Text>
-              <TextInput
-                keyboardType={"number-pad"}
-                maxLength={6}
-                onChangeText={setHostedPasscode}
-                placeholder={"Optional 6-digit passcode"}
-                placeholderTextColor={designTheme.mutedForeground}
-                style={styles.hostedInput}
-                value={hostedPasscode}
-              />
-              <PrimaryButton
-                disabled={createHostedUploadMutation.isPending || completeHostedUploadMutation.isPending}
-                label={
-                  createHostedUploadMutation.isPending || completeHostedUploadMutation.isPending
-                    ? "Uploading..."
-                    : "Create hosted link"
-                }
-                onPress={() => {
-                  void handleCreateHostedUpload();
-                }}
-              />
-
-              {hostedNotice ? <InlineNotice description={hostedNotice} title={"Hosted link"} /> : null}
-              {hostedFilesQuery.error ? (
-                <InlineNotice
-                  description={
-                    hostedFilesQuery.error instanceof Error
-                      ? hostedFilesQuery.error.message
-                      : "Unable to load hosted links."
-                  }
-                  title={"Hosted links"}
-                  tone={"danger"}
-                />
-              ) : null}
-
-              <View style={styles.hostedList}>
-                {hostedFilesQuery.data?.length ? (
-                  hostedFilesQuery.data.map((hostedFile) => (
-                    <View key={hostedFile.id} style={styles.hostedFileRow}>
-                      <View style={styles.hostedFileCopy}>
-                        <Text numberOfLines={1} style={styles.hostedFileName}>
-                          {hostedFile.fileName}
-                        </Text>
-                        <Text style={styles.hostedFileMeta}>
-                          Expires {new Date(hostedFile.expiresAt).toLocaleDateString()}
-                          {hostedFile.requiresPasscode ? " • Passcode" : ""}
-                        </Text>
-                      </View>
-                      <View style={styles.hostedActions}>
-                        <SecondaryButton
-                          label={"Open"}
-                          onPress={() => {
-                            void Linking.openURL(hostedFile.downloadPageUrl);
-                          }}
-                        />
-                        <SecondaryButton
-                          label={deleteHostedFileMutation.isPending ? "Deleting..." : "Delete"}
-                          onPress={() => {
-                            void deleteHostedFileMutation.mutateAsync({ hostedFileId: hostedFile.id });
-                          }}
-                          tone={"danger"}
-                          disabled={deleteHostedFileMutation.isPending}
-                        />
-                      </View>
-                    </View>
-                  ))
-                ) : (
-                  <InlineNotice description={"You have not created any hosted links yet."} title={"No hosted links"} />
-                )}
-              </View>
-            </View>
-          </View>
-        ) : null}
 
         <View style={styles.section}>
           <Text style={styles.sectionLabel}>Transfers</Text>
@@ -1037,7 +881,7 @@ export default function SettingsScreen() {
         <View style={styles.footerNote}>
           <Text style={styles.footerNoteText}>
             Free senders stay anonymous over nearby WiFi with up to 100 MB and 5 MB/s. Premium removes the sender limits
-            and adds hosted links.
+            and adds hosted URLs you create from Transfer and manage in Files.
           </Text>
         </View>
       </ScrollView>
@@ -1172,7 +1016,6 @@ export default function SettingsScreen() {
                       label={"Sign out"}
                       onPress={() => {
                         void signOut();
-                        setWantsHostedLinksPanel(false);
                       }}
                       tone={"danger"}
                     />

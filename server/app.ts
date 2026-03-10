@@ -13,10 +13,11 @@ import { auth } from "./auth";
 import { db } from "./db/client";
 import { hostedFile, subscriptionMembership } from "./db/schema";
 import { serverEnv } from "./env";
+import { verifyHostedShareToken } from "./hosted-share-token";
 import { createAttachmentContentDisposition } from "../lib/file-transfer/content-disposition";
 import { PREMIUM_ENTITLEMENT_ALIASES } from "@/lib/subscriptions";
 import { createDownloadLink, readLocalStoredFile, storeUploadedFile } from "./storage/hosted-storage";
-import { verifyHostedFilePasscode } from "./trpc/routers/hosted-files";
+import { getHostedFileEffectiveStatus, verifyHostedFilePasscode } from "./trpc/routers/hosted-files";
 import { createTRPCContext } from "./trpc/context";
 import { appRouter } from "./trpc/router";
 
@@ -30,7 +31,8 @@ function hostedDownloadPageHtml({
   fileName,
   sizeBytes,
   expiresAt,
-  slug,
+  pagePath,
+  downloadPath,
   requiresPasscode,
   errorMessage,
   passcode,
@@ -38,7 +40,8 @@ function hostedDownloadPageHtml({
   fileName: string;
   sizeBytes: number;
   expiresAt: string;
-  slug: string;
+  pagePath: string;
+  downloadPath: string;
   requiresPasscode: boolean;
   errorMessage?: string | null;
   passcode?: string | null;
@@ -78,14 +81,14 @@ function hostedDownloadPageHtml({
         </div>
         ${
           requiresPasscode
-            ? `<form method="get" action="/h/${slug}">
+            ? `<form method="get" action="${pagePath}">
                 <label for="passcode">Passcode</label>
                 <input id="passcode" class="input" inputmode="numeric" pattern="[0-9]*" maxlength="6" name="passcode" value="${encodedPasscode}" placeholder="Enter 6-digit passcode" />
                 <button class="button" type="submit">Unlock download</button>
               </form>`
-            : `<a class="button" href="/h/${slug}/download">Download file</a>`
+            : `<a class="button" href="${downloadPath}">Download file</a>`
         }
-        ${requiresPasscode && passcode && !errorMessage ? `<a class="button" style="margin-top:12px;" href="/h/${slug}/download?passcode=${encodedPasscode}">Download file</a>` : ""}
+        ${requiresPasscode && passcode && !errorMessage ? `<a class="button" style="margin-top:12px;" href="${downloadPath}?passcode=${encodedPasscode}">Download file</a>` : ""}
         ${errorMessage ? `<div class="notice">${errorMessage}</div>` : ""}
       </section>
     </main>
@@ -97,6 +100,62 @@ async function getHostedFileBySlug(slug: string) {
   return db.query.hostedFile.findFirst({
     where: eq(hostedFile.slug, slug),
   });
+}
+
+async function markHostedFileExpiredIfNeeded(record: typeof hostedFile.$inferSelect) {
+  if (record.status === "deleted" || getHostedFileEffectiveStatus(record) !== "expired" || record.status === "expired") {
+    return;
+  }
+
+  await db
+    .update(hostedFile)
+    .set({
+      status: "expired",
+      updatedAt: new Date(),
+    })
+    .where(eq(hostedFile.id, record.id));
+}
+
+async function getHostedFileByShareToken(token: string) {
+  const verification = await verifyHostedShareToken(token);
+  if (!verification.hostedFileId) {
+    return {
+      record: null,
+      status: verification.status === "expired" ? "expired" : "missing",
+    } as const;
+  }
+
+  const record = await db.query.hostedFile.findFirst({
+    where: eq(hostedFile.id, verification.hostedFileId),
+  });
+
+  if (!record || record.status === "deleted") {
+    return {
+      record: null,
+      status: "missing",
+    } as const;
+  }
+
+  const effectiveStatus = getHostedFileEffectiveStatus(record);
+  if (effectiveStatus === "expired" || verification.status === "expired") {
+    await markHostedFileExpiredIfNeeded(record);
+    return {
+      record,
+      status: "expired",
+    } as const;
+  }
+
+  if (effectiveStatus !== "active") {
+    return {
+      record,
+      status: "missing",
+    } as const;
+  }
+
+  return {
+    record,
+    status: "active",
+  } as const;
 }
 
 app.use("*", logger());
@@ -163,7 +222,8 @@ app.get("/h/:slug", async (c) => {
         fileName: "Hosted file unavailable",
         sizeBytes: 0,
         expiresAt: new Date().toISOString(),
-        slug: c.req.param("slug"),
+        pagePath: `/h/${c.req.param("slug")}`,
+        downloadPath: `/h/${c.req.param("slug")}/download`,
         requiresPasscode: false,
         errorMessage: "This hosted file no longer exists.",
       }),
@@ -171,13 +231,15 @@ app.get("/h/:slug", async (c) => {
     );
   }
 
-  if (record.expiresAt <= new Date() || record.status === "expired") {
+  if (getHostedFileEffectiveStatus(record) === "expired") {
+    await markHostedFileExpiredIfNeeded(record);
     return c.html(
       hostedDownloadPageHtml({
         fileName: record.fileName,
         sizeBytes: record.sizeBytes,
         expiresAt: record.expiresAt.toISOString(),
-        slug: record.slug,
+        pagePath: `/h/${record.slug}`,
+        downloadPath: `/h/${record.slug}/download`,
         requiresPasscode: record.requiresPasscode,
         errorMessage: "This hosted file has expired.",
       }),
@@ -193,7 +255,8 @@ app.get("/h/:slug", async (c) => {
       fileName: record.fileName,
       sizeBytes: record.sizeBytes,
       expiresAt: record.expiresAt.toISOString(),
-      slug: record.slug,
+      pagePath: `/h/${record.slug}`,
+      downloadPath: `/h/${record.slug}/download`,
       requiresPasscode: record.requiresPasscode,
       errorMessage: record.requiresPasscode && passcode && !passcodeIsValid ? "That passcode is incorrect." : null,
       passcode: passcode ?? null,
@@ -208,7 +271,8 @@ app.get("/h/:slug/download", async (c) => {
     return c.json({ error: "Hosted file not found." }, 404);
   }
 
-  if (record.expiresAt <= new Date() || record.status === "expired") {
+  if (getHostedFileEffectiveStatus(record) === "expired") {
+    await markHostedFileExpiredIfNeeded(record);
     return c.json({ error: "Hosted file expired." }, 410);
   }
 
@@ -238,6 +302,97 @@ app.get("/h/:slug/download", async (c) => {
   const contents = await readLocalStoredFile(record.storageKey);
   c.header("content-type", record.mimeType);
   c.header("content-disposition", createAttachmentContentDisposition(record.fileName));
+  return c.body(contents);
+});
+
+app.get("/s/:token", async (c) => {
+  const token = c.req.param("token");
+  const result = await getHostedFileByShareToken(token);
+
+  if (!result.record || result.status === "missing") {
+    return c.html(
+      hostedDownloadPageHtml({
+        fileName: "Hosted file unavailable",
+        sizeBytes: 0,
+        expiresAt: new Date().toISOString(),
+        pagePath: `/s/${token}`,
+        downloadPath: `/s/${token}/download`,
+        requiresPasscode: false,
+        errorMessage: "This hosted file no longer exists.",
+      }),
+      404,
+    );
+  }
+
+  if (result.status === "expired") {
+    return c.html(
+      hostedDownloadPageHtml({
+        fileName: result.record.fileName,
+        sizeBytes: result.record.sizeBytes,
+        expiresAt: result.record.expiresAt.toISOString(),
+        pagePath: `/s/${token}`,
+        downloadPath: `/s/${token}/download`,
+        requiresPasscode: result.record.requiresPasscode,
+        errorMessage: "This hosted file has expired.",
+      }),
+      410,
+    );
+  }
+
+  const passcode = c.req.query("passcode");
+  const passcodeIsValid = verifyHostedFilePasscode(result.record, passcode);
+
+  return c.html(
+    hostedDownloadPageHtml({
+      fileName: result.record.fileName,
+      sizeBytes: result.record.sizeBytes,
+      expiresAt: result.record.expiresAt.toISOString(),
+      pagePath: `/s/${token}`,
+      downloadPath: `/s/${token}/download`,
+      requiresPasscode: result.record.requiresPasscode,
+      errorMessage: result.record.requiresPasscode && passcode && !passcodeIsValid ? "That passcode is incorrect." : null,
+      passcode: passcode ?? null,
+    }),
+  );
+});
+
+app.get("/s/:token/download", async (c) => {
+  const result = await getHostedFileByShareToken(c.req.param("token"));
+
+  if (!result.record || result.status === "missing") {
+    return c.json({ error: "Hosted file not found." }, 404);
+  }
+
+  if (result.status === "expired") {
+    return c.json({ error: "Hosted file expired." }, 410);
+  }
+
+  const passcode = c.req.query("passcode");
+  if (!verifyHostedFilePasscode(result.record, passcode)) {
+    return c.json({ error: "Invalid passcode." }, 403);
+  }
+
+  const redirectUrl = await createDownloadLink({
+    storageKey: result.record.storageKey,
+    fileName: result.record.fileName,
+    mimeType: result.record.mimeType,
+  });
+
+  await db
+    .update(hostedFile)
+    .set({
+      downloadCount: sql`${hostedFile.downloadCount} + 1`,
+      updatedAt: new Date(),
+    })
+    .where(eq(hostedFile.id, result.record.id));
+
+  if (redirectUrl) {
+    return c.redirect(redirectUrl, 302);
+  }
+
+  const contents = await readLocalStoredFile(result.record.storageKey);
+  c.header("content-type", result.record.mimeType);
+  c.header("content-disposition", createAttachmentContentDisposition(result.record.fileName));
   return c.body(contents);
 });
 

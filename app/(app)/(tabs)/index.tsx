@@ -1,6 +1,7 @@
 import { router } from "expo-router";
 import { useIsFocused } from "@react-navigation/native";
 import * as Burnt from "burnt";
+import { File as ExpoFile } from "expo-file-system";
 import React, { startTransition, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -10,6 +11,7 @@ import {
   StyleSheet,
   type StyleProp,
   Text,
+  TextInput,
   type TextStyle,
   View,
   type ViewStyle,
@@ -30,7 +32,14 @@ import {
 } from "lucide-react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { InlineNotice } from "@/components/ui";
+import {
+  useCompleteHostedUpload,
+  useCreateHostedShareLink,
+  useCreateHostedUpload,
+  useDeleteHostedFile,
+} from "@/hooks/queries";
 import { usePremiumAccess } from "@/hooks/use-premium-access";
+import { useSession } from "@/lib/auth-client";
 import { designFonts, designTheme } from "@/lib/design/theme";
 import {
   acceptIncomingTransferOffer,
@@ -38,8 +47,10 @@ import {
   declineIncomingTransferOffer,
   formatBytes,
   isTransferSizeLimitError,
+  normalizeHostedPasscode,
   startHttpShareSession,
   pickTransferFiles,
+  shareHostedLinksAsync,
   startReceivingAvailability,
   startSendingTransfer,
   startNearbyScan,
@@ -57,6 +68,7 @@ import {
   type TransferSession,
 } from "@/lib/file-transfer";
 import { noteTransferScreenRender } from "@/lib/file-transfer/transfer-perf";
+import { FILE_TRANSFERS_PRO_NAME } from "@/lib/subscriptions";
 import { useAppStore, useDeviceName, useServiceInstanceId } from "@/store";
 
 type TransferMode = "idle" | "sending" | "waiting" | "receiving" | "transferring" | "sharing";
@@ -149,6 +161,12 @@ function MimeIcon({ type }: { type: string }) {
 
 function getTransferDetail(value: string | null | undefined, fallback: string) {
   return value ?? fallback;
+}
+
+function ensureHostedUploadSucceeded(response: Response) {
+  if (!response.ok) {
+    throw new Error(`Upload failed with status ${response.status}.`);
+  }
 }
 
 function formatTransferSpeed(bytesPerSecond: number) {
@@ -400,7 +418,14 @@ export default function TransferScreen() {
   const bottomLinkPadding = insets.bottom + 16;
   const deviceName = useDeviceName();
   const serviceInstanceId = useServiceInstanceId();
+  const { data: session } = useSession();
+  const sessionUser = session?.user ?? null;
+  const isSignedIn = Boolean(sessionUser);
   const premiumAccess = usePremiumAccess();
+  const createHostedUploadMutation = useCreateHostedUpload();
+  const completeHostedUploadMutation = useCompleteHostedUpload();
+  const createHostedShareLinkMutation = useCreateHostedShareLink();
+  const deleteHostedFileMutation = useDeleteHostedFile();
   const upsertRecentTransfer = useAppStore((state) => state.upsertRecentTransfer);
   const [mode, setMode] = useState<TransferMode>("idle");
   const [stagedFiles, setStagedFiles] = useState<SelectedTransferFile[]>([]);
@@ -410,6 +435,9 @@ export default function TransferScreen() {
   const [nearbyRecords, setNearbyRecords] = useState<DiscoveryRecord[]>([]);
   const [transferProgress, setTransferProgress] = useState<TransferProgress | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [hostedNotice, setHostedNotice] = useState<string | null>(null);
+  const [hostedPasscode, setHostedPasscode] = useState("");
+  const [isCreatingHostedLinks, setIsCreatingHostedLinks] = useState(false);
   const [selectionError, setSelectionError] = useState<TransferSizeLimitNotice | null>(null);
   const [showQrCode, setShowQrCode] = useState(false);
   const completionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -983,6 +1011,7 @@ export default function TransferScreen() {
     }
 
     setSelectionError(null);
+    setHostedNotice(null);
     setNotice(null);
     setShowQrCode(false);
     setStagedFiles(nextFiles);
@@ -991,6 +1020,7 @@ export default function TransferScreen() {
 
   function handleRemoveFile(index: number) {
     setSelectionError(null);
+    setHostedNotice(null);
     setStagedFiles((current) => {
       const nextFiles = current.filter((_, fileIndex) => fileIndex !== index);
       if (nextFiles.length === 0) {
@@ -1025,6 +1055,7 @@ export default function TransferScreen() {
     setActiveSendSession(null);
     setTransferProgress(null);
     setNotice(null);
+    setHostedNotice(null);
     setSelectionError(null);
     setShowQrCode(false);
     setMode(stagedFiles.length > 0 ? "sending" : "idle");
@@ -1063,6 +1094,7 @@ export default function TransferScreen() {
       stagedBytes: stagedFiles.reduce((sum, file) => sum + file.sizeBytes, 0),
     });
     setNotice(null);
+    setHostedNotice(null);
     setSelectionError(null);
     setTransferProgress(null);
     setMode("waiting");
@@ -1098,11 +1130,11 @@ export default function TransferScreen() {
           title: error.title,
         });
       } else {
-        setSelectionError(null);
-        setNotice(error instanceof Error ? error.message : "Unable to start this transfer.");
-      }
-      setActiveSendSession(null);
-      setTransferProgress(null);
+      setSelectionError(null);
+      setNotice(error instanceof Error ? error.message : "Unable to start this transfer.");
+    }
+    setActiveSendSession(null);
+    setTransferProgress(null);
       setMode("sending");
     }
   }
@@ -1123,6 +1155,7 @@ export default function TransferScreen() {
       }
 
       setNotice(null);
+      setHostedNotice(null);
       setSelectionError(null);
       setTransferProgress(null);
       setShowQrCode(false);
@@ -1150,6 +1183,181 @@ export default function TransferScreen() {
       setSelectionError(null);
       setNotice(error instanceof Error ? error.message : "Unable to start browser sharing.");
     }
+  }
+
+  async function handleStartHostedShare() {
+    if (stagedFiles.length === 0) {
+      setHostedNotice("Pick files first.");
+      setMode("idle");
+      return;
+    }
+
+    if (!sessionUser) {
+      setHostedNotice("Sign in first, then upgrade in Settings to create hosted URLs.");
+      return;
+    }
+
+    if (!premiumAccess.isPremium) {
+      setHostedNotice(`${FILE_TRANSFERS_PRO_NAME} is required to create hosted URLs.`);
+      return;
+    }
+
+    let passcode: string | null = null;
+
+    try {
+      passcode = normalizeHostedPasscode(hostedPasscode);
+    } catch (error) {
+      setHostedNotice(error instanceof Error ? error.message : "Hosted link passcodes must be 6 digits.");
+      return;
+    }
+
+    setHostedNotice(null);
+    setNotice(null);
+    setSelectionError(null);
+    setIsCreatingHostedLinks(true);
+
+    const sharedLinks: Array<{ fileName: string; shareUrl: string }> = [];
+    const retryFiles: SelectedTransferFile[] = [];
+    const createdButUnsharedFiles: string[] = [];
+    const cleanupFailures: string[] = [];
+
+    for (const stagedFile of stagedFiles) {
+      let createdHostedFileId: string | null = null;
+      let completedHostedFileId: string | null = null;
+
+      try {
+        const createResult = await createHostedUploadMutation.mutateAsync({
+          fileName: stagedFile.name,
+          mimeType: stagedFile.mimeType,
+          sizeBytes: stagedFile.sizeBytes,
+          passcode,
+        });
+
+        createdHostedFileId = createResult.hostedFile.id;
+
+        const uploadResponse = await fetch(createResult.uploadUrl, {
+          method: createResult.uploadMethod,
+          headers: createResult.uploadHeaders,
+          body: new ExpoFile(stagedFile.uri),
+        });
+
+        ensureHostedUploadSucceeded(uploadResponse);
+
+        const completed = await completeHostedUploadMutation.mutateAsync({
+          hostedFileId: createResult.hostedFile.id,
+        });
+
+        completedHostedFileId = completed.id;
+
+        const shareResult = await createHostedShareLinkMutation.mutateAsync({
+          hostedFileId: completed.id,
+          passcode,
+        });
+
+        sharedLinks.push({
+          fileName: stagedFile.name,
+          shareUrl: shareResult.shareUrl,
+        });
+      } catch (error) {
+        logTransferScreenDebug("Hosted share failed for staged file", {
+          fileName: stagedFile.name,
+          hostedFileId: getDebugSessionId(createdHostedFileId),
+          ...getDebugErrorDetails(error),
+        });
+
+        if (completedHostedFileId) {
+          createdButUnsharedFiles.push(stagedFile.name);
+          continue;
+        }
+
+        retryFiles.push(stagedFile);
+
+        if (!createdHostedFileId) {
+          continue;
+        }
+
+        try {
+          await deleteHostedFileMutation.mutateAsync({
+            hostedFileId: createdHostedFileId,
+          });
+        } catch (cleanupError) {
+          cleanupFailures.push(stagedFile.name);
+          logTransferScreenDebug("Hosted share cleanup failed", {
+            fileName: stagedFile.name,
+            hostedFileId: getDebugSessionId(createdHostedFileId),
+            ...getDebugErrorDetails(cleanupError),
+          });
+        }
+      }
+    }
+
+    let shareSheetError: string | null = null;
+
+    if (sharedLinks.length > 0) {
+      try {
+        await shareHostedLinksAsync(sharedLinks, passcode);
+      } catch (error) {
+        shareSheetError = error instanceof Error ? error.message : "Hosted URLs were created but could not be shared.";
+      }
+    }
+
+    setIsCreatingHostedLinks(false);
+
+    if (retryFiles.length === 0 && createdButUnsharedFiles.length === 0) {
+      setHostedPasscode("");
+      setHostedNotice(null);
+      setStagedFiles([]);
+      setMode("idle");
+      setNotice(
+        shareSheetError
+          ? "Hosted URLs were created. Open Files to share them again."
+          : `Hosted URLs ready for ${sharedLinks.length} file${sharedLinks.length === 1 ? "" : "s"}.`,
+      );
+      return;
+    }
+
+    setStagedFiles(retryFiles);
+    setMode(retryFiles.length > 0 ? "sending" : "idle");
+
+    const nextHostedMessages: string[] = [];
+
+    if (sharedLinks.length > 0) {
+      nextHostedMessages.push(
+        `Shared ${sharedLinks.length} hosted URL${sharedLinks.length === 1 ? "" : "s"}${passcode ? ` with passcode ${passcode}.` : "."}`,
+      );
+    } else {
+      nextHostedMessages.push("No hosted URLs were shared.");
+    }
+
+    if (retryFiles.length > 0) {
+      nextHostedMessages.push(
+        `${retryFiles.length} file${retryFiles.length === 1 ? "" : "s"} could not be uploaded and remain staged.`,
+      );
+    }
+
+    if (createdButUnsharedFiles.length > 0) {
+      nextHostedMessages.push(
+        `${createdButUnsharedFiles.length} file${createdButUnsharedFiles.length === 1 ? "" : "s"} uploaded successfully but could not generate a share link. Open Files to share them again.`,
+      );
+    }
+
+    if (cleanupFailures.length > 0) {
+      nextHostedMessages.push("Delete any incomplete hosted items from Files if they appear.");
+    }
+
+    if (shareSheetError) {
+      nextHostedMessages.push("The system share sheet did not open. Open Files to share the generated URLs again.");
+    }
+
+    const nextHostedMessage = nextHostedMessages.join(" ");
+    if (retryFiles.length > 0) {
+      setHostedNotice(nextHostedMessage);
+      return;
+    }
+
+    setHostedPasscode("");
+    setHostedNotice(null);
+    setNotice(nextHostedMessage);
   }
 
   async function handleAcceptIncomingOffer() {
@@ -1190,6 +1398,7 @@ export default function TransferScreen() {
 
   function handleScanQrPress() {
     setNotice(null);
+    setHostedNotice(null);
     setSelectionError(null);
     setPendingScannedReceiver(null);
     router.push("/scan-receiver-qr");
@@ -1319,6 +1528,58 @@ export default function TransferScreen() {
               <Text style={styles.emptySearchLabel}>Looking for receivers...</Text>
             </View>
           )}
+
+          <View style={styles.hostedCard}>
+            <View style={styles.hostedHeader}>
+              <Text style={styles.discoveryTitle}>Hosted URL</Text>
+              <Text style={styles.discoveryHint}>
+                Upload these files for 30 days and share browser links that keep working when your device goes away.
+              </Text>
+            </View>
+
+            {isSignedIn && premiumAccess.isPremium ? (
+              <>
+                <TextInput
+                  keyboardType={"number-pad"}
+                  maxLength={6}
+                  onChangeText={setHostedPasscode}
+                  placeholder={"Optional shared 6-digit passcode"}
+                  placeholderTextColor={designTheme.mutedForeground}
+                  style={styles.hostedInput}
+                  value={hostedPasscode}
+                />
+                <PrimaryButton
+                  disabled={isCreatingHostedLinks}
+                  icon={isCreatingHostedLinks ? <ActivityIndicator color={designTheme.primaryForeground} /> : undefined}
+                  label={isCreatingHostedLinks ? "Creating hosted URLs..." : "Create hosted URLs"}
+                  onPress={() => {
+                    void handleStartHostedShare();
+                  }}
+                  style={styles.hostedPrimaryButton}
+                />
+              </>
+            ) : (
+              <>
+                <InlineNotice
+                  description={
+                    isSignedIn
+                      ? `${FILE_TRANSFERS_PRO_NAME} is required to upload hosted browser links.`
+                      : `Sign in first, then upgrade to ${FILE_TRANSFERS_PRO_NAME} to create hosted browser links.`
+                  }
+                  title={"Hosted URL"}
+                  tone={"warning"}
+                />
+                <OutlineButton
+                  label={"Go to Settings"}
+                  onPress={() => {
+                    router.push("/settings");
+                  }}
+                />
+              </>
+            )}
+
+            {hostedNotice ? <InlineNotice description={hostedNotice} title={"Hosted URL"} /> : null}
+          </View>
         </ScrollView>
 
         <View style={[styles.footerArea, { paddingBottom: footerBottomPadding }]}>
@@ -1711,6 +1972,32 @@ const styles = StyleSheet.create({
   },
   browserShareAction: {
     marginBottom: 24,
+  },
+  hostedCard: {
+    backgroundColor: designTheme.card,
+    borderColor: designTheme.border,
+    borderRadius: 20,
+    borderWidth: 1,
+    gap: 14,
+    marginBottom: 12,
+    padding: 18,
+  },
+  hostedHeader: {
+    gap: 6,
+  },
+  hostedInput: {
+    backgroundColor: designTheme.secondary,
+    borderColor: designTheme.border,
+    borderRadius: 14,
+    borderWidth: 1,
+    color: designTheme.foreground,
+    fontFamily: designFonts.medium,
+    fontSize: 15,
+    minHeight: 50,
+    paddingHorizontal: 14,
+  },
+  hostedPrimaryButton: {
+    alignSelf: "stretch",
   },
   footerArea: {
     borderTopColor: designTheme.border,

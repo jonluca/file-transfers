@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
+import { createHostedShareToken } from "../../hosted-share-token";
 import { hostedFile, subscriptionMembership } from "../../db/schema";
 import { serverEnv } from "../../env";
 import type { TRPCContext } from "../context";
@@ -15,9 +16,40 @@ import { protectedProcedure, router } from "../trpc";
 
 const MAX_HOSTED_FILE_SIZE_BYTES = 10 * 1024 * 1024 * 1024;
 const MAX_ACTIVE_STORAGE_BYTES = 100 * 1024 * 1024 * 1024;
-const DEFAULT_EXPIRY_MILLISECONDS = 7 * 24 * 60 * 60 * 1000;
+const DEFAULT_EXPIRY_MILLISECONDS = 30 * 24 * 60 * 60 * 1000;
+const LISTABLE_HOSTED_FILE_STATUSES = ["pending_upload", "active", "expired"] as const;
+type HostedFileStatus = "pending_upload" | "active" | "expired" | "deleted";
 
-function mapHostedFile(value: typeof hostedFile.$inferSelect) {
+export function getHostedFileEffectiveStatus(
+  value: typeof hostedFile.$inferSelect,
+  now = new Date(),
+): HostedFileStatus {
+  if (value.status === "deleted") {
+    return "deleted";
+  }
+
+  if (value.status === "expired" || value.expiresAt <= now) {
+    return "expired";
+  }
+
+  return value.status as "pending_upload" | "active";
+}
+
+function mapHostedFile(value: typeof hostedFile.$inferSelect): {
+  id: string;
+  slug: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  downloadUrl: string;
+  downloadPageUrl: string;
+  requiresPasscode: boolean;
+  status: HostedFileStatus;
+  expiresAt: string;
+  createdAt: string;
+} {
+  const status = getHostedFileEffectiveStatus(value);
+
   return {
     id: value.id,
     slug: value.slug,
@@ -27,7 +59,7 @@ function mapHostedFile(value: typeof hostedFile.$inferSelect) {
     downloadUrl: `${serverEnv.hostedFilesBaseUrl.replace(/\/+$/, "")}/h/${value.slug}/download`,
     downloadPageUrl: `${serverEnv.hostedFilesBaseUrl.replace(/\/+$/, "")}/h/${value.slug}`,
     requiresPasscode: value.requiresPasscode,
-    status: value.status as "pending_upload" | "active" | "expired" | "deleted",
+    status,
     expiresAt: value.expiresAt.toISOString(),
     createdAt: value.createdAt.toISOString(),
   };
@@ -95,14 +127,42 @@ async function requirePremium(ctx: TRPCContext & { session: NonNullable<TRPCCont
   }
 }
 
+async function markHostedFilesExpired(
+  ctx: TRPCContext & { session: NonNullable<TRPCContext["session"]> },
+  rows: Array<typeof hostedFile.$inferSelect>,
+) {
+  const now = new Date();
+  const expiredIds = rows
+    .filter((row) => row.status !== "expired" && row.status !== "deleted" && row.expiresAt <= now)
+    .map((row) => row.id);
+
+  if (expiredIds.length === 0) {
+    return rows;
+  }
+
+  await ctx.db
+    .update(hostedFile)
+    .set({
+      status: "expired",
+      updatedAt: now,
+    })
+    .where(and(eq(hostedFile.ownerUserId, ctx.session.user.id), inArray(hostedFile.id, expiredIds)));
+
+  return rows.map((row) => (expiredIds.includes(row.id) ? { ...row, status: "expired", updatedAt: now } : row));
+}
+
 export const hostedFilesRouter = router({
   listMine: protectedProcedure.query(async ({ ctx }) => {
     const rows = await ctx.db.query.hostedFile.findMany({
-      where: eq(hostedFile.ownerUserId, ctx.session.user.id),
+      where: and(
+        eq(hostedFile.ownerUserId, ctx.session.user.id),
+        inArray(hostedFile.status, LISTABLE_HOSTED_FILE_STATUSES),
+      ),
       orderBy: [desc(hostedFile.createdAt)],
     });
 
-    return rows.map(mapHostedFile);
+    const normalizedRows = await markHostedFilesExpired(ctx, rows);
+    return normalizedRows.map(mapHostedFile);
   }),
   createUpload: protectedProcedure
     .input(
@@ -224,6 +284,75 @@ export const hostedFilesRouter = router({
         .returning();
 
       return mapHostedFile(updated);
+    }),
+  createShareLink: protectedProcedure
+    .input(
+      z.object({
+        hostedFileId: z.string().min(1),
+        passcode: z.string().regex(/^\d{6}$/).nullable(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      await requirePremium(ctx);
+      assertValidPasscode(input.passcode);
+
+      const row = await ctx.db.query.hostedFile.findFirst({
+        where: and(eq(hostedFile.id, input.hostedFileId), eq(hostedFile.ownerUserId, ctx.session.user.id)),
+      });
+
+      if (!row || row.status === "deleted") {
+        throw new TRPCError({
+          code: "NOT_FOUND",
+          message: "Hosted file not found.",
+        });
+      }
+
+      const effectiveStatus = getHostedFileEffectiveStatus(row);
+      if (effectiveStatus === "expired") {
+        if (row.status !== "expired") {
+          await ctx.db
+            .update(hostedFile)
+            .set({
+              status: "expired",
+              updatedAt: new Date(),
+            })
+            .where(eq(hostedFile.id, row.id));
+        }
+
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "This hosted file has expired.",
+        });
+      }
+
+      if (effectiveStatus !== "active") {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "Finish uploading this hosted file before sharing it.",
+        });
+      }
+
+      const passcodeDigest = createPasscodeDigest(input.passcode);
+      const [updated] = await ctx.db
+        .update(hostedFile)
+        .set({
+          requiresPasscode: passcodeDigest.requiresPasscode,
+          passcodeSalt: passcodeDigest.passcodeSalt,
+          passcodeHash: passcodeDigest.passcodeHash,
+          updatedAt: new Date(),
+        })
+        .where(eq(hostedFile.id, row.id))
+        .returning();
+
+      const token = await createHostedShareToken({
+        hostedFileId: updated.id,
+        expiresAt: updated.expiresAt,
+      });
+
+      return {
+        hostedFile: mapHostedFile(updated),
+        shareUrl: `${serverEnv.hostedFilesBaseUrl.replace(/\/+$/, "")}/s/${token}`,
+      };
     }),
   delete: protectedProcedure
     .input(

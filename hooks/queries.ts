@@ -89,3 +89,15 @@ export function useDeleteHostedFile() {
     },
   });
 }
+
+export function useCreateHostedShareLink() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (input: { hostedFileId: string; passcode: string | null }) =>
+      trpcClient.hostedFiles.createShareLink.mutate(input),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: cloudQueryKeys.hostedFiles });
+    },
+  });
+}
