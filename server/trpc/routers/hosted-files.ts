@@ -16,6 +16,7 @@ import { protectedProcedure, router } from "../trpc";
 
 const MAX_HOSTED_FILE_SIZE_BYTES = 10 * 1024 * 1024 * 1024;
 const MAX_ACTIVE_STORAGE_BYTES = 100 * 1024 * 1024 * 1024;
+const MAX_ACTIVE_STORAGE_BYTES_BIGINT = BigInt(MAX_ACTIVE_STORAGE_BYTES);
 const DEFAULT_EXPIRY_MILLISECONDS = 30 * 24 * 60 * 60 * 1000;
 const LISTABLE_HOSTED_FILE_STATUSES = ["pending_upload", "active", "expired"] as const;
 type HostedFileStatus = "pending_upload" | "active" | "expired" | "deleted";
@@ -182,7 +183,7 @@ export const hostedFilesRouter = router({
 
       const [{ usedBytes }] = await ctx.db
         .select({
-          usedBytes: sql<number>`coalesce(sum(${hostedFile.sizeBytes}), 0)`,
+          usedBytes: sql<bigint>`coalesce(sum(${hostedFile.sizeBytes}), 0)`.mapWith(BigInt),
         })
         .from(hostedFile)
         .where(
@@ -192,7 +193,7 @@ export const hostedFilesRouter = router({
           ),
         );
 
-      if ((usedBytes ?? 0) + input.sizeBytes > MAX_ACTIVE_STORAGE_BYTES) {
+      if ((usedBytes ?? 0n) + BigInt(input.sizeBytes) > MAX_ACTIVE_STORAGE_BYTES_BIGINT) {
         throw new TRPCError({
           code: "BAD_REQUEST",
           message: "This upload would exceed the current 100 GB hosted storage limit.",
