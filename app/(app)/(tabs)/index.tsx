@@ -1139,6 +1139,7 @@ export default function TransferScreen() {
     setTransferProgress(null);
     setNotice(null);
     setHostedNotice(null);
+    setHostedUploadProgress(null);
     setSelectionError(null);
     setShowQrCode(false);
     setMode(stagedFiles.length > 0 ? "sending" : "idle");
@@ -1239,6 +1240,7 @@ export default function TransferScreen() {
 
       setNotice(null);
       setHostedNotice(null);
+      setHostedUploadProgress(null);
       setSelectionError(null);
       setTransferProgress(null);
       setShowQrCode(false);
@@ -1536,6 +1538,7 @@ export default function TransferScreen() {
   function handleScanQrPress() {
     setNotice(null);
     setHostedNotice(null);
+    setHostedUploadProgress(null);
     setSelectionError(null);
     setPendingScannedReceiver(null);
     router.push("/scan-receiver-qr");
@@ -2191,6 +2194,42 @@ const styles = StyleSheet.create({
     fontFamily: designFonts.regular,
     fontSize: 14,
     lineHeight: 21,
+  },
+  hostedProgressCard: {
+    backgroundColor: designTheme.muted,
+    borderColor: designTheme.border,
+    borderRadius: 16,
+    borderWidth: 1,
+    padding: 14,
+  },
+  hostedProgressHeader: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: 12,
+    justifyContent: "space-between",
+  },
+  hostedProgressTitle: {
+    color: designTheme.foreground,
+    flex: 1,
+    fontFamily: designFonts.medium,
+    fontSize: 14,
+  },
+  hostedProgressPercent: {
+    color: designTheme.mutedForeground,
+    fontFamily: designFonts.medium,
+    fontSize: 13,
+  },
+  hostedProgressFileName: {
+    color: designTheme.foreground,
+    fontFamily: designFonts.medium,
+    fontSize: 14,
+    marginTop: 2,
+  },
+  hostedProgressMeta: {
+    color: designTheme.mutedForeground,
+    fontFamily: designFonts.regular,
+    fontSize: 13,
+    lineHeight: 20,
   },
   footerArea: {
     borderTopColor: designTheme.border,
