@@ -280,13 +280,7 @@ function buildBrowserHostedFiles(sessionId: string, files: SelectedTransferFile[
   );
 }
 
-function buildDirectHostedFiles({
-  sessionId,
-  files,
-}: {
-  sessionId: string;
-  files: SelectedTransferFile[];
-}) {
+function buildDirectHostedFiles({ sessionId, files }: { sessionId: string; files: SelectedTransferFile[] }) {
   return files.map((file) =>
     createHostedFileRoute({
       file,
@@ -997,8 +991,9 @@ async function handleDirectRequest(runtime: SharedHttpRuntime, request: HttpRequ
   });
 
   if (pathSegments[1] === "discovery" && ["GET", "HEAD"].includes(method)) {
-    const receiverCount = Array.from(runtime.directReceivers.values()).filter((value) => value.canAcceptOffer?.() ?? true)
-      .length;
+    const receiverCount = Array.from(runtime.directReceivers.values()).filter(
+      (value) => value.canAcceptOffer?.() ?? true,
+    ).length;
     logLocalHttpDebug("Serving direct discovery request", {
       method,
       path: requestPath,

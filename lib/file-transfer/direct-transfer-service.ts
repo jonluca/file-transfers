@@ -600,11 +600,7 @@ async function refreshDiscoveryTarget(target: DiscoveryRecord, senderSessionId: 
       return target;
     }
 
-    if (
-      refreshed.sessionId === target.sessionId &&
-      refreshed.host === target.host &&
-      refreshed.port === target.port
-    ) {
+    if (refreshed.sessionId === target.sessionId && refreshed.host === target.host && refreshed.port === target.port) {
       return target;
     }
 

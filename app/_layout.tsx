@@ -30,10 +30,7 @@ function onAppStateChange(status: AppStateStatus) {
   }
 }
 
-const REVENUECAT_LOGBOX_PATTERNS = [
-  /^\[Purchases\].*ERROR:/,
-  "Unable to initialize RevenueCat session",
-];
+const REVENUECAT_LOGBOX_PATTERNS = [/^\[Purchases\].*ERROR:/, "Unable to initialize RevenueCat session"];
 
 if (__DEV__ && Platform.OS !== "web") {
   // RevenueCat's native logger can still surface SDK-prefixed errors in LogBox.

@@ -140,8 +140,16 @@ function HistoryRow({ entry }: { entry: TransferHistoryEntry }) {
   const firstFile = entry.files[0];
   const DirectionIcon = entry.direction === "send" ? Upload : Download;
   const statusTone = getStatusTone(entry.status);
-  const fileLabel = entry.files.length === 1 ? entry.files[0].name : `${entry.fileCount} files`;
-  const summaryLabel = `${entry.direction === "send" ? "Sent" : "Received"} ${fileLabel} • ${formatBytes(entry.totalBytes)}`;
+  const fileLabel =
+    entry.fileCount === 0
+      ? "No files on device"
+      : entry.files.length === 1
+        ? entry.files[0].name
+        : `${entry.fileCount} files`;
+  const summaryLabel =
+    entry.direction === "receive" && entry.fileCount === 0
+      ? "Received files deleted from this device"
+      : `${entry.direction === "send" ? "Sent" : "Received"} ${fileLabel} • ${formatBytes(entry.totalBytes)}`;
 
   return (
     <View style={styles.row}>
