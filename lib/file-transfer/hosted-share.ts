@@ -19,25 +19,23 @@ export function normalizeHostedPasscode(value: string) {
 }
 
 export function buildHostedShareMessage(items: HostedShareItem[], passcode: string | null) {
-  const lines = items.flatMap((item, index) => [
-    index === 0 ? "Hosted file links" : "",
-    item.fileName,
-    item.shareUrl,
-  ]);
+  const lines = items.flatMap((item, index) => [index === 0 ? "Hosted file links" : "", item.fileName, item.shareUrl]);
 
   if (passcode) {
     lines.push("", `Passcode: ${passcode}`);
   }
 
-  return lines.filter((line, index, values) => {
-    if (line.length > 0) {
-      return true;
-    }
+  return lines
+    .filter((line, index, values) => {
+      if (line.length > 0) {
+        return true;
+      }
 
-    const previous = values[index - 1];
-    const next = values[index + 1];
-    return Boolean(previous && next);
-  }).join("\n");
+      const previous = values[index - 1];
+      const next = values[index + 1];
+      return Boolean(previous && next);
+    })
+    .join("\n");
 }
 
 export async function shareHostedLinksAsync(items: HostedShareItem[], passcode: string | null) {
@@ -45,7 +43,7 @@ export async function shareHostedLinksAsync(items: HostedShareItem[], passcode: 
     throw new Error("Add at least one hosted file before sharing.");
   }
 
-  const title = items.length === 1 ? items[0]?.fileName ?? "Hosted file link" : `Hosted file links (${items.length})`;
+  const title = items.length === 1 ? (items[0]?.fileName ?? "Hosted file link") : `Hosted file links (${items.length})`;
   return Share.share({
     message: buildHostedShareMessage(items, passcode),
     title,

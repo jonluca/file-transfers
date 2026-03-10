@@ -1214,11 +1214,11 @@ export default function TransferScreen() {
           title: error.title,
         });
       } else {
-      setSelectionError(null);
-      setNotice(error instanceof Error ? error.message : "Unable to start this transfer.");
-    }
-    setActiveSendSession(null);
-    setTransferProgress(null);
+        setSelectionError(null);
+        setNotice(error instanceof Error ? error.message : "Unable to start this transfer.");
+      }
+      setActiveSendSession(null);
+      setTransferProgress(null);
       setMode("sending");
     }
   }
@@ -1312,11 +1312,12 @@ export default function TransferScreen() {
     try {
       for (const [index, stagedFile] of stagedFiles.entries()) {
         const fileIndex = index + 1;
+        const uploadedBytesBeforeFile = uploadedBytes;
         let createdHostedFileId: string | null = null;
         let completedHostedFileId: string | null = null;
 
         updateHostedUploadProgress(setHostedUploadProgress, {
-          bytesUploaded: uploadedBytes,
+          bytesUploaded: uploadedBytesBeforeFile,
           totalBytes,
           currentFileName: stagedFile.name,
           currentFileIndex: fileIndex,
@@ -1340,7 +1341,8 @@ export default function TransferScreen() {
             uploadMethod: createResult.uploadMethod,
             uploadUrl: createResult.uploadUrl,
             onProgress: (progress) => {
-              const nextUploadedBytes = uploadedBytes + Math.min(progress.totalBytesSent, stagedFile.sizeBytes);
+              const nextUploadedBytes =
+                uploadedBytesBeforeFile + Math.min(progress.totalBytesSent, stagedFile.sizeBytes);
               updateHostedUploadProgress(setHostedUploadProgress, {
                 bytesUploaded: Math.min(nextUploadedBytes, totalBytes),
                 totalBytes,
@@ -1352,7 +1354,7 @@ export default function TransferScreen() {
             },
           });
 
-          uploadedBytes += stagedFile.sizeBytes;
+          uploadedBytes = uploadedBytesBeforeFile + stagedFile.sizeBytes;
           updateHostedUploadProgress(setHostedUploadProgress, {
             bytesUploaded: Math.min(uploadedBytes, totalBytes),
             totalBytes,
@@ -1423,7 +1425,7 @@ export default function TransferScreen() {
 
       if (sharedLinks.length > 0) {
         updateHostedUploadProgress(setHostedUploadProgress, {
-          bytesUploaded: totalBytes,
+          bytesUploaded: Math.min(uploadedBytes, totalBytes),
           totalBytes,
           currentFileName: sharedLinks.at(-1)?.fileName ?? null,
           currentFileIndex: totalFiles,
@@ -1434,7 +1436,8 @@ export default function TransferScreen() {
         try {
           await shareHostedLinksAsync(sharedLinks, passcode);
         } catch (error) {
-          shareSheetError = error instanceof Error ? error.message : "Hosted URLs were created but could not be shared.";
+          shareSheetError =
+            error instanceof Error ? error.message : "Hosted URLs were created but could not be shared.";
         }
       }
 
@@ -1717,8 +1720,8 @@ export default function TransferScreen() {
                   <Text style={styles.hostedProgressFileName}>{hostedUploadProgress.currentFileName}</Text>
                 ) : null}
                 <Text style={styles.hostedProgressMeta}>
-                  {formatBytes(hostedUploadProgress.bytesUploaded)} of {formatBytes(hostedUploadProgress.totalBytes)} · File{" "}
-                  {Math.max(1, hostedUploadProgress.currentFileIndex)} of {hostedUploadProgress.totalFiles}
+                  {formatBytes(hostedUploadProgress.bytesUploaded)} of {formatBytes(hostedUploadProgress.totalBytes)} ·
+                  File {Math.max(1, hostedUploadProgress.currentFileIndex)} of {hostedUploadProgress.totalFiles}
                 </Text>
               </View>
             ) : null}

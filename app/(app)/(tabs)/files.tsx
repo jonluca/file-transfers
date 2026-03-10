@@ -521,7 +521,7 @@ export default function FilesScreen() {
   );
 
   const systemDownloadsCount = downloadedFiles.filter((file) => !isReceivedFileInDownloadsFolder(file.uri)).length;
-  const hostedFiles = isSignedIn ? hostedFilesQuery.data ?? [] : [];
+  const hostedFiles = isSignedIn ? (hostedFilesQuery.data ?? []) : [];
 
   const refreshFolder = useEffectEvent((directoryUri?: string) => {
     setIsRefreshing(true);
@@ -807,7 +807,9 @@ export default function FilesScreen() {
                   <File color={designTheme.mutedForeground} size={28} strokeWidth={1.8} />
                 </View>
                 <Text style={styles.emptyTitle}>No downloaded files yet</Text>
-                <Text style={styles.emptyCopy}>Received files will appear here after the first completed transfer.</Text>
+                <Text style={styles.emptyCopy}>
+                  Received files will appear here after the first completed transfer.
+                </Text>
               </View>
             ) : (
               downloadedFiles.map((item, index) => (
@@ -829,113 +831,117 @@ export default function FilesScreen() {
         </View>
 
         <View style={styles.section}>
-        <View style={styles.sectionHeader}>
-          <View style={styles.sectionHeaderCopy}>
-            <Text style={styles.sectionTitle}>Downloads folder</Text>
-            <Text style={styles.sectionDescription}>Tap folders to drill in, or tap files to open them.</Text>
-          </View>
-          <Pressable
-            onPress={() => {
-              refreshFolder();
-            }}
-            style={({ pressed }) => [styles.refreshButton, pressed ? styles.pressed : null]}
-          >
-            {isRefreshing ? (
-              <ActivityIndicator color={designTheme.primary} size={"small"} />
-            ) : (
-              <RefreshCw color={designTheme.primary} size={16} strokeWidth={2.1} />
-            )}
-            <Text style={styles.refreshButtonLabel}>Refresh</Text>
-          </Pressable>
-        </View>
-
-        <View style={styles.card}>
-          <View style={styles.navigatorHeader}>
-            <View style={styles.breadcrumbWrap}>
-              {(folderSnapshot?.breadcrumbs ?? [{ label: "Downloads", uri: rootDirectoryUri }]).map((crumb, index) => (
-                <React.Fragment key={crumb.uri}>
-                  {index > 0 ? <ChevronRight color={designTheme.mutedForeground} size={14} strokeWidth={2} /> : null}
-                  <Pressable
-                    onPress={() => {
-                      refreshFolder(crumb.uri);
-                    }}
-                    style={({ pressed }) => [styles.crumbButton, pressed ? styles.pressed : null]}
-                  >
-                    <Text numberOfLines={1} style={styles.crumbLabel}>
-                      {crumb.label}
-                    </Text>
-                  </Pressable>
-                </React.Fragment>
-              ))}
+          <View style={styles.sectionHeader}>
+            <View style={styles.sectionHeaderCopy}>
+              <Text style={styles.sectionTitle}>Downloads folder</Text>
+              <Text style={styles.sectionDescription}>Tap folders to drill in, or tap files to open them.</Text>
             </View>
-
-            {(folderSnapshot?.uri ?? rootDirectoryUri) !== rootDirectoryUri ? (
-              <Pressable
-                onPress={() => {
-                  const crumbs = folderSnapshot?.breadcrumbs ?? [];
-                  const parentCrumb = crumbs.length > 1 ? crumbs[crumbs.length - 2] : null;
-                  refreshFolder(parentCrumb?.uri ?? rootDirectoryUri);
-                }}
-                style={({ pressed }) => [styles.upButton, pressed ? styles.pressed : null]}
-              >
-                <ChevronLeft color={designTheme.primary} size={16} strokeWidth={2.1} />
-                <Text style={styles.upButtonLabel}>Up</Text>
-              </Pressable>
-            ) : null}
-          </View>
-
-          {Platform.OS === "android" && systemDownloadsCount > 0 ? (
-            <View style={styles.notice}>
-              <Text style={styles.noticeTitle}>System Downloads detected</Text>
-              <Text style={styles.noticeCopy}>
-                {systemDownloadsCount} file{systemDownloadsCount === 1 ? "" : "s"} were saved through Android's public
-                Downloads area. They still appear above even when this folder browser cannot enumerate them directly.
-              </Text>
-            </View>
-          ) : null}
-
-          {loadError ? (
-            <View style={styles.notice}>
-              <Text style={styles.noticeTitle}>Folder unavailable</Text>
-              <Text style={styles.noticeCopy}>{loadError}</Text>
-            </View>
-          ) : null}
-
-          {!folderSnapshot && isRefreshing ? (
-            <View style={styles.loadingState}>
-              <ActivityIndicator color={designTheme.primary} size={"small"} />
-              <Text style={styles.loadingCopy}>Loading downloads folder...</Text>
-            </View>
-          ) : null}
-
-          {folderSnapshot && folderSnapshot.entries.length === 0 ? (
-            <View style={styles.emptyBrowserState}>
-              <Folder color={designTheme.mutedForeground} size={28} strokeWidth={1.8} />
-              <Text style={styles.emptyBrowserTitle}>This folder is empty</Text>
-              <Text style={styles.emptyBrowserCopy}>
-                Downloaded files will show up here when they are saved inside the app folder.
-              </Text>
-            </View>
-          ) : null}
-
-          {folderSnapshot?.entries.map((entry, index) => (
-            <View
-              key={entry.uri}
-              style={[styles.rowDivider, index === folderSnapshot.entries.length - 1 ? styles.rowDividerLast : null]}
+            <Pressable
+              onPress={() => {
+                refreshFolder();
+              }}
+              style={({ pressed }) => [styles.refreshButton, pressed ? styles.pressed : null]}
             >
-              <FolderEntryRow
-                deleting={deletingUri === entry.uri}
-                entry={entry}
-                onDeleteFile={(file) => {
-                  confirmDeleteFile(file);
-                }}
-                onOpenDirectory={(uri) => {
-                  refreshFolder(uri);
-                }}
-              />
+              {isRefreshing ? (
+                <ActivityIndicator color={designTheme.primary} size={"small"} />
+              ) : (
+                <RefreshCw color={designTheme.primary} size={16} strokeWidth={2.1} />
+              )}
+              <Text style={styles.refreshButtonLabel}>Refresh</Text>
+            </Pressable>
+          </View>
+
+          <View style={styles.card}>
+            <View style={styles.navigatorHeader}>
+              <View style={styles.breadcrumbWrap}>
+                {(folderSnapshot?.breadcrumbs ?? [{ label: "Downloads", uri: rootDirectoryUri }]).map(
+                  (crumb, index) => (
+                    <React.Fragment key={crumb.uri}>
+                      {index > 0 ? (
+                        <ChevronRight color={designTheme.mutedForeground} size={14} strokeWidth={2} />
+                      ) : null}
+                      <Pressable
+                        onPress={() => {
+                          refreshFolder(crumb.uri);
+                        }}
+                        style={({ pressed }) => [styles.crumbButton, pressed ? styles.pressed : null]}
+                      >
+                        <Text numberOfLines={1} style={styles.crumbLabel}>
+                          {crumb.label}
+                        </Text>
+                      </Pressable>
+                    </React.Fragment>
+                  ),
+                )}
+              </View>
+
+              {(folderSnapshot?.uri ?? rootDirectoryUri) !== rootDirectoryUri ? (
+                <Pressable
+                  onPress={() => {
+                    const crumbs = folderSnapshot?.breadcrumbs ?? [];
+                    const parentCrumb = crumbs.length > 1 ? crumbs[crumbs.length - 2] : null;
+                    refreshFolder(parentCrumb?.uri ?? rootDirectoryUri);
+                  }}
+                  style={({ pressed }) => [styles.upButton, pressed ? styles.pressed : null]}
+                >
+                  <ChevronLeft color={designTheme.primary} size={16} strokeWidth={2.1} />
+                  <Text style={styles.upButtonLabel}>Up</Text>
+                </Pressable>
+              ) : null}
             </View>
-          ))}
-        </View>
+
+            {Platform.OS === "android" && systemDownloadsCount > 0 ? (
+              <View style={styles.notice}>
+                <Text style={styles.noticeTitle}>System Downloads detected</Text>
+                <Text style={styles.noticeCopy}>
+                  {systemDownloadsCount} file{systemDownloadsCount === 1 ? "" : "s"} were saved through Android's public
+                  Downloads area. They still appear above even when this folder browser cannot enumerate them directly.
+                </Text>
+              </View>
+            ) : null}
+
+            {loadError ? (
+              <View style={styles.notice}>
+                <Text style={styles.noticeTitle}>Folder unavailable</Text>
+                <Text style={styles.noticeCopy}>{loadError}</Text>
+              </View>
+            ) : null}
+
+            {!folderSnapshot && isRefreshing ? (
+              <View style={styles.loadingState}>
+                <ActivityIndicator color={designTheme.primary} size={"small"} />
+                <Text style={styles.loadingCopy}>Loading downloads folder...</Text>
+              </View>
+            ) : null}
+
+            {folderSnapshot && folderSnapshot.entries.length === 0 ? (
+              <View style={styles.emptyBrowserState}>
+                <Folder color={designTheme.mutedForeground} size={28} strokeWidth={1.8} />
+                <Text style={styles.emptyBrowserTitle}>This folder is empty</Text>
+                <Text style={styles.emptyBrowserCopy}>
+                  Downloaded files will show up here when they are saved inside the app folder.
+                </Text>
+              </View>
+            ) : null}
+
+            {folderSnapshot?.entries.map((entry, index) => (
+              <View
+                key={entry.uri}
+                style={[styles.rowDivider, index === folderSnapshot.entries.length - 1 ? styles.rowDividerLast : null]}
+              >
+                <FolderEntryRow
+                  deleting={deletingUri === entry.uri}
+                  entry={entry}
+                  onDeleteFile={(file) => {
+                    confirmDeleteFile(file);
+                  }}
+                  onOpenDirectory={(uri) => {
+                    refreshFolder(uri);
+                  }}
+                />
+              </View>
+            ))}
+          </View>
         </View>
       </ScrollView>
 
@@ -971,9 +977,7 @@ export default function FilesScreen() {
 
             <View style={styles.hostedModalContent}>
               <Text style={styles.hostedModalTitle}>Share hosted URL</Text>
-              <Text style={styles.hostedModalDescription}>
-                {shareTarget?.fileName ?? "Hosted file"}
-              </Text>
+              <Text style={styles.hostedModalDescription}>{shareTarget?.fileName ?? "Hosted file"}</Text>
               <Text style={styles.hostedModalHint}>
                 Leave the passcode blank to remove any current protection before generating a fresh link.
               </Text>

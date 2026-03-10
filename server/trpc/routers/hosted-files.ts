@@ -299,7 +299,10 @@ export const hostedFilesRouter = router({
     .input(
       z.object({
         hostedFileId: z.string().min(1),
-        passcode: z.string().regex(/^\d{6}$/).nullable(),
+        passcode: z
+          .string()
+          .regex(/^\d{6}$/)
+          .nullable(),
       }),
     )
     .mutation(async ({ ctx, input }) => {

@@ -103,7 +103,11 @@ async function getHostedFileBySlug(slug: string) {
 }
 
 async function markHostedFileExpiredIfNeeded(record: typeof hostedFile.$inferSelect) {
-  if (record.status === "deleted" || getHostedFileEffectiveStatus(record) !== "expired" || record.status === "expired") {
+  if (
+    record.status === "deleted" ||
+    getHostedFileEffectiveStatus(record) !== "expired" ||
+    record.status === "expired"
+  ) {
     return;
   }
 
@@ -350,7 +354,8 @@ app.get("/s/:token", async (c) => {
       pagePath: `/s/${token}`,
       downloadPath: `/s/${token}/download`,
       requiresPasscode: result.record.requiresPasscode,
-      errorMessage: result.record.requiresPasscode && passcode && !passcodeIsValid ? "That passcode is incorrect." : null,
+      errorMessage:
+        result.record.requiresPasscode && passcode && !passcodeIsValid ? "That passcode is incorrect." : null,
       passcode: passcode ?? null,
     }),
   );

@@ -3,9 +3,7 @@ import { errors as joseErrors, jwtVerify, SignJWT } from "jose";
 import { serverEnv } from "./env";
 
 const HOSTED_SHARE_TOKEN_AUDIENCE = "file-transfers-hosted-share";
-const HOSTED_SHARE_TOKEN_SECRET = createHash("sha256")
-  .update(`hosted-share:${serverEnv.betterAuthSecret}`)
-  .digest();
+const HOSTED_SHARE_TOKEN_SECRET = createHash("sha256").update(`hosted-share:${serverEnv.betterAuthSecret}`).digest();
 
 function readHostedFileIdFromToken(token: string) {
   try {
@@ -24,13 +22,7 @@ function readHostedFileIdFromToken(token: string) {
   }
 }
 
-export async function createHostedShareToken({
-  hostedFileId,
-  expiresAt,
-}: {
-  hostedFileId: string;
-  expiresAt: Date;
-}) {
+export async function createHostedShareToken({ hostedFileId, expiresAt }: { hostedFileId: string; expiresAt: Date }) {
   return new SignJWT({})
     .setProtectedHeader({ alg: "HS256" })
     .setAudience(HOSTED_SHARE_TOKEN_AUDIENCE)
