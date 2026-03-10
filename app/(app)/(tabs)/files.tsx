@@ -110,7 +110,16 @@ async function handleOpenFile(file: Pick<ReceivedFileRecord, "uri" | "mimeType">
     await openReceivedFileAsync(file);
   } catch (error) {
     console.error("Unable to open downloaded file", error);
-    Alert.alert("Unable to open file", "Try sharing it to another app instead.");
+
+    try {
+      const didShare = await shareReceivedFileAsync(file);
+      if (!didShare) {
+        Alert.alert("Unable to open file", "This device cannot open or share the selected file.");
+      }
+    } catch (shareError) {
+      console.error("Unable to share downloaded file after open failed", shareError);
+      Alert.alert("Unable to open file", "This device could not open the file or show the share menu.");
+    }
   }
 }
 
@@ -351,10 +360,7 @@ export default function FilesScreen() {
     [downloadedFiles],
   );
 
-  const systemDownloadsCount = useMemo(
-    () => downloadedFiles.filter((file) => !isReceivedFileInDownloadsFolder(file.uri)).length,
-    [downloadedFiles],
-  );
+  const systemDownloadsCount = downloadedFiles.filter((file) => !isReceivedFileInDownloadsFolder(file.uri)).length;
 
   const refreshFolder = useEffectEvent((directoryUri?: string) => {
     setIsRefreshing(true);
@@ -371,9 +377,11 @@ export default function FilesScreen() {
       startTransition(() => {
         setLoadError(error instanceof Error ? error.message : "Unable to load the downloads folder.");
       });
-    } finally {
       setIsRefreshing(false);
+      return;
     }
+
+    setIsRefreshing(false);
   });
 
   useEffect(() => {
@@ -398,9 +406,11 @@ export default function FilesScreen() {
     } catch (error) {
       console.error("Unable to delete downloaded file", error);
       Alert.alert("Unable to delete file", "Please try again in a moment.");
-    } finally {
       setDeletingUri((currentUri) => (currentUri === file.uri ? null : currentUri));
+      return;
     }
+
+    setDeletingUri((currentUri) => (currentUri === file.uri ? null : currentUri));
   });
 
   const confirmDeleteFile = useEffectEvent((file: Pick<ReceivedFileRecord, "name" | "uri" | "mimeType">) => {
