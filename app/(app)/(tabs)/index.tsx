@@ -251,6 +251,17 @@ function updateHostedUploadProgress(
   });
 }
 
+function finishHostedUploadProgress({
+  setHostedUploadProgress,
+  setIsCreatingHostedLinks,
+}: {
+  setHostedUploadProgress: React.Dispatch<React.SetStateAction<HostedUploadProgressState | null>>;
+  setIsCreatingHostedLinks: React.Dispatch<React.SetStateAction<boolean>>;
+}) {
+  setIsCreatingHostedLinks(false);
+  updateHostedUploadProgress(setHostedUploadProgress, null);
+}
+
 function formatTransferSpeed(bytesPerSecond: number) {
   if (!Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0) {
     return "Calculating...";
