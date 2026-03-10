@@ -453,9 +453,6 @@ export default function FilesScreen() {
         <Text style={styles.summaryDescription}>
           Browse your recent downloads below and inspect the app downloads folder with the folder navigator.
         </Text>
-        <Text numberOfLines={2} selectable style={styles.pathLabel}>
-          {folderSnapshot?.rootUri ?? rootDirectoryUri}
-        </Text>
       </View>
 
       <View style={styles.section}>
@@ -659,12 +656,6 @@ const styles = StyleSheet.create({
     fontFamily: designFonts.regular,
     fontSize: 14,
     lineHeight: 20,
-  },
-  pathLabel: {
-    color: designTheme.primary,
-    fontFamily: designFonts.regular,
-    fontSize: 12,
-    lineHeight: 18,
   },
   section: {
     gap: 12,

@@ -186,10 +186,12 @@ function PremiumPackageCard({
   selectedPackage,
   onPress,
   highlighted,
+  disabled = false,
 }: {
   selectedPackage: PurchasesPackage;
   onPress: () => void;
   highlighted: boolean;
+  disabled?: boolean;
 }) {
   const packageTitle = getPremiumPackageTitle(selectedPackage);
   const packagePrice = getPremiumPackagePriceLabel(selectedPackage);
@@ -197,11 +199,13 @@ function PremiumPackageCard({
 
   return (
     <Pressable
+      disabled={disabled}
       onPress={onPress}
       style={({ pressed }) => [
         styles.packageCard,
         highlighted ? styles.packageCardHighlighted : null,
-        pressed ? styles.pressed : null,
+        disabled ? styles.disabled : null,
+        pressed && !disabled ? styles.pressed : null,
       ]}
     >
       <View style={styles.packageHeader}>
@@ -409,6 +413,10 @@ function waitForModalDismissal() {
   });
 }
 
+function getSubscriptionSignInRequiredMessage() {
+  return `Sign in before subscribing to ${FILE_TRANSFERS_PRO_NAME}.`;
+}
+
 export default function SettingsScreen() {
   const insets = useSafeAreaInsets();
   const topInset = getTabScreenTopInset(insets.top);
@@ -425,6 +433,8 @@ export default function SettingsScreen() {
   const setFreeTransferChunkBytes = useAppStore((state) => state.setFreeTransferChunkBytes);
   const resetTransferChunkBytes = useAppStore((state) => state.resetTransferChunkBytes);
   const { data: session } = useSession();
+  const sessionUser = session?.user ?? null;
+  const isSignedIn = Boolean(sessionUser);
   const premiumAccess = usePremiumAccess();
   const {
     customerInfo,
@@ -439,12 +449,16 @@ export default function SettingsScreen() {
     refreshCustomerInfo,
     restorePurchases,
   } = useRevenueCat();
-  const hostedFilesQuery = useHostedFiles(Boolean(session?.user && premiumAccess.isPremium));
+  const hostedFilesQuery = useHostedFiles(Boolean(sessionUser && premiumAccess.isPremium));
   const createHostedUploadMutation = useCreateHostedUpload();
   const completeHostedUploadMutation = useCompleteHostedUpload();
   const deleteHostedFileMutation = useDeleteHostedFile();
-  const { errorMessage: appleError, isSigningIn: isSigningInWithApple, triggerAppleSignIn } = useAppleSignIn();
-  const { errorMessage: googleError, isSigningIn: isSigningInWithGoogle, triggerGoogleSignIn } = useGoogleSignIn();
+  const { errorMessage: appleError, isSigningIn: isSigningInWithApple, triggerAppleSignIn } = useAppleSignIn({
+    onSuccess: () => setPurchaseNotice(null),
+  });
+  const { errorMessage: googleError, isSigningIn: isSigningInWithGoogle, triggerGoogleSignIn } = useGoogleSignIn({
+    onSuccess: () => setPurchaseNotice(null),
+  });
   const [draftDeviceName, setDraftDeviceName] = useState(deviceName);
   const [isEditingDeviceName, setIsEditingDeviceName] = useState(false);
   const [showPremiumDetails, setShowPremiumDetails] = useState(false);
@@ -468,6 +482,7 @@ export default function SettingsScreen() {
   const canShowLocalPremiumOverride = canUseLocalPremiumOverride();
   const showHostedLinksPanel = wantsHostedLinksPanel && isPremium;
   const recommendedPackageIdentifier = getRecommendedPackageIdentifier(plans.availablePackages);
+  const isSubscriptionActionDisabled = !isSignedIn || isLoadingCustomerInfo;
 
   useEffect(() => {
     setDirectChunkMegabytesDraft(String(chunkBytesToMegabytes(directTransferChunkBytes)));
@@ -484,6 +499,12 @@ export default function SettingsScreen() {
       return;
     }
 
+    if (!isSignedIn) {
+      setPurchaseNotice(getSubscriptionSignInRequiredMessage());
+      setShowPremiumDetails(true);
+      return;
+    }
+
     setPurchaseNotice(null);
 
     const nextCustomerInfo = await purchasePackage(selectedPackage);
@@ -492,12 +513,10 @@ export default function SettingsScreen() {
       return;
     }
 
-    const nextEntitlement = mapCustomerInfoToEntitlement(nextCustomerInfo, Boolean(session?.user));
+    const nextEntitlement = mapCustomerInfoToEntitlement(nextCustomerInfo, isSignedIn);
     setPurchaseNotice(
       nextEntitlement.isPremium
-        ? session?.user
-          ? `${FILE_TRANSFERS_PRO_NAME} is active on this account.`
-          : `${FILE_TRANSFERS_PRO_NAME} is active on this device. Sign in when you want hosted links or cross-device restore.`
+        ? `${FILE_TRANSFERS_PRO_NAME} is active on this account.`
         : "The purchase completed, but the entitlement is not active yet.",
     );
   }
@@ -505,6 +524,12 @@ export default function SettingsScreen() {
   async function handleRestorePurchases() {
     if (!hasConfiguredRevenueCat) {
       setPurchaseNotice("Add the RevenueCat public API keys to this build to enable live purchases.");
+      setShowPremiumDetails(true);
+      return;
+    }
+
+    if (!isSignedIn) {
+      setPurchaseNotice(`Sign in before restoring ${FILE_TRANSFERS_PRO_NAME}.`);
       setShowPremiumDetails(true);
       return;
     }
@@ -517,17 +542,13 @@ export default function SettingsScreen() {
       return;
     }
 
-    const nextEntitlement = mapCustomerInfoToEntitlement(nextCustomerInfo, Boolean(session?.user));
+    const nextEntitlement = mapCustomerInfoToEntitlement(nextCustomerInfo, isSignedIn);
     if (!nextEntitlement.isPremium) {
       setPurchaseNotice(`No active ${FILE_TRANSFERS_PRO_NAME} subscription was found to restore.`);
       return;
     }
 
-    setPurchaseNotice(
-      session?.user
-        ? "Purchases restored."
-        : `${FILE_TRANSFERS_PRO_NAME} is active on this device. Sign in when you want hosted links or cross-device restore.`,
-    );
+    setPurchaseNotice("Purchases restored.");
   }
 
   async function handlePresentPaywall() {
@@ -537,21 +558,17 @@ export default function SettingsScreen() {
       return;
     }
 
+    if (!isSignedIn) {
+      setPurchaseNotice(getSubscriptionSignInRequiredMessage());
+      setShowPremiumDetails(true);
+      return;
+    }
+
     setPurchaseNotice(null);
 
     const paywallResult = await presentPaywall();
     if (!paywallResult) {
       setPurchaseNotice(revenueCatError ?? "Unable to open the RevenueCat paywall.");
-      return;
-    }
-
-    if (
-      (paywallResult === REVENUECAT_PAYWALL_RESULT.PURCHASED || paywallResult === REVENUECAT_PAYWALL_RESULT.RESTORED) &&
-      !session?.user
-    ) {
-      setPurchaseNotice(
-        `${FILE_TRANSFERS_PRO_NAME} is active on this device. Sign in when you want hosted links or cross-device restore.`,
-      );
       return;
     }
 
@@ -577,7 +594,7 @@ export default function SettingsScreen() {
   }
 
   async function handleCreateHostedUpload() {
-    if (!session?.user) {
+    if (!sessionUser) {
       setShowPremiumDetails(true);
       setHostedNotice("Sign in first to use hosted links.");
       return;
@@ -753,7 +770,7 @@ export default function SettingsScreen() {
                 if (!isPremium) {
                   setShowPremiumDetails(true);
                   setHostedNotice(
-                    session?.user
+                    isSignedIn
                       ? `${FILE_TRANSFERS_PRO_NAME} is required to create hosted links.`
                       : `Sign in first, then upgrade to ${FILE_TRANSFERS_PRO_NAME} to create hosted links.`,
                   );
@@ -765,7 +782,11 @@ export default function SettingsScreen() {
             />
             {!isPremium ? (
               <SettingItem
-                description={`Restore ${FILE_TRANSFERS_PRO_NAME} from the current store account`}
+                description={
+                  isSignedIn
+                    ? `Restore ${FILE_TRANSFERS_PRO_NAME} from the current store account`
+                    : `Sign in before restoring ${FILE_TRANSFERS_PRO_NAME} from the current store account`
+                }
                 icon={<RefreshCw color={designTheme.secondaryForeground} size={18} strokeWidth={1.9} />}
                 label={"Restore Purchase"}
                 onPress={() => {
@@ -1044,14 +1065,15 @@ export default function SettingsScreen() {
                 <PremiumBenefit label={"Up to 10 GB per file"} />
               </View>
 
-              {session?.user ? (
-                <InlineNotice description={session.user.email ?? "Signed in"} title={"App account linked"} />
+              {sessionUser ? (
+                <InlineNotice description={sessionUser?.email ?? "Signed in"} title={"App account linked"} />
               ) : (
                 <InlineNotice
                   description={
-                    "Buy or restore on this device now. Sign in only when you want hosted links or cross-device restore."
+                    `Sign in before subscribing or restoring ${FILE_TRANSFERS_PRO_NAME} so billing stays linked to your app account.`
                   }
-                  title={"No app account required"}
+                  title={"Sign-in required"}
+                  tone={"warning"}
                 />
               )}
 
@@ -1073,6 +1095,7 @@ export default function SettingsScreen() {
                     plans.availablePackages.map((selectedPackage) => (
                       <PremiumPackageCard
                         key={selectedPackage.identifier}
+                        disabled={isSubscriptionActionDisabled}
                         highlighted={selectedPackage.identifier === recommendedPackageIdentifier}
                         onPress={() => {
                           void handlePurchase(selectedPackage);
@@ -1105,8 +1128,14 @@ export default function SettingsScreen() {
                 ) : null}
 
                 <PrimaryButton
-                  disabled={!hasConfiguredRevenueCat || isLoadingCustomerInfo}
-                  label={isPremium ? "Open Customer Center" : "Open paywall"}
+                  disabled={!hasConfiguredRevenueCat || (!isPremium && !isSignedIn) || isLoadingCustomerInfo}
+                  label={
+                    isPremium
+                      ? "Open Customer Center"
+                      : isSignedIn
+                        ? "Open paywall"
+                        : "Sign in to subscribe"
+                  }
                   onPress={() => {
                     if (isPremium) {
                       void handleOpenCustomerCenter();
@@ -1119,8 +1148,8 @@ export default function SettingsScreen() {
 
                 {hasConfiguredRevenueCat && !isPremium ? (
                   <SecondaryButton
-                    disabled={isLoadingCustomerInfo}
-                    label={"Restore purchases"}
+                    disabled={isSubscriptionActionDisabled}
+                    label={isSignedIn ? "Restore purchases" : "Sign in to restore purchases"}
                     onPress={() => {
                       void handleRestorePurchases();
                     }}
@@ -1136,7 +1165,7 @@ export default function SettingsScreen() {
                   />
                 ) : null}
 
-                {!session?.user ? (
+                {!sessionUser ? (
                   <>
                     <PrimaryButton
                       disabled={isSigningInWithApple}
@@ -1176,7 +1205,7 @@ export default function SettingsScreen() {
               {googleError ? <InlineNotice description={googleError} title={"Google sign-in"} tone={"danger"} /> : null}
 
               <SecondaryButton
-                label={session?.user ? "Done" : "Maybe later"}
+                label={sessionUser ? "Done" : "Maybe later"}
                 onPress={() => setShowPremiumDetails(false)}
               />
             </ScrollView>

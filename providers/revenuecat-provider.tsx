@@ -5,6 +5,7 @@ import { PAYWALL_RESULT } from "react-native-purchases-ui";
 import type { EntitlementStatus } from "@/lib/file-transfer";
 import { useSyncPurchase } from "@/hooks/queries";
 import { useSession } from "@/lib/auth-client";
+import { FILE_TRANSFERS_PRO_NAME } from "@/lib/subscriptions";
 import {
   addCustomerInfoUpdateListener,
   configurePurchases,
@@ -35,6 +36,10 @@ const EMPTY_ENTITLEMENT: EntitlementStatus = {
   managementUrl: null,
   expiresAt: null,
 };
+
+function getSubscriptionSignInRequiredMessage() {
+  return `Sign in before subscribing to ${FILE_TRANSFERS_PRO_NAME}.`;
+}
 
 interface RevenueCatContextValue {
   isConfigured: boolean;
@@ -246,6 +251,12 @@ export function RevenueCatProvider({ children }: { children: React.ReactNode }) 
       return null;
     }
 
+    if (!sessionUserId) {
+      const message = getSubscriptionSignInRequiredMessage();
+      setLastError(message);
+      return null;
+    }
+
     if (customerInfo && mapCustomerInfoToEntitlement(customerInfo, Boolean(sessionUserId)).isPremium) {
       return PAYWALL_RESULT.NOT_PRESENTED;
     }
@@ -284,6 +295,12 @@ export function RevenueCatProvider({ children }: { children: React.ReactNode }) 
       return null;
     }
 
+    if (!sessionUserId) {
+      const message = getSubscriptionSignInRequiredMessage();
+      setLastError(message);
+      return null;
+    }
+
     setIsLoadingCustomerInfo(true);
 
     try {
@@ -306,6 +323,12 @@ export function RevenueCatProvider({ children }: { children: React.ReactNode }) 
   async function restorePurchases() {
     if (!isConfigured) {
       setLastError("RevenueCat is not configured for this build.");
+      return null;
+    }
+
+    if (!sessionUserId) {
+      const message = `Sign in before restoring ${FILE_TRANSFERS_PRO_NAME}.`;
+      setLastError(message);
       return null;
     }
 

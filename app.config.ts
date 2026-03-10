@@ -1,7 +1,7 @@
 import type { ConfigContext, ExpoConfig } from "expo/config";
 import { withXcodeProject } from "expo/config-plugins";
 
-const VERSION = "1.0.0";
+const VERSION = "0.1.0";
 const IOS_IN_APP_PURCHASE_CAPABILITY = "com.apple.InAppPurchase";
 
 function withIosInAppPurchaseCapability(config: ExpoConfig) {
