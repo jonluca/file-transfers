@@ -1,7 +1,7 @@
 import Constants from "expo-constants";
 
 const DEV_API_PORT = 3001;
-const PRODUCTION_API_URL = "https://filetransfersapp.com";
+export const PRODUCTION_API_URL = "https://filetransfersapp.com";
 
 function trimTrailingSlash(value: string) {
   return value.replace(/\/+$/, "");

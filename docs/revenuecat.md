@@ -141,7 +141,7 @@ async function handleManageSubscription() {
 - Configure RevenueCat once, then use `logIn` / `logOut` for app identity changes.
 - Listen for `CustomerInfo` updates instead of only checking state after button presses.
 - Treat `CustomerInfo.entitlements.active` as the source of truth for premium access.
-- Allow anonymous purchases locally, but encourage sign-in for hosted links and cross-device restore.
+- Require an app sign-in before purchase or restore flows so the RevenueCat customer stays linked to the Better Auth user.
 - Keep RevenueCat UI as the primary purchase surface, not a hand-built purchase sheet.
 - Refresh customer info when the app becomes active.
 - Handle cancel, pending, offline, and configuration errors with explicit user-facing messages.
@@ -150,9 +150,10 @@ async function handleManageSubscription() {
 
 1. Launch a fresh development build, not Expo Go.
 2. Open Settings.
-3. Confirm the current offering shows monthly and yearly plans.
-4. Open the paywall and complete a sandbox purchase.
-5. Verify transfer speed unlocks immediately.
-6. Restore purchases from Settings.
-7. Open Customer Center from Settings.
-8. Confirm the RevenueCat webhook updates the backend membership row after a purchase or renewal.
+3. Sign in with Apple or Google from the premium modal.
+4. Confirm the current offering shows monthly and yearly plans.
+5. Open the paywall and complete a sandbox purchase.
+6. Verify transfer speed unlocks immediately.
+7. Restore purchases from Settings while signed in.
+8. Open Customer Center from Settings.
+9. Confirm the RevenueCat webhook updates the backend membership row after a purchase or renewal.

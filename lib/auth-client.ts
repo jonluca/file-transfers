@@ -2,13 +2,13 @@ import { expoClient } from "@better-auth/expo/client";
 import * as AppleAuthentication from "expo-apple-authentication";
 import * as SecureStore from "expo-secure-store";
 import { createAuthClient } from "better-auth/react";
-import { getApiBaseUrl } from "@/lib/api-config";
+import { PRODUCTION_API_URL } from "@/lib/api-config";
 
 const AUTH_STORAGE_PREFIX = "file-transfers-auth";
 const AUTH_CALLBACK_URL = "filetransfers://auth-callback";
 
 export const authClient = createAuthClient({
-  baseURL: getApiBaseUrl(),
+  baseURL: PRODUCTION_API_URL,
   plugins: [
     expoClient({
       scheme: "filetransfers",
