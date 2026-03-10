@@ -1495,18 +1495,14 @@ export default function TransferScreen() {
 
           <View style={styles.discoverySection}>
             <Text style={styles.discoveryTitle}>Choose a receiver</Text>
-            <Text style={styles.discoveryHint}>
-              Pick a nearby device, scan its QR code, or share these files in a browser on the same WiFi network.
-            </Text>
+            <Text style={styles.discoveryHint}>Pick a nearby device or scan its QR code.</Text>
           </View>
 
           <View style={styles.browserShareAction}>
             <OutlineButton
-              label={"Share in browser"}
-              icon={<Globe color={designTheme.primary} size={16} strokeWidth={2} />}
-              onPress={() => {
-                void handleStartBrowserShare();
-              }}
+              label={"Scan QR code"}
+              icon={<QrCode color={designTheme.primary} size={16} strokeWidth={2} />}
+              onPress={handleScanQrPress}
             />
           </View>
 
@@ -1529,12 +1525,26 @@ export default function TransferScreen() {
             </View>
           )}
 
+          <View style={styles.shareOptionCard}>
+            <View style={styles.hostedHeader}>
+              <Text style={styles.discoveryTitle}>Share over local WiFi</Text>
+              <Text style={styles.discoveryHint}>
+                Open a temporary browser page on this device for anyone on the same WiFi network.
+              </Text>
+            </View>
+            <OutlineButton
+              label={"Share in browser"}
+              icon={<Globe color={designTheme.primary} size={16} strokeWidth={2} />}
+              onPress={() => {
+                void handleStartBrowserShare();
+              }}
+            />
+          </View>
+
           <View style={styles.hostedCard}>
             <View style={styles.hostedHeader}>
               <Text style={styles.discoveryTitle}>Hosted URL</Text>
-              <Text style={styles.discoveryHint}>
-                Upload these files for 30 days and share browser links that keep working when your device goes away.
-              </Text>
+              <Text style={styles.discoveryHint}>Upload these files for 30 days and share a download link.</Text>
             </View>
 
             {isSignedIn && premiumAccess.isPremium ? (
@@ -1560,15 +1570,11 @@ export default function TransferScreen() {
               </>
             ) : (
               <>
-                <InlineNotice
-                  description={
-                    isSignedIn
-                      ? `${FILE_TRANSFERS_PRO_NAME} is required to upload hosted browser links.`
-                      : `Sign in first, then upgrade to ${FILE_TRANSFERS_PRO_NAME} to create hosted browser links.`
-                  }
-                  title={"Hosted URL"}
-                  tone={"warning"}
-                />
+                <Text style={styles.hostedGateCopy}>
+                  {isSignedIn
+                    ? `Upgrade to ${FILE_TRANSFERS_PRO_NAME} in Settings to create hosted links.`
+                    : `Sign in from Settings, then upgrade to ${FILE_TRANSFERS_PRO_NAME} to create hosted links.`}
+                </Text>
                 <OutlineButton
                   label={"Go to Settings"}
                   onPress={() => {
@@ -1586,11 +1592,6 @@ export default function TransferScreen() {
           <Text style={styles.footerMeta}>
             {stagedFiles.length} file{stagedFiles.length === 1 ? "" : "s"} · {formatBytes(totalStagedBytes)}
           </Text>
-          <OutlineButton
-            label={"Scan receiver QR code"}
-            icon={<QrCode color={designTheme.primary} size={16} strokeWidth={2} />}
-            onPress={handleScanQrPress}
-          />
           {notice ? <Text style={styles.footerNotice}>{notice}</Text> : null}
         </View>
       </View>
@@ -1973,6 +1974,16 @@ const styles = StyleSheet.create({
   browserShareAction: {
     marginBottom: 24,
   },
+  shareOptionCard: {
+    backgroundColor: designTheme.card,
+    borderColor: designTheme.border,
+    borderRadius: 20,
+    borderWidth: 1,
+    gap: 14,
+    marginBottom: 12,
+    marginTop: 24,
+    padding: 18,
+  },
   hostedCard: {
     backgroundColor: designTheme.card,
     borderColor: designTheme.border,
@@ -1998,6 +2009,12 @@ const styles = StyleSheet.create({
   },
   hostedPrimaryButton: {
     alignSelf: "stretch",
+  },
+  hostedGateCopy: {
+    color: designTheme.mutedForeground,
+    fontFamily: designFonts.regular,
+    fontSize: 14,
+    lineHeight: 21,
   },
   footerArea: {
     borderTopColor: designTheme.border,
@@ -2231,7 +2248,7 @@ const styles = StyleSheet.create({
   emptySearchState: {
     alignItems: "center",
     justifyContent: "center",
-    paddingVertical: 56,
+    paddingVertical: 32,
   },
   emptySearchIcon: {
     alignItems: "center",
