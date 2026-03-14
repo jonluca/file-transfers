@@ -9,6 +9,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import privacyPolicyText from "./legal/privacy.txt?raw";
 import { LandingPage } from "./landing-page";
 import termsOfServiceText from "./legal/terms.txt?raw";
+import deletionPolicyText from "./legal/deletion.txt?raw";
 import { auth } from "./auth";
 import { db } from "./db/client";
 import { hostedFile, subscriptionMembership } from "./db/schema";
@@ -192,6 +193,7 @@ app.get("/health", (c) =>
 app.get("/privacy.txt", (c) => c.text(privacyPolicyText));
 
 app.get("/terms.txt", (c) => c.text(termsOfServiceText));
+app.get("/deletion.txt", (c) => c.text(deletionPolicyText));
 
 app.on(["GET", "POST"], "/api/auth/*", (c) => auth.handler(c.req.raw));
 
