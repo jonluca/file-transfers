@@ -92,7 +92,7 @@
     "react-native": "0.83.2",
     "react-native-gesture-handler": "~2.30.0",
     "react-native-nitro-http-server": "^1.6.1",
-    "react-native-nitro-modules": "0.35.1",
+    "react-native-nitro-modules": "0.33.7",
     "react-native-purchases": "^9.12.0",
     "react-native-purchases-ui": "^9.12.0",
     "react-native-qrcode-svg": "^6.3.21",
