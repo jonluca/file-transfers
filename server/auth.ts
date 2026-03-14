@@ -1,7 +1,7 @@
 import { createPrivateKey } from "crypto";
 import { expo } from "@better-auth/expo";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
-import { betterAuth } from "better-auth";
+import { betterAuth, type BetterAuthPlugin } from "better-auth";
 import { SignJWT } from "jose";
 import { db } from "./db/client";
 import { authSchema } from "./db/schema";
@@ -63,6 +63,8 @@ async function appleProvider() {
   };
 }
 
+const expoPlugin = expo() as unknown as BetterAuthPlugin;
+
 const socialProviders = {
   ...(serverEnv.appleClientId
     ? {
@@ -95,5 +97,5 @@ export const auth = betterAuth({
     schema: authSchema,
     usePlural: false,
   }),
-  plugins: [expo()],
+  plugins: [expoPlugin],
 });
