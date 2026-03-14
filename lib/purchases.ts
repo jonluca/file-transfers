@@ -216,6 +216,15 @@ export function getPurchaseErrorMessage(error: unknown) {
   return "Unable to complete the RevenueCat request.";
 }
 
+export function isRevenueCatConfigurationError(error: unknown) {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    String((error as PurchasesError).code) === Purchases.PURCHASES_ERROR_CODE.CONFIGURATION_ERROR
+  );
+}
+
 export function isPurchaseCancelledError(error: unknown) {
   return (
     typeof error === "object" &&

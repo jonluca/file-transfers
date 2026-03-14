@@ -14,6 +14,7 @@ import {
   getPaywallResultMessage,
   getPremiumPackages,
   getPurchaseErrorMessage,
+  isRevenueCatConfigurationError,
   loginPurchases,
   logoutPurchases,
   mapCustomerInfoToEntitlement,
@@ -122,7 +123,7 @@ export function RevenueCatProvider({ children }: { children: React.ReactNode }) 
     }
   }
 
-  async function refreshOfferings(options?: { silent?: boolean }) {
+  async function refreshOfferings(options?: { silent?: boolean; allowConfigurationError?: boolean }) {
     if (!isConfigured) {
       return null;
     }
@@ -137,6 +138,11 @@ export function RevenueCatProvider({ children }: { children: React.ReactNode }) 
       setOfferings(nextOfferings);
       return nextOfferings;
     } catch (error) {
+      if (options?.allowConfigurationError && isRevenueCatConfigurationError(error)) {
+        setOfferings(null);
+        return null;
+      }
+
       console.error("Unable to load RevenueCat offerings", error);
       setLastError(getPurchaseErrorMessage(error));
       return null;
@@ -169,6 +175,7 @@ export function RevenueCatProvider({ children }: { children: React.ReactNode }) 
     async function syncIdentity() {
       setIsLoadingCustomerInfo(true);
       setIsLoadingOfferings(true);
+      let didSyncIdentity = false;
 
       try {
         setLastError(null);
@@ -182,7 +189,39 @@ export function RevenueCatProvider({ children }: { children: React.ReactNode }) 
         }
 
         await applyCustomerInfo(nextCustomerInfo);
+        didSyncIdentity = true;
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
 
+        console.error("Unable to initialize RevenueCat session", error);
+        setLastError(getPurchaseErrorMessage(error));
+      } finally {
+        if (!cancelled) {
+          setIsLoadingCustomerInfo(false);
+        }
+      }
+
+      if (!didSyncIdentity) {
+        if (!cancelled) {
+          setOfferings(null);
+          setIsLoadingOfferings(false);
+        }
+
+        return;
+      }
+
+      if (!sessionUserId) {
+        if (!cancelled) {
+          setOfferings(null);
+          setIsLoadingOfferings(false);
+        }
+
+        return;
+      }
+
+      try {
         const nextOfferings = await getOfferings();
         if (cancelled) {
           return;
@@ -194,11 +233,15 @@ export function RevenueCatProvider({ children }: { children: React.ReactNode }) 
           return;
         }
 
-        console.error("Unable to initialize RevenueCat session", error);
+        if (isRevenueCatConfigurationError(error)) {
+          setOfferings(null);
+          return;
+        }
+
+        console.error("Unable to load RevenueCat offerings", error);
         setLastError(getPurchaseErrorMessage(error));
       } finally {
         if (!cancelled) {
-          setIsLoadingCustomerInfo(false);
           setIsLoadingOfferings(false);
         }
       }
@@ -238,7 +281,6 @@ export function RevenueCatProvider({ children }: { children: React.ReactNode }) 
     }
 
     void refreshCustomerInfo({ silent: true });
-    void refreshOfferings({ silent: true });
   });
 
   useEffect(() => {
