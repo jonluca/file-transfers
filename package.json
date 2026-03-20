@@ -83,7 +83,7 @@
     "expo-web-browser": "~55.0.9",
     "hono": "^4.12.7",
     "jose": "6.2.1",
-    "kysely": "0.28.12",
+    "kysely": "0.28.14",
     "lucide-react-native": "^0.577.0",
     "nanostores": "1.1.1",
     "postgres": "^3.4.8",
