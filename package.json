@@ -81,7 +81,7 @@
     "expo-status-bar": "~55.0.4",
     "expo-system-ui": "~55.0.9",
     "expo-web-browser": "~55.0.9",
-    "hono": "^4.12.7",
+    "hono": "^4.12.12",
     "jose": "6.2.1",
     "kysely": "0.28.12",
     "lucide-react-native": "^0.577.0",
