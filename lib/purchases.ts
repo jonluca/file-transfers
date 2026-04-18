@@ -14,6 +14,7 @@ import RevenueCatUI, { PAYWALL_RESULT } from "react-native-purchases-ui";
 import type { PresentCustomerCenterParams } from "react-native-purchases-ui";
 import type { EntitlementStatus } from "@/lib/file-transfer";
 import {
+  FILE_TRANSFERS_PRO_NAME,
   PREMIUM_ENTITLEMENT_ALIASES,
   PREMIUM_ENTITLEMENT_ID,
   PREMIUM_PRODUCT_IDS,
@@ -172,9 +173,9 @@ export async function presentCustomerCenter(params?: PresentCustomerCenterParams
 export function getPaywallResultMessage(result: PAYWALL_RESULT) {
   switch (result) {
     case PAYWALL_RESULT.NOT_PRESENTED:
-      return "File Share Pro is already active.";
+      return `${FILE_TRANSFERS_PRO_NAME} is already active.`;
     case PAYWALL_RESULT.PURCHASED:
-      return "File Share Pro is active on this device.";
+      return `${FILE_TRANSFERS_PRO_NAME} is active on this device.`;
     case PAYWALL_RESULT.RESTORED:
       return "Your purchases were restored.";
     case PAYWALL_RESULT.CANCELLED:

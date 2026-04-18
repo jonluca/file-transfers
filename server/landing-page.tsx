@@ -705,14 +705,14 @@ export function LandingPage() {
       <head>
         <meta charSet={"utf-8"} />
         <meta content={"width=device-width, initial-scale=1"} name={"viewport"} />
-        <title>File Share</title>
+        <title>File Transfers</title>
         <meta
           content={
             "Anonymous-first file transfers for nearby devices, with local Wi-Fi sends and premium hosted browser-download links."
           }
           name={"description"}
         />
-        <meta content={"File Share"} property={"og:title"} />
+        <meta content={"File Transfers"} property={"og:title"} />
         <meta
           content={
             "Move files directly on the same Wi-Fi network, then fall back to hosted browser links when you need wider reach."
@@ -726,11 +726,11 @@ export function LandingPage() {
         <div className={"shell"}>
           <div className={"container"}>
             <header className={"nav"}>
-              <a aria-label={"File Share home"} className={"brand"} href={"/"}>
+              <a aria-label={"File Transfers home"} className={"brand"} href={"/"}>
                 <span aria-hidden={"true"} className={"brand-mark"}>
-                  FS
+                  FT
                 </span>
-                <span>File Share</span>
+                <span>File Transfers</span>
               </a>
               <nav className={"nav-links"}>
                 <a className={"nav-link"} href={"#features"}>
@@ -757,7 +757,7 @@ export function LandingPage() {
                   </div>
                   <h1>Send around the room. Share into the browser.</h1>
                   <p>
-                    File Share keeps nearby transfers fast and simple. Move files device-to-device on the same Wi-Fi
+                    File Transfers keeps nearby transfers fast and simple. Move files device-to-device on the same Wi-Fi
                     network, then use hosted links and passcodes when the recipient needs a browser instead of the app.
                   </p>
                   <div className={"cta-row"}>
@@ -866,8 +866,8 @@ export function LandingPage() {
                         </h3>
                       </div>
                       <p>
-                        File Share is designed for the common case first: people in the same room, on the same network,
-                        needing to move a file quickly. Hosted links exist as an extension of that flow, not a
+                        File Transfers is designed for the common case first: people in the same room, on the same
+                        network, needing to move a file quickly. Hosted links exist as an extension of that flow, not a
                         replacement for it.
                       </p>
                     </article>
@@ -918,7 +918,7 @@ export function LandingPage() {
 
             <footer className={"footer-panel"}>
               <div>
-                <strong>File Share</strong>
+                <strong>File Transfers</strong>
                 <div className={"footer-copy"}>
                   Anonymous-first file transfers with local Wi-Fi sends and hosted browser downloads.
                 </div>

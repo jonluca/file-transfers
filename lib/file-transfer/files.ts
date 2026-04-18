@@ -435,7 +435,7 @@ async function ensureLegacyAndroidDownloadsPermissionAsync() {
 
   const status = await PermissionsAndroid.request(LEGACY_ANDROID_DOWNLOADS_PERMISSION, {
     title: "Save files to Downloads",
-    message: "Allow File Share to save received files in your Downloads folder.",
+    message: "Allow File Transfers to save received files in your Downloads folder.",
     buttonPositive: "Allow",
     buttonNegative: "Not now",
   });

@@ -61,6 +61,14 @@ const fontStyles = {
   semibold: { fontFamily: designFonts.semibold },
 } as const;
 
+const TERMS_OF_USE_URL = "https://www.apple.com/legal/internet-services/itunes/dev/stdeula/";
+const PRIVACY_POLICY_URL = "https://filetransfersapp.com/privacy.txt";
+const SERVICE_TERMS_URL = "https://filetransfersapp.com/terms.txt";
+
+function openLegalUrl(url: string) {
+  void Linking.openURL(url);
+}
+
 function PrimaryButton({
   label,
   onPress,
@@ -203,6 +211,40 @@ function PremiumBenefit({ label }: { label: string }) {
       <Text className={"flex-1 text-sm text-[#030213]"} style={fontStyles.regular}>
         {label}
       </Text>
+    </View>
+  );
+}
+
+function LegalLinkRow({ label, url }: { label: string; url: string }) {
+  return (
+    <Pressable
+      accessibilityRole={"link"}
+      className={"min-h-10 flex-row items-center justify-between gap-3 rounded-[12px] px-3 py-2"}
+      onPress={() => openLegalUrl(url)}
+      style={({ pressed }) => ({ backgroundColor: pressed ? "rgba(37,99,235,0.08)" : "transparent" })}
+    >
+      <View className={"flex-1"}>
+        <Text className={"text-sm text-[#030213]"} style={fontStyles.medium}>
+          {label}
+        </Text>
+        <Text className={"text-xs leading-4 text-[#6b7280]"} style={fontStyles.regular}>
+          {url}
+        </Text>
+      </View>
+      <ChevronRight color={designTheme.mutedForeground} size={17} strokeWidth={2} />
+    </Pressable>
+  );
+}
+
+function LegalLinksCard({ title = "Legal" }: { title?: string }) {
+  return (
+    <View className={"gap-1 rounded-[16px] border border-[#e5e7eb] bg-white p-2"}>
+      <Text className={"px-3 pt-2 text-[13px] uppercase tracking-[0.8px] text-[#6b7280]"} style={fontStyles.medium}>
+        {title}
+      </Text>
+      <LegalLinkRow label={"Terms of Use (EULA)"} url={TERMS_OF_USE_URL} />
+      <LegalLinkRow label={"Privacy Policy"} url={PRIVACY_POLICY_URL} />
+      <LegalLinkRow label={"Service Terms"} url={SERVICE_TERMS_URL} />
     </View>
   );
 }
@@ -917,10 +959,14 @@ export default function SettingsScreen() {
               icon={<Info color={designTheme.secondaryForeground} size={18} strokeWidth={1.9} />}
               label={"About"}
               onPress={() => {
-                Alert.alert("About", `File Share\nVersion ${Constants.expoConfig?.version ?? "1.0.0"}`);
+                Alert.alert("About", `File Transfers\nVersion ${Constants.expoConfig?.version ?? "1.0.0"}`);
               }}
             />
           </View>
+        </View>
+
+        <View className={"mb-6"}>
+          <LegalLinksCard />
         </View>
 
         <View className={"mb-6"}>
@@ -1011,6 +1057,8 @@ export default function SettingsScreen() {
                 <PremiumBenefit label={"Hosted file links in the browser"} />
                 <PremiumBenefit label={"Up to 10 GB per file"} />
               </View>
+
+              <LegalLinksCard title={"Subscription Legal"} />
 
               {sessionUser ? (
                 <InlineNotice description={sessionUser?.email ?? "Signed in"} title={"App account linked"} />

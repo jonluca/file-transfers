@@ -1,10 +1,10 @@
-File Share Terms of Service
+File Transfers Terms of Service
 Last updated: March 8, 2026
 
-File Share lets you send and host files.
+File Transfers lets you send and host files.
 Use the service only for content you own or have permission to share.
 Do not use the service for unlawful content, infringement, malware, abuse, or attempts to disrupt the service.
 Hosted links and transfer sessions may expire, fail, or be removed at any time.
 The service is provided "as is" without warranties, and liability is limited to the maximum extent allowed by law.
 We may suspend or remove access if the service is abused.
-By using File Share, you agree to these terms.
+By using File Transfers, you agree to these terms.

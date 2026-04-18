@@ -190,8 +190,10 @@ app.get("/health", (c) =>
   }),
 );
 
+app.get("/privacy", (c) => c.text(privacyPolicyText));
 app.get("/privacy.txt", (c) => c.text(privacyPolicyText));
 
+app.get("/terms", (c) => c.text(termsOfServiceText));
 app.get("/terms.txt", (c) => c.text(termsOfServiceText));
 app.get("/deletion.txt", (c) => c.text(deletionPolicyText));
 

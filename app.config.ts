@@ -35,7 +35,7 @@ function withIosInAppPurchaseCapability(config: ExpoConfig) {
 export default function getConfig({ config }: ConfigContext): ExpoConfig {
   return withIosInAppPurchaseCapability({
     ...config,
-    name: "File Share",
+    name: "File Transfers",
     slug: "file-transfers",
     version: VERSION,
     icon: "./assets/icon.png",
