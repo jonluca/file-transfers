@@ -32,7 +32,7 @@ export default defineConfig(({ command }) => ({
     emptyOutDir: true,
     sourcemap: true,
     ssr: "server/index.ts",
-    target: "node25",
+    target: "node24",
     rollupOptions: {
       output: {
         entryFileNames: "index.mjs",

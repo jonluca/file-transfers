@@ -4,6 +4,9 @@
   "private": true,
   "main": "main.ts",
   "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": "24.x"
+  },
   "scripts": {
     "server:dev": "vite --config vite.server.config.ts",
     "server:start": "node dist/server/index.mjs",
@@ -115,7 +118,7 @@
     "@better-auth/cli": "^1.4.22",
     "@hono/vite-dev-server": "^0.25.3",
     "@types/babel__core": "^7",
-    "@types/node": "^25.6.0",
+    "@types/node": "^24.12.2",
     "@types/react-dom": "~19.2.3",
     "@typescript/native-preview": "7.0.0-dev.20260430.1",
     "drizzle-kit": "^0.31.10",
@@ -132,6 +135,9 @@
     }
   },
   "pnpm": {
+    "overrides": {
+      "@types/node": "^24.12.2"
+    },
     "onlyBuiltDependencies": [
       "@prisma/client",
       "@prisma/engines",
