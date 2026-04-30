@@ -1,7 +1,6 @@
 import * as ExpoLinking from "expo-linking";
 import React, { createContext, useContext, useEffect, useEffectEvent, useState } from "react";
 import { AppState } from "react-native";
-import { PAYWALL_RESULT } from "react-native-purchases-ui";
 import type { EntitlementStatus } from "@/lib/file-transfer";
 import { useSyncPurchase } from "@/hooks/queries";
 import { useSession } from "@/lib/auth-client";
@@ -11,7 +10,6 @@ import {
   configurePurchases,
   getCustomerInfo,
   getOfferings,
-  getPaywallResultMessage,
   getPremiumPackages,
   getPurchaseErrorMessage,
   isRevenueCatConfigurationError,
@@ -21,7 +19,6 @@ import {
   isPurchaseCancelledError,
   isRevenueCatConfigured,
   presentCustomerCenter as openRevenueCatCustomerCenter,
-  presentPaywall as openRevenueCatPaywall,
   purchasePackage as purchaseRevenueCatPackage,
   restorePurchases as restoreRevenueCatPurchases,
   removeCustomerInfoUpdateListener,
@@ -53,7 +50,6 @@ interface RevenueCatContextValue {
   lastError: string | null;
   refreshCustomerInfo: (options?: { silent?: boolean }) => Promise<RevenueCatCustomerInfo | null>;
   refreshOfferings: (options?: { silent?: boolean }) => Promise<RevenueCatOfferings | null>;
-  presentPaywall: () => Promise<PAYWALL_RESULT | null>;
   purchasePackage: (selectedPackage: RevenueCatPackage) => Promise<RevenueCatCustomerInfo | null>;
   restorePurchases: () => Promise<RevenueCatCustomerInfo | null>;
   presentCustomerCenter: () => Promise<string | null>;
@@ -292,50 +288,6 @@ export function RevenueCatProvider({ children }: { children: React.ReactNode }) 
     return () => subscription.remove();
   }, [isConfigured]);
 
-  async function presentPaywall() {
-    if (!isConfigured) {
-      setLastError("RevenueCat is not configured for this build.");
-      return null;
-    }
-
-    if (!sessionUserId) {
-      const message = getSubscriptionSignInRequiredMessage();
-      setLastError(message);
-      return null;
-    }
-
-    if (customerInfo && mapCustomerInfoToEntitlement(customerInfo, Boolean(sessionUserId)).isPremium) {
-      return PAYWALL_RESULT.NOT_PRESENTED;
-    }
-
-    setIsLoadingCustomerInfo(true);
-
-    try {
-      setLastError(null);
-      const paywallResult = await openRevenueCatPaywall(offerings?.current);
-
-      if (
-        paywallResult === PAYWALL_RESULT.PURCHASED ||
-        paywallResult === PAYWALL_RESULT.RESTORED ||
-        paywallResult === PAYWALL_RESULT.NOT_PRESENTED
-      ) {
-        await refreshCustomerInfo({ silent: true });
-      }
-
-      if (paywallResult === PAYWALL_RESULT.ERROR) {
-        setLastError(getPaywallResultMessage(paywallResult));
-      }
-
-      return paywallResult;
-    } catch (error) {
-      console.error("Unable to present the RevenueCat paywall", error);
-      setLastError(getPurchaseErrorMessage(error));
-      return PAYWALL_RESULT.ERROR;
-    } finally {
-      setIsLoadingCustomerInfo(false);
-    }
-  }
-
   async function purchasePackage(selectedPackage: RevenueCatPackage) {
     if (!isConfigured) {
       setLastError("RevenueCat is not configured for this build.");
@@ -445,7 +397,6 @@ export function RevenueCatProvider({ children }: { children: React.ReactNode }) 
         lastError,
         refreshCustomerInfo,
         refreshOfferings,
-        presentPaywall,
         purchasePackage,
         restorePurchases,
         presentCustomerCenter,

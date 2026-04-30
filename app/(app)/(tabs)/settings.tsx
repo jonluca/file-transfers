@@ -43,7 +43,7 @@ import {
   MIN_TRANSFER_CHUNK_SIZE_MEGABYTES,
   TRANSFER_CHUNK_SIZE_STEP_BYTES,
 } from "@/lib/file-transfer/constants";
-import { getPaywallResultMessage, mapCustomerInfoToEntitlement, REVENUECAT_PAYWALL_RESULT } from "@/lib/purchases";
+import { mapCustomerInfoToEntitlement } from "@/lib/purchases";
 import { FILE_TRANSFERS_PRO_NAME } from "@/lib/subscriptions";
 import { useRevenueCat } from "@/providers/revenuecat-provider";
 import {
@@ -518,9 +518,7 @@ export default function SettingsScreen() {
     isLoadingOfferings,
     lastError: revenueCatError,
     presentCustomerCenter,
-    presentPaywall,
     purchasePackage,
-    refreshCustomerInfo,
     restorePurchases,
   } = useRevenueCat();
   const {
@@ -625,34 +623,6 @@ export default function SettingsScreen() {
     setPurchaseNotice("Purchases restored.");
   }
 
-  async function handlePresentPaywall() {
-    if (!hasConfiguredRevenueCat) {
-      setPurchaseNotice("Add the RevenueCat public API keys to this build to enable live purchases.");
-      setShowPremiumDetails(true);
-      return;
-    }
-
-    if (!isSignedIn) {
-      setPurchaseNotice(getSubscriptionSignInRequiredMessage());
-      setShowPremiumDetails(true);
-      return;
-    }
-
-    setPurchaseNotice(null);
-
-    const paywallResult = await presentPaywall();
-    if (!paywallResult) {
-      setPurchaseNotice(revenueCatError ?? "Unable to open the RevenueCat paywall.");
-      return;
-    }
-
-    if (paywallResult !== REVENUECAT_PAYWALL_RESULT.ERROR) {
-      void refreshCustomerInfo({ silent: true });
-    }
-
-    setPurchaseNotice(getPaywallResultMessage(paywallResult));
-  }
-
   async function handleOpenCustomerCenter() {
     setPurchaseNotice(null);
     setShowPremiumDetails(false);
@@ -720,7 +690,7 @@ export default function SettingsScreen() {
                 <Text className={"text-sm leading-5 text-[rgba(255,255,255,0.82)]"} style={fontStyles.regular}>
                   {isPremium
                     ? "Unlimited local transfer size and speed are unlocked on this device, and hosted URLs are ready from Transfer when you sign in."
-                    : "Unlimited transfer size and speed, hosted browser links from Transfer, and RevenueCat billing."}
+                    : "Unlimited transfer size and speed, hosted browser links from Transfer, and App Store subscription billing."}
                 </Text>
               </View>
             </View>
@@ -1048,8 +1018,7 @@ export default function SettingsScreen() {
                 {FILE_TRANSFERS_PRO_NAME}
               </Text>
               <Text className={"text-center text-sm leading-5 text-[#6b7280]"} style={fontStyles.regular}>
-                RevenueCat manages the subscription lifecycle while the app keeps transfer speed and hosted-link access
-                in sync with customer info.
+                Subscribe through your App Store account to unlock faster local transfers and hosted browser links.
               </Text>
 
               <View className={"mt-1 gap-2.5"}>
@@ -1059,6 +1028,12 @@ export default function SettingsScreen() {
               </View>
 
               <LegalLinksCard title={"Subscription Legal"} />
+              <InlineNotice
+                description={
+                  "Subscriptions renew automatically until canceled and are billed through your App Store account. You can manage or cancel from your App Store subscriptions."
+                }
+                title={"Subscription terms"}
+              />
 
               {sessionUser ? (
                 <InlineNotice description={sessionUser?.email ?? "Signed in"} title={"App account linked"} />
@@ -1124,18 +1099,15 @@ export default function SettingsScreen() {
                       />
                     ) : null}
 
-                    <PrimaryButton
-                      disabled={!hasConfiguredRevenueCat || (!isPremium && !isSignedIn) || isLoadingCustomerInfo}
-                      label={isPremium ? "Open Customer Center" : "Open paywall"}
-                      onPress={() => {
-                        if (isPremium) {
+                    {isPremium ? (
+                      <PrimaryButton
+                        disabled={!hasConfiguredRevenueCat || isLoadingCustomerInfo}
+                        label={"Open Customer Center"}
+                        onPress={() => {
                           void handleOpenCustomerCenter();
-                          return;
-                        }
-
-                        void handlePresentPaywall();
-                      }}
-                    />
+                        }}
+                      />
+                    ) : null}
 
                     {hasConfiguredRevenueCat && !isPremium ? (
                       <SecondaryButton

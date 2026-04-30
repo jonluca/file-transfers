@@ -6,15 +6,13 @@ import Purchases, {
   type CustomerInfoUpdateListener,
   type LogInResult,
   type PurchasesError,
-  type PurchasesOffering,
   type PurchasesOfferings,
   type PurchasesPackage,
 } from "react-native-purchases";
-import RevenueCatUI, { PAYWALL_RESULT } from "react-native-purchases-ui";
+import RevenueCatUI from "react-native-purchases-ui";
 import type { PresentCustomerCenterParams } from "react-native-purchases-ui";
 import type { EntitlementStatus } from "@/lib/file-transfer";
 import {
-  FILE_TRANSFERS_PRO_NAME,
   PREMIUM_ENTITLEMENT_ALIASES,
   PREMIUM_ENTITLEMENT_ID,
   PREMIUM_PRODUCT_IDS,
@@ -151,40 +149,12 @@ export async function getCustomerInfo() {
   return Purchases.getCustomerInfo();
 }
 
-export async function presentPaywall(offering?: PurchasesOffering | null) {
-  if (!ensurePurchasesConfigured()) {
-    throw new Error("RevenueCat is not configured for this build.");
-  }
-
-  return RevenueCatUI.presentPaywall({
-    displayCloseButton: true,
-    offering: offering ?? undefined,
-  });
-}
-
 export async function presentCustomerCenter(params?: PresentCustomerCenterParams) {
   if (!ensurePurchasesConfigured()) {
     throw new Error("RevenueCat is not configured for this build.");
   }
 
   return RevenueCatUI.presentCustomerCenter(params);
-}
-
-export function getPaywallResultMessage(result: PAYWALL_RESULT) {
-  switch (result) {
-    case PAYWALL_RESULT.NOT_PRESENTED:
-      return `${FILE_TRANSFERS_PRO_NAME} is already active.`;
-    case PAYWALL_RESULT.PURCHASED:
-      return `${FILE_TRANSFERS_PRO_NAME} is active on this device.`;
-    case PAYWALL_RESULT.RESTORED:
-      return "Your purchases were restored.";
-    case PAYWALL_RESULT.CANCELLED:
-      return "Purchase cancelled.";
-    case PAYWALL_RESULT.ERROR:
-      return "The paywall could not complete the purchase.";
-    default:
-      return "Unable to complete the purchase flow.";
-  }
 }
 
 export function getPurchaseErrorMessage(error: unknown) {
@@ -303,4 +273,3 @@ export type RevenueCatPackage = PurchasesPackage;
 export type RevenueCatCustomerInfo = CustomerInfo;
 export type RevenueCatLogInResult = LogInResult;
 export const FILE_TRANSFERS_PRO_ENTITLEMENT_ID = PREMIUM_ENTITLEMENT_ID;
-export const REVENUECAT_PAYWALL_RESULT = PAYWALL_RESULT;
