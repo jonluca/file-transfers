@@ -7,11 +7,6 @@ settings:
 overrides:
   '@types/node': ^24.12.2
 
-patchedDependencies:
-  '@dawidzawada/bonjour-zeroconf@2.1.1':
-    hash: 5aa8310a6e27aa8e1d4aa926dd040fd916e80aa6acf8f64481b213712a055bed
-    path: patches/@dawidzawada__bonjour-zeroconf@2.1.1.patch
-
 importers:
 
   .:
@@ -41,8 +36,8 @@ importers:
         specifier: 1.1.21
         version: 1.1.21
       '@dawidzawada/bonjour-zeroconf':
-        specifier: 2.1.1
-        version: 2.1.1(patch_hash=5aa8310a6e27aa8e1d4aa926dd040fd916e80aa6acf8f64481b213712a055bed)(react-native-nitro-modules@0.35.6(react-native@0.83.6(@babel/core@7.29.0)(@react-native/metro-config@0.85.1(@babel/core@7.29.0))(@types/react@19.2.14)(react@19.2.0))(react@19.2.0))(react-native@0.83.6(@babel/core@7.29.0)(@react-native/metro-config@0.85.1(@babel/core@7.29.0))(@types/react@19.2.14)(react@19.2.0))(react@19.2.0)
+        specifier: link:./modules/bonjour-zeroconf
+        version: link:modules/bonjour-zeroconf
       '@expo-google-fonts/geist':
         specifier: ^0.4.1
         version: 0.4.1
@@ -1127,13 +1122,6 @@ packages:
 
   '@clack/prompts@0.11.0':
     resolution: {integrity: sha512-pMN5FcrEw9hUkZA4f+zLlzivQSeQf5dRGJjSUbvVYDLvpKCdQx5OaknvKzgbtXOizhP+SJJJjqEbOe55uKKfAw==}
-
-  '@dawidzawada/bonjour-zeroconf@2.1.1':
-    resolution: {integrity: sha512-cgoJO8/GThT0nIMMslQsq6nciB+WQDPzsVmyW9DW8ZkYwyIEW/Zvxjan+K8wxAVNlcyISkLGitXOW3UCE7iQUA==}
-    peerDependencies:
-      react: '*'
-      react-native: '*'
-      react-native-nitro-modules: '>=0.33.0'
 
   '@drizzle-team/brocli@0.10.2':
     resolution: {integrity: sha512-z33Il7l5dKjUgGULTqBsQBQwckHh5AbIuxhdsIxDDiZAzBOrZO6q9ogcWC65kU382AfynTfgNumVcNIjuIua6w==}
@@ -8043,12 +8031,6 @@ snapshots:
       '@clack/core': 0.5.0
       picocolors: 1.1.1
       sisteransi: 1.0.5
-
-  '@dawidzawada/bonjour-zeroconf@2.1.1(patch_hash=5aa8310a6e27aa8e1d4aa926dd040fd916e80aa6acf8f64481b213712a055bed)(react-native-nitro-modules@0.35.6(react-native@0.83.6(@babel/core@7.29.0)(@react-native/metro-config@0.85.1(@babel/core@7.29.0))(@types/react@19.2.14)(react@19.2.0))(react@19.2.0))(react-native@0.83.6(@babel/core@7.29.0)(@react-native/metro-config@0.85.1(@babel/core@7.29.0))(@types/react@19.2.14)(react@19.2.0))(react@19.2.0)':
-    dependencies:
-      react: 19.2.0
-      react-native: 0.83.6(@babel/core@7.29.0)(@react-native/metro-config@0.85.1(@babel/core@7.29.0))(@types/react@19.2.14)(react@19.2.0)
-      react-native-nitro-modules: 0.35.6(react-native@0.83.6(@babel/core@7.29.0)(@react-native/metro-config@0.85.1(@babel/core@7.29.0))(@types/react@19.2.14)(react@19.2.0))(react@19.2.0)
 
   '@drizzle-team/brocli@0.10.2': {}
 

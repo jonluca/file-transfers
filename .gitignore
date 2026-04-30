@@ -19,3 +19,4 @@ tmp
 
 # Keep local Expo module native sources trackable while ignoring generated Android build output.
 modules/**/android/build/
+modules/**/android/.cxx/

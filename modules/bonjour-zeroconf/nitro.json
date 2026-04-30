@@ -1,0 +1,29 @@
+{
+  "cxxNamespace": ["dawidzawada_bonjourzeroconf"],
+  "ios": {
+    "iosModuleName": "BonjourZeroconf"
+  },
+  "android": {
+    "androidNamespace": ["dawidzawada", "bonjourzeroconf"],
+    "androidCxxLibName": "dawidzawada_bonjourzeroconf"
+  },
+  "autolinking": {
+    "BonjourZeroconf": {
+      "ios": {
+        "language": "swift",
+        "implementationClassName": "BonjourZeroconf"
+      },
+      "android": {
+        "language": "kotlin",
+        "implementationClassName": "BonjourZeroconf"
+      }
+    },
+    "LocalNetworkPermission": {
+      "ios": {
+        "language": "swift",
+        "implementationClassName": "LocalNetworkPermission"
+      }
+    }
+  },
+  "ignorePaths": ["node_modules"]
+}

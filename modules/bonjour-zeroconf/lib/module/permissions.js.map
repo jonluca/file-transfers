@@ -1,0 +1,1 @@
+{"version":3,"names":["requestLocalNetworkPermission","useLocalNetworkPermission"],"sourceRoot":"../../src","sources":["permissions.ts"],"mappings":";;AAAA,OAAO,MAAMA,6BAA6B,GAAG,MAAAA,CAAA,KAAY;EACvD,OAAO,IAAI;AACb,CAAC;AAED,OAAO,MAAMC,yBAAyB,GAAGA,CAAA,KAAM;EAC7C,OAAO,CAAC,IAAI,EAAED,6BAA6B,CAAC;AAC9C,CAAC","ignoreList":[]}

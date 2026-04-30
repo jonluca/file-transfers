@@ -43,7 +43,7 @@
     "@better-auth/expo": "^1.6.9",
     "@better-auth/utils": "0.4.0",
     "@better-fetch/fetch": "1.1.21",
-    "@dawidzawada/bonjour-zeroconf": "2.1.1",
+    "@dawidzawada/bonjour-zeroconf": "link:./modules/bonjour-zeroconf",
     "@expo-google-fonts/geist": "^0.4.1",
     "@expo/dom-webview": "55.0.5",
     "@expo/log-box": "55.0.11",
@@ -145,9 +145,6 @@
       "esbuild",
       "prisma",
       "react-native-nitro-http-server"
-    ],
-    "patchedDependencies": {
-      "@dawidzawada/bonjour-zeroconf@2.1.1": "patches/@dawidzawada__bonjour-zeroconf@2.1.1.patch"
-    }
+    ]
   }
 }
