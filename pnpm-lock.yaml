@@ -7,6 +7,11 @@ settings:
 overrides:
   '@types/node': ^24.12.2
 
+patchedDependencies:
+  '@dawidzawada/bonjour-zeroconf@2.1.1':
+    hash: 5aa8310a6e27aa8e1d4aa926dd040fd916e80aa6acf8f64481b213712a055bed
+    path: patches/@dawidzawada__bonjour-zeroconf@2.1.1.patch
+
 importers:
 
   .:
@@ -37,7 +42,7 @@ importers:
         version: 1.1.21
       '@dawidzawada/bonjour-zeroconf':
         specifier: 2.1.1
-        version: 2.1.1(react-native-nitro-modules@0.35.6(react-native@0.83.6(@babel/core@7.29.0)(@react-native/metro-config@0.85.1(@babel/core@7.29.0))(@types/react@19.2.14)(react@19.2.0))(react@19.2.0))(react-native@0.83.6(@babel/core@7.29.0)(@react-native/metro-config@0.85.1(@babel/core@7.29.0))(@types/react@19.2.14)(react@19.2.0))(react@19.2.0)
+        version: 2.1.1(patch_hash=5aa8310a6e27aa8e1d4aa926dd040fd916e80aa6acf8f64481b213712a055bed)(react-native-nitro-modules@0.35.6(react-native@0.83.6(@babel/core@7.29.0)(@react-native/metro-config@0.85.1(@babel/core@7.29.0))(@types/react@19.2.14)(react@19.2.0))(react@19.2.0))(react-native@0.83.6(@babel/core@7.29.0)(@react-native/metro-config@0.85.1(@babel/core@7.29.0))(@types/react@19.2.14)(react@19.2.0))(react@19.2.0)
       '@expo-google-fonts/geist':
         specifier: ^0.4.1
         version: 0.4.1
@@ -8039,7 +8044,7 @@ snapshots:
       picocolors: 1.1.1
       sisteransi: 1.0.5
 
-  '@dawidzawada/bonjour-zeroconf@2.1.1(react-native-nitro-modules@0.35.6(react-native@0.83.6(@babel/core@7.29.0)(@react-native/metro-config@0.85.1(@babel/core@7.29.0))(@types/react@19.2.14)(react@19.2.0))(react@19.2.0))(react-native@0.83.6(@babel/core@7.29.0)(@react-native/metro-config@0.85.1(@babel/core@7.29.0))(@types/react@19.2.14)(react@19.2.0))(react@19.2.0)':
+  '@dawidzawada/bonjour-zeroconf@2.1.1(patch_hash=5aa8310a6e27aa8e1d4aa926dd040fd916e80aa6acf8f64481b213712a055bed)(react-native-nitro-modules@0.35.6(react-native@0.83.6(@babel/core@7.29.0)(@react-native/metro-config@0.85.1(@babel/core@7.29.0))(@types/react@19.2.14)(react@19.2.0))(react@19.2.0))(react-native@0.83.6(@babel/core@7.29.0)(@react-native/metro-config@0.85.1(@babel/core@7.29.0))(@types/react@19.2.14)(react@19.2.0))(react@19.2.0)':
     dependencies:
       react: 19.2.0
       react-native: 0.83.6(@babel/core@7.29.0)(@react-native/metro-config@0.85.1(@babel/core@7.29.0))(@types/react@19.2.14)(react@19.2.0)

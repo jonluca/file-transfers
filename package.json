@@ -145,6 +145,9 @@
       "esbuild",
       "prisma",
       "react-native-nitro-http-server"
-    ]
+    ],
+    "patchedDependencies": {
+      "@dawidzawada/bonjour-zeroconf@2.1.1": "patches/@dawidzawada__bonjour-zeroconf@2.1.1.patch"
+    }
   }
 }
