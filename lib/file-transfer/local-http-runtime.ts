@@ -2,7 +2,7 @@ import * as Crypto from "expo-crypto";
 import { File } from "expo-file-system";
 import * as Network from "expo-network";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
-import { ConfigServer, type HttpRequest, type HttpResponse, type ServerConfig } from "react-native-nitro-http-server";
+import { HttpServer, type HttpRequest, type HttpResponse } from "react-native-nitro-http-server";
 import {
   collectNativePayloadMetrics,
   ensureNativePayloadServerStarted,
@@ -111,7 +111,7 @@ interface DirectSendRuntime {
 }
 
 interface SharedHttpRuntime {
-  server: ConfigServer | null;
+  server: HttpServer | null;
   publicHost: string;
   browserSession: BrowserShareRuntime | null;
   directReceivers: Map<string, DirectReceiveRuntime>;
@@ -127,6 +127,12 @@ const CACHE_CONTROL_HEADER = "no-store";
 const BROWSER_STATIC_FILES_PREFIX = "/__browser-files";
 const DIRECT_STATIC_FILES_PREFIX = "/__direct-files";
 const LOCAL_HTTP_DEBUG_PREFIX = "[LocalHttpRuntime]";
+const LOCAL_HTTP_STARTUP_PROBE_TIMEOUT_MS = 1_000;
+
+type HttpServerRuntimeFlags = {
+  _isRunning?: boolean;
+  _port?: number;
+};
 
 function logLocalHttpDebug(message: string, details?: Record<string, unknown>) {
   if (!__DEV__) {
@@ -139,6 +145,29 @@ function logLocalHttpDebug(message: string, details?: Record<string, unknown>) {
   }
 
   console.debug(`${LOCAL_HTTP_DEBUG_PREFIX} ${message}`);
+}
+
+async function isRuntimeServerReachable(host: string) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), LOCAL_HTTP_STARTUP_PROBE_TIMEOUT_MS);
+
+  try {
+    await fetch(`http://${host}:${LOCAL_HTTP_SERVER_PORT}/`, {
+      method: "HEAD",
+      signal: controller.signal,
+    });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function markServerRunning(server: HttpServer) {
+  const serverWithRuntimeFlags = server as unknown as HttpServerRuntimeFlags;
+  serverWithRuntimeFlags._isRunning = true;
+  serverWithRuntimeFlags._port = LOCAL_HTTP_SERVER_PORT;
 }
 
 function getSessionDebugId(sessionId: string | null | undefined) {
@@ -709,14 +738,8 @@ async function createFileDownloadResponse({
   }
 }
 
-function createServerConfig() {
-  return {
-    mounts: [],
-  } satisfies ServerConfig;
-}
-
 async function startRuntimeServer(runtime: SharedHttpRuntime) {
-  const server = new ConfigServer();
+  const server = new HttpServer();
   logLocalHttpDebug("Starting local HTTP runtime server", {
     host: runtime.publicHost,
     port: LOCAL_HTTP_SERVER_PORT,
@@ -727,12 +750,18 @@ async function startRuntimeServer(runtime: SharedHttpRuntime) {
   const started = await server.start(
     LOCAL_HTTP_SERVER_PORT,
     (request) => handleRequest(runtime, request),
-    createServerConfig(),
     runtime.publicHost,
   );
 
   if (!started) {
-    throw new Error(`Unable to start the local HTTP server on port ${LOCAL_HTTP_SERVER_PORT}.`);
+    // react-native-nitro-http-server 1.8.x can bind successfully while returning a falsy
+    // value through the Nitro bridge. Probe the listener before treating startup as failed.
+    const isReachable = await isRuntimeServerReachable(runtime.publicHost);
+    if (!isReachable) {
+      throw new Error(`Unable to start the local HTTP server on port ${LOCAL_HTTP_SERVER_PORT}.`);
+    }
+
+    markServerRunning(server);
   }
 
   runtime.server = server;

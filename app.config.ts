@@ -96,7 +96,7 @@ export default function getConfig({ config }: ConfigContext): ExpoConfig {
         "expo-build-properties",
         {
           ios: {
-            deploymentTarget: "17.0",
+            deploymentTarget: "18.0",
           },
           android: {
             minSdkVersion: 28,
