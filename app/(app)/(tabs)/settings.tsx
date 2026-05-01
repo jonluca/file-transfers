@@ -487,10 +487,6 @@ function waitForModalDismissal() {
   });
 }
 
-function getSubscriptionSignInRequiredMessage() {
-  return `Sign in before subscribing to ${FILE_TRANSFERS_PRO_NAME}.`;
-}
-
 export default function SettingsScreen() {
   const insets = useSafeAreaInsets();
   const topInset = getTabScreenTopInset(insets.top);
@@ -554,7 +550,7 @@ export default function SettingsScreen() {
   const isTestFlight = isTestFlightBuild();
   const canShowLocalPremiumOverride = canUseLocalPremiumOverride();
   const recommendedPackageIdentifier = getRecommendedPackageIdentifier(plans.availablePackages);
-  const isSubscriptionActionDisabled = !isSignedIn || isLoadingCustomerInfo;
+  const isSubscriptionActionDisabled = isLoadingCustomerInfo;
 
   useEffect(() => {
     setDirectChunkMegabytesDraft(String(chunkBytesToMegabytes(directTransferChunkBytes)));
@@ -571,12 +567,6 @@ export default function SettingsScreen() {
       return;
     }
 
-    if (!isSignedIn) {
-      setPurchaseNotice(getSubscriptionSignInRequiredMessage());
-      setShowPremiumDetails(true);
-      return;
-    }
-
     setPurchaseNotice(null);
 
     const nextCustomerInfo = await purchasePackage(selectedPackage);
@@ -588,7 +578,9 @@ export default function SettingsScreen() {
     const nextEntitlement = mapCustomerInfoToEntitlement(nextCustomerInfo, isSignedIn);
     setPurchaseNotice(
       nextEntitlement.isPremium
-        ? `${FILE_TRANSFERS_PRO_NAME} is active on this account.`
+        ? isSignedIn
+          ? `${FILE_TRANSFERS_PRO_NAME} is active on this account.`
+          : `${FILE_TRANSFERS_PRO_NAME} is active on this device. Sign in anytime to restore access on other supported devices.`
         : "The purchase completed, but the entitlement is not active yet.",
     );
   }
@@ -596,12 +588,6 @@ export default function SettingsScreen() {
   async function handleRestorePurchases() {
     if (!hasConfiguredRevenueCat) {
       setPurchaseNotice("Add the RevenueCat public API keys to this build to enable live purchases.");
-      setShowPremiumDetails(true);
-      return;
-    }
-
-    if (!isSignedIn) {
-      setPurchaseNotice(`Sign in before restoring ${FILE_TRANSFERS_PRO_NAME}.`);
       setShowPremiumDetails(true);
       return;
     }
@@ -620,7 +606,11 @@ export default function SettingsScreen() {
       return;
     }
 
-    setPurchaseNotice("Purchases restored.");
+    setPurchaseNotice(
+      isSignedIn
+        ? `${FILE_TRANSFERS_PRO_NAME} purchases restored on this account.`
+        : `${FILE_TRANSFERS_PRO_NAME} purchases restored on this device. Sign in anytime to restore access on other supported devices.`,
+    );
   }
 
   async function handleOpenCustomerCenter() {
@@ -769,11 +759,7 @@ export default function SettingsScreen() {
             />
             {!isPremium ? (
               <SettingItem
-                description={
-                  isSignedIn
-                    ? `Restore ${FILE_TRANSFERS_PRO_NAME} from the current store account`
-                    : `Sign in before restoring ${FILE_TRANSFERS_PRO_NAME} from the current store account`
-                }
+                description={`Restore ${FILE_TRANSFERS_PRO_NAME} from the current store account`}
                 icon={<RefreshCw color={designTheme.secondaryForeground} size={18} strokeWidth={1.9} />}
                 label={"Restore Purchase"}
                 onPress={() => {
@@ -1039,9 +1025,8 @@ export default function SettingsScreen() {
                 <InlineNotice description={sessionUser?.email ?? "Signed in"} title={"App account linked"} />
               ) : (
                 <InlineNotice
-                  description={`Sign in before subscribing or restoring ${FILE_TRANSFERS_PRO_NAME} so billing stays linked to your app account.`}
-                  title={"Sign-in required"}
-                  tone={"warning"}
+                  description={`You can subscribe without signing in. Signing in is optional and lets you restore ${FILE_TRANSFERS_PRO_NAME} on other supported devices.`}
+                  title={"Account optional"}
                 />
               )}
 
@@ -1053,89 +1038,87 @@ export default function SettingsScreen() {
               ) : null}
 
               <View className={"gap-3"}>
-                {sessionUser ? (
-                  <>
-                    {hasConfiguredRevenueCat ? (
-                      isLoadingOfferings && !plans.availablePackages.length ? (
-                        <View className={"flex-row items-center gap-3"}>
-                          <ActivityIndicator color={designTheme.primary} />
-                          <Text className={"text-sm text-[#6b7280]"} style={fontStyles.regular}>
-                            Loading {FILE_TRANSFERS_PRO_NAME} plans...
-                          </Text>
-                        </View>
-                      ) : plans.availablePackages.length ? (
-                        plans.availablePackages.map((selectedPackage) => (
-                          <PremiumPackageCard
-                            key={selectedPackage.identifier}
-                            disabled={isSubscriptionActionDisabled}
-                            highlighted={selectedPackage.identifier === recommendedPackageIdentifier}
-                            onPress={() => {
-                              void handlePurchase(selectedPackage);
-                            }}
-                            selectedPackage={selectedPackage}
-                          />
-                        ))
-                      ) : (
-                        <InlineNotice
-                          description={
-                            "Create a current offering in RevenueCat and attach the subscription packages you want to sell in this build."
-                          }
-                          title={"Offering setup required"}
-                          tone={"warning"}
-                        />
-                      )
-                    ) : (
-                      <InlineNotice
-                        description={"Add the RevenueCat public API keys to this build to enable live purchases."}
-                        title={"RevenueCat keys missing"}
-                        tone={"warning"}
-                      />
-                    )}
-
-                    {customerInfo?.activeSubscriptions.length ? (
-                      <InlineNotice
-                        description={customerInfo.activeSubscriptions.join(", ")}
-                        title={"Active store products"}
-                      />
-                    ) : null}
-
-                    {isPremium ? (
-                      <PrimaryButton
-                        disabled={!hasConfiguredRevenueCat || isLoadingCustomerInfo}
-                        label={"Open Customer Center"}
-                        onPress={() => {
-                          void handleOpenCustomerCenter();
-                        }}
-                      />
-                    ) : null}
-
-                    {hasConfiguredRevenueCat && !isPremium ? (
-                      <SecondaryButton
+                {hasConfiguredRevenueCat ? (
+                  isLoadingOfferings && !plans.availablePackages.length ? (
+                    <View className={"flex-row items-center gap-3"}>
+                      <ActivityIndicator color={designTheme.primary} />
+                      <Text className={"text-sm text-[#6b7280]"} style={fontStyles.regular}>
+                        Loading {FILE_TRANSFERS_PRO_NAME} plans...
+                      </Text>
+                    </View>
+                  ) : plans.availablePackages.length ? (
+                    plans.availablePackages.map((selectedPackage) => (
+                      <PremiumPackageCard
+                        key={selectedPackage.identifier}
                         disabled={isSubscriptionActionDisabled}
-                        label={"Restore purchases"}
+                        highlighted={selectedPackage.identifier === recommendedPackageIdentifier}
                         onPress={() => {
-                          void handleRestorePurchases();
+                          void handlePurchase(selectedPackage);
                         }}
+                        selectedPackage={selectedPackage}
                       />
-                    ) : null}
-
-                    {premiumAccess.entitlement.managementUrl ? (
-                      <SecondaryButton
-                        label={"Open store management"}
-                        onPress={() => {
-                          void Linking.openURL(premiumAccess.entitlement.managementUrl ?? "");
-                        }}
-                      />
-                    ) : null}
-
-                    <SecondaryButton
-                      label={"Sign out"}
-                      onPress={() => {
-                        void signOut();
-                      }}
-                      tone={"danger"}
+                    ))
+                  ) : (
+                    <InlineNotice
+                      description={
+                        "Create a current offering in RevenueCat and attach the subscription packages you want to sell in this build."
+                      }
+                      title={"Offering setup required"}
+                      tone={"warning"}
                     />
-                  </>
+                  )
+                ) : (
+                  <InlineNotice
+                    description={"Add the RevenueCat public API keys to this build to enable live purchases."}
+                    title={"RevenueCat keys missing"}
+                    tone={"warning"}
+                  />
+                )}
+
+                {customerInfo?.activeSubscriptions.length ? (
+                  <InlineNotice
+                    description={customerInfo.activeSubscriptions.join(", ")}
+                    title={"Active store products"}
+                  />
+                ) : null}
+
+                {isPremium ? (
+                  <PrimaryButton
+                    disabled={!hasConfiguredRevenueCat || isLoadingCustomerInfo}
+                    label={"Open Customer Center"}
+                    onPress={() => {
+                      void handleOpenCustomerCenter();
+                    }}
+                  />
+                ) : null}
+
+                {hasConfiguredRevenueCat && !isPremium ? (
+                  <SecondaryButton
+                    disabled={isSubscriptionActionDisabled}
+                    label={"Restore purchases"}
+                    onPress={() => {
+                      void handleRestorePurchases();
+                    }}
+                  />
+                ) : null}
+
+                {premiumAccess.entitlement.managementUrl ? (
+                  <SecondaryButton
+                    label={"Open store management"}
+                    onPress={() => {
+                      void Linking.openURL(premiumAccess.entitlement.managementUrl ?? "");
+                    }}
+                  />
+                ) : null}
+
+                {sessionUser ? (
+                  <SecondaryButton
+                    label={"Sign out"}
+                    onPress={() => {
+                      void signOut();
+                    }}
+                    tone={"danger"}
+                  />
                 ) : (
                   <>
                     <ContinueWithAppleButton
@@ -1143,11 +1126,11 @@ export default function SettingsScreen() {
                       onPress={() => {
                         void triggerAppleSignIn();
                       }}
-                      type={Platform.OS === "ios" ? "continue" : "signIn"}
+                      type={"signIn"}
                     />
                     <ContinueWithGoogleButton
                       disabled={isSigningInWithGoogle}
-                      label={"Continue with Google"}
+                      label={"Sign in with Google"}
                       onPress={() => {
                         void triggerGoogleSignIn();
                       }}
@@ -1165,10 +1148,7 @@ export default function SettingsScreen() {
               {appleError ? <InlineNotice description={appleError} title={"Apple sign-in"} tone={"danger"} /> : null}
               {googleError ? <InlineNotice description={googleError} title={"Google sign-in"} tone={"danger"} /> : null}
 
-              <SecondaryButton
-                label={sessionUser ? "Done" : "Maybe later"}
-                onPress={() => setShowPremiumDetails(false)}
-              />
+              <SecondaryButton label={"Done"} onPress={() => setShowPremiumDetails(false)} />
             </ScrollView>
           </View>
         </View>

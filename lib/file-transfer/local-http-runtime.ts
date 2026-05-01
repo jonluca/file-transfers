@@ -129,10 +129,10 @@ const DIRECT_STATIC_FILES_PREFIX = "/__direct-files";
 const LOCAL_HTTP_DEBUG_PREFIX = "[LocalHttpRuntime]";
 const LOCAL_HTTP_STARTUP_PROBE_TIMEOUT_MS = 1_000;
 
-type HttpServerRuntimeFlags = {
+interface HttpServerRuntimeFlags {
   _isRunning?: boolean;
   _port?: number;
-};
+}
 
 function logLocalHttpDebug(message: string, details?: Record<string, unknown>) {
   if (!__DEV__) {
