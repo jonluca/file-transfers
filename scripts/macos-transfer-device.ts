@@ -23,6 +23,7 @@ import {
   resolveDiscoveryHost,
 } from "../lib/file-transfer/direct-transfer-protocol";
 import { resolveDirectByteRange } from "../lib/file-transfer/direct-transfer-range";
+import { DEFAULT_DIRECT_TRANSFER_CHUNK_BYTES } from "../lib/file-transfer/constants";
 import type {
   DirectPeerAccess,
   DiscoveryRecord,
@@ -123,7 +124,7 @@ interface ReceiveServiceState {
   lastTransfer: null | {
     startedAt: string;
     completedAt: string;
-    outcome: "completed" | "failed";
+    outcome: "completed" | "failed" | "canceled";
     detail: string;
     bytesTransferred: number;
     fileCount: number;
@@ -151,6 +152,7 @@ const LOCAL_TRANSFER_SERVICE_DOMAIN = "local.";
 const LOCAL_HTTP_SERVER_PORT = 41000;
 const DEFAULT_DISCOVER_TIMEOUT_MS = 5000;
 const REQUEST_TIMEOUT_MS = 8000;
+const DIRECT_TRANSFER_MAX_CONCURRENT_CHUNKS = 2;
 const MIME_TYPES: Record<string, string> = {
   ".aac": "audio/aac",
   ".csv": "text/csv",
@@ -174,6 +176,25 @@ const MIME_TYPES: Record<string, string> = {
 
 function sleep(milliseconds: number) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function sleepWithSignal(milliseconds: number, signal: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new Error("Transfer canceled."));
+      return;
+    }
+
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new Error("Transfer canceled."));
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 function safeName(value: string) {
@@ -864,15 +885,19 @@ async function fetchDownloadableManifest({
 async function streamResponseToFile({
   response,
   destination,
+  append = false,
   signal,
   onBytes,
 }: {
   response: Response;
   destination: string;
+  append?: boolean;
   signal: AbortSignal;
   onBytes: (value: number) => void;
 }) {
-  const stream = createWriteStream(destination);
+  const stream = createWriteStream(destination, {
+    flags: append ? "a" : "w",
+  });
 
   try {
     if (!response.body) {
@@ -910,6 +935,82 @@ async function streamResponseToFile({
   }
 }
 
+function parseContentRange(value: string | null) {
+  const match = /^bytes (\d+)-(\d+)\/(\d+)$/i.exec(value?.trim() ?? "");
+  if (!match) {
+    return null;
+  }
+
+  return {
+    start: Number(match[1]),
+    end: Number(match[2]),
+    total: Number(match[3]),
+  };
+}
+
+export async function downloadManifestFile({
+  file,
+  destination,
+  chunkBytes,
+  signal,
+  onBytes,
+}: {
+  file: DownloadableTransferManifest["files"][number];
+  destination: string;
+  chunkBytes: number;
+  signal: AbortSignal;
+  onBytes: (value: number) => void;
+}) {
+  const requiresRanges = file.sizeBytes > chunkBytes;
+  const requestCount = requiresRanges ? Math.ceil(file.sizeBytes / chunkBytes) : 1;
+  let downloadedBytes = 0;
+
+  for (let requestIndex = 0; requestIndex < requestCount; requestIndex += 1) {
+    const start = requestIndex * chunkBytes;
+    const end = Math.min(start + chunkBytes - 1, file.sizeBytes - 1);
+    const response = await fetch(file.downloadUrl, {
+      headers: requiresRanges
+        ? {
+            Range: `bytes=${start}-${end}`,
+          }
+        : undefined,
+      signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(`Unable to download "${file.name}" (${response.status}).`);
+    }
+
+    if (requiresRanges) {
+      const contentRange = parseContentRange(response.headers.get("content-range"));
+      if (
+        response.status !== 206 ||
+        !contentRange ||
+        contentRange.start !== start ||
+        contentRange.end !== end ||
+        contentRange.total !== file.sizeBytes
+      ) {
+        throw new Error(`The sender returned an invalid byte range for "${file.name}".`);
+      }
+    }
+
+    await streamResponseToFile({
+      response,
+      destination,
+      append: requestIndex > 0,
+      signal,
+      onBytes: (value) => {
+        downloadedBytes += value;
+        onBytes(value);
+      },
+    });
+  }
+
+  if (downloadedBytes !== file.sizeBytes) {
+    throw new Error(`The sender returned ${downloadedBytes} bytes for "${file.name}" instead of ${file.sizeBytes}.`);
+  }
+}
+
 async function receiveDirectHttpTransfer({
   offer,
   outputDir,
@@ -931,6 +1032,10 @@ async function receiveDirectHttpTransfer({
   const createdFiles: string[] = [];
   const receivedFiles: ReceivedFileOutput[] = [];
   let bytesTransferred = 0;
+  const chunkBytes = Math.max(
+    1,
+    Math.floor(manifest.downloadPolicy?.chunkBytes ?? DEFAULT_DIRECT_TRANSFER_CHUNK_BYTES),
+  );
 
   try {
     for (const file of manifest.files) {
@@ -949,17 +1054,10 @@ async function receiveDirectHttpTransfer({
         updatedAt: nowIso(),
       });
 
-      const response = await fetch(file.downloadUrl, {
-        signal,
-      });
-
-      if (!response.ok) {
-        throw new Error(`Unable to download "${file.name}" (${response.status}).`);
-      }
-
-      await streamResponseToFile({
-        response,
+      await downloadManifestFile({
+        file,
         destination: outputPath,
+        chunkBytes,
         signal,
         onBytes: (chunkBytes) => {
           fileBytesTransferred += chunkBytes;
@@ -994,7 +1092,7 @@ async function receiveDirectHttpTransfer({
         .catch(() => {});
     }
 
-    if (error instanceof Error && error.message === "Download canceled.") {
+    if (signal.aborted || (error instanceof Error && error.message === "Download canceled.")) {
       throw new Error("Transfer canceled.", {
         cause: error,
       });
@@ -1119,6 +1217,8 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
 
   async function handleIncomingOffer(offer: IncomingTransferOffer) {
     isBusy = true;
+    activeDownloadAbortController = new AbortController();
+    const signal = activeDownloadAbortController.signal;
     state.currentOffer = offer;
     updateProgress({
       phase: "waiting",
@@ -1136,22 +1236,24 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
       );
     }
 
-    if (options.acceptDelayMs > 0) {
-      await sleep(options.acceptDelayMs);
-    }
-
-    await notifySender({
-      kind: "accepted",
-      receiverDeviceName: options.deviceName,
-    });
-
-    activeDownloadAbortController = new AbortController();
-
     try {
+      if (options.acceptDelayMs > 0) {
+        await sleepWithSignal(options.acceptDelayMs, signal);
+      }
+
+      if (signal.aborted) {
+        throw new Error("Transfer canceled.");
+      }
+
+      await notifySender({
+        kind: "accepted",
+        receiverDeviceName: options.deviceName,
+      });
+
       const result = await receiveDirectHttpTransfer({
         offer,
         outputDir: options.outputDir,
-        signal: activeDownloadAbortController.signal,
+        signal,
         onProgress: createProgressReporter(),
       });
 
@@ -1184,10 +1286,15 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
         logLine(`Received ${result.receivedFiles.length} file(s) from ${offer.senderDeviceName}.`);
       }
     } catch (error) {
-      const detail = error instanceof Error ? error.message : "The transfer could not be completed.";
+      const canceled = signal.aborted || (error instanceof Error && error.message === "Transfer canceled.");
+      const detail = canceled
+        ? "Transfer canceled."
+        : error instanceof Error
+          ? error.message
+          : "The transfer could not be completed.";
 
       updateProgress({
-        phase: "failed",
+        phase: canceled ? "canceled" : "failed",
         totalBytes: offer.totalBytes,
         bytesTransferred: state.progress.bytesTransferred,
         currentFileName: null,
@@ -1199,26 +1306,35 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
       state.lastTransfer = {
         startedAt: offer.createdAt,
         completedAt: nowIso(),
-        outcome: "failed",
+        outcome: canceled ? "canceled" : "failed",
         detail,
         bytesTransferred: state.progress.bytesTransferred,
         fileCount: 0,
         files: [],
       };
 
-      await notifySender({
-        kind: "failed",
-        message: detail,
-      }).catch(() => {});
+      await notifySender(
+        canceled
+          ? {
+              kind: "canceled",
+              message: detail,
+            }
+          : {
+              kind: "failed",
+              message: detail,
+            },
+      ).catch(() => {});
 
       if (options.verbose) {
-        logLine(`Receive failed: ${detail}`);
+        logLine(canceled ? `Receive canceled: ${detail}` : `Receive failed: ${detail}`);
       }
     } finally {
       activeDownloadAbortController = null;
-      await persistState();
       if (options.once) {
+        isBusy = false;
+        state.currentOffer = null;
         shutdownRequested = true;
+        await persistState();
       } else {
         resetToDiscoverable();
       }
@@ -1261,12 +1377,9 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
     }
 
     if (pathSegments[3] === "events" && method === "POST") {
-      const payload = await readJsonBody<{ event: SenderToReceiverEvent }>(request);
-      const detail = payload.event.message || "Sender stopped the transfer.";
+      await readJsonBody<{ event: SenderToReceiverEvent }>(request);
 
-      if (state.currentStatus === "waiting") {
-        resetToDiscoverable(detail);
-      } else if (state.currentStatus === "connecting" || state.currentStatus === "transferring") {
+      if (["waiting", "connecting", "transferring"].includes(state.currentStatus)) {
         activeDownloadAbortController?.abort();
       }
 
@@ -1314,12 +1427,13 @@ async function runReceiveCommand(options: ReceiveCommandOptions) {
     await closeServer(server).catch(() => {});
   };
 
-  process.once("SIGINT", () => {
+  const requestShutdown = () => {
     shutdownRequested = true;
-  });
-  process.once("SIGTERM", () => {
-    shutdownRequested = true;
-  });
+    activeDownloadAbortController?.abort();
+  };
+
+  process.once("SIGINT", requestShutdown);
+  process.once("SIGTERM", requestShutdown);
 
   while (!shutdownRequested) {
     await sleep(250);
@@ -1460,6 +1574,10 @@ async function runSendCommand(options: SendCommandOptions) {
         startedAt: manifest.createdAt,
         shareUrl: buildDirectSessionBaseUrl(direct),
         totalBytes: manifest.totalBytes,
+        downloadPolicy: {
+          chunkBytes: DEFAULT_DIRECT_TRANSFER_CHUNK_BYTES,
+          maxConcurrentChunks: DIRECT_TRANSFER_MAX_CONCURRENT_CHUNKS,
+        },
         files: files.map((file) => ({
           id: file.id,
           name: file.name,
@@ -1751,8 +1869,10 @@ async function main() {
   throw new Error(`Unknown command: ${command}`);
 }
 
-void main().catch((error) => {
-  const message = error instanceof Error ? error.message : String(error);
-  console.error(message);
-  process.exitCode = 1;
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  void main().catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(message);
+    process.exitCode = 1;
+  });
+}
