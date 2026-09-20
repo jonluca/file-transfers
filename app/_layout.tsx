@@ -131,7 +131,7 @@ export default function RootLayout() {
             <Toaster position={"top-center"} richColors />
           </RevenueCatProvider>
         </trpc.Provider>
-        <StatusBar backgroundColor={designTheme.background} style={"dark"} />
+        <StatusBar style={"dark"} />
       </QueryClientProvider>
     </SafeAreaProvider>
   );

@@ -1,6 +1,6 @@
 {
   "cli": {
-    "version": ">= 16.19.3",
+    "version": ">=24.7.0",
     "appVersionSource": "remote"
   },
   "build": {
@@ -12,7 +12,11 @@
       "distribution": "internal"
     },
     "production": {
-      "autoIncrement": true
+      "autoIncrement": true,
+      "node": "24.16.0",
+      "ios": {
+        "image": "macos-tahoe-26.5-xcode-26.6"
+      }
     }
   },
   "submit": {

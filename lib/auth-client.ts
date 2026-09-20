@@ -13,12 +13,7 @@ export const authClient = createAuthClient({
     expoClient({
       scheme: "filetransfers",
       storagePrefix: AUTH_STORAGE_PREFIX,
-      storage: {
-        getItem: (key) => SecureStore.getItem(key) ?? null,
-        setItem: (key, value) => {
-          SecureStore.setItem(key, value);
-        },
-      },
+      storage: SecureStore,
     }),
   ],
 });

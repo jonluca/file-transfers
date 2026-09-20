@@ -34,8 +34,8 @@ export function getTrpcClient() {
     links: [
       httpLink({
         url: `${getApiBaseUrl()}/trpc`,
-        headers() {
-          const cookie = authClient.getCookie();
+        async headers() {
+          const cookie = await authClient.getCookie();
           return cookie ? { cookie } : {};
         },
       }),

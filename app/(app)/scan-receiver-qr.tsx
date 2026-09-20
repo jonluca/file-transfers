@@ -3,7 +3,7 @@ import { Stack, router } from "expo-router";
 import { QrCode, X } from "lucide-react-native";
 import React, { useEffect, useRef, useState } from "react";
 import { ActivityIndicator, Pressable, Text, View } from "react-native";
-import { useIsFocused } from "@react-navigation/native";
+import { useIsFocused } from "expo-router/react-navigation";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { cn } from "@/lib/cn";
 import { designFonts, designTheme } from "@/lib/design/theme";

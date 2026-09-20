@@ -1,5 +1,5 @@
-import { useIsFocused } from "@react-navigation/native";
-import React, { startTransition, useEffect, useEffectEvent, useMemo, useState } from "react";
+import { useIsFocused } from "expo-router/react-navigation";
+import React, { startTransition, useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Alert, Modal, Platform, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import {
   ChevronLeft,
@@ -22,6 +22,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { InlineNotice } from "@/components/ui";
 import { useCreateHostedShareLink, useDeleteHostedFile, useHostedFiles } from "@/hooks/queries";
 import { usePremiumAccess } from "@/hooks/use-premium-access";
+import { useEventCallback } from "@/hooks/use-event-callback";
 import { useSession } from "@/lib/auth-client";
 import { cn } from "@/lib/cn";
 import { getTabScreenBottomPadding, getTabScreenTopInset } from "@/lib/design/tab-screen-insets";
@@ -556,7 +557,7 @@ export default function FilesScreen() {
   const systemDownloadsCount = downloadedFiles.filter((file) => !isReceivedFileInDownloadsFolder(file.uri)).length;
   const hostedFiles = isSignedIn ? (hostedFilesQuery.data ?? []) : [];
 
-  const refreshFolder = useEffectEvent((directoryUri?: string) => {
+  const refreshFolder = useEventCallback((directoryUri?: string) => {
     setIsRefreshing(true);
 
     try {
@@ -584,9 +585,9 @@ export default function FilesScreen() {
     }
 
     refreshFolder();
-  }, [isFocused, selectedContentTab]);
+  }, [isFocused, refreshFolder, selectedContentTab]);
 
-  const deleteFile = useEffectEvent(async (file: Pick<ReceivedFileRecord, "name" | "uri" | "mimeType">) => {
+  const deleteFile = useEventCallback(async (file: Pick<ReceivedFileRecord, "name" | "uri" | "mimeType">) => {
     if (deletingUri === file.uri) {
       return;
     }
@@ -607,7 +608,7 @@ export default function FilesScreen() {
     setDeletingUri((currentUri) => (currentUri === file.uri ? null : currentUri));
   });
 
-  const confirmDeleteFile = useEffectEvent((file: Pick<ReceivedFileRecord, "name" | "uri" | "mimeType">) => {
+  const confirmDeleteFile = useEventCallback((file: Pick<ReceivedFileRecord, "name" | "uri" | "mimeType">) => {
     Alert.alert("Delete file?", `${file.name} will be removed from this device.`, [
       {
         text: "Cancel",
@@ -623,7 +624,7 @@ export default function FilesScreen() {
     ]);
   });
 
-  const deleteHostedFile = useEffectEvent(async (file: HostedFile) => {
+  const deleteHostedFile = useEventCallback(async (file: HostedFile) => {
     if (deletingHostedFileId === file.id) {
       return;
     }
@@ -651,7 +652,7 @@ export default function FilesScreen() {
     setDeletingHostedFileId((currentId) => (currentId === file.id ? null : currentId));
   });
 
-  const confirmDeleteHostedFile = useEffectEvent((file: HostedFile) => {
+  const confirmDeleteHostedFile = useEventCallback((file: HostedFile) => {
     Alert.alert("Delete hosted file?", `${file.fileName} will stop working for anyone with the link.`, [
       {
         text: "Cancel",
@@ -667,13 +668,13 @@ export default function FilesScreen() {
     ]);
   });
 
-  const openHostedShareModal = useEffectEvent((file: HostedFile) => {
+  const openHostedShareModal = useEventCallback((file: HostedFile) => {
     setHostedNotice(null);
     setHostedPasscode("");
     setShareTarget(file);
   });
 
-  const handleShareHostedFile = useEffectEvent(async () => {
+  const handleShareHostedFile = useEventCallback(async () => {
     if (!shareTarget) {
       return;
     }

@@ -3,6 +3,7 @@ import React, { createContext, useContext, useEffect, useEffectEvent, useState }
 import { AppState } from "react-native";
 import type { EntitlementStatus } from "@/lib/file-transfer";
 import { useSyncPurchase } from "@/hooks/queries";
+import { useEventCallback } from "@/hooks/use-event-callback";
 import { useSession } from "@/lib/auth-client";
 import {
   addCustomerInfoUpdateListener,
@@ -64,7 +65,7 @@ export function RevenueCatProvider({ children }: { children: React.ReactNode }) 
   const [isLoadingOfferings, setIsLoadingOfferings] = useState(isConfigured);
   const [lastError, setLastError] = useState<string | null>(null);
 
-  const syncCustomerInfoToBackend = useEffectEvent(async (nextCustomerInfo: RevenueCatCustomerInfo | null) => {
+  const syncCustomerInfoToBackend = useEventCallback(async (nextCustomerInfo: RevenueCatCustomerInfo | null) => {
     if (!sessionUserId || !nextCustomerInfo) {
       return;
     }
@@ -84,7 +85,7 @@ export function RevenueCatProvider({ children }: { children: React.ReactNode }) 
     }
   });
 
-  const applyCustomerInfo = useEffectEvent(async (nextCustomerInfo: RevenueCatCustomerInfo | null) => {
+  const applyCustomerInfo = useEventCallback(async (nextCustomerInfo: RevenueCatCustomerInfo | null) => {
     setCustomerInfo(nextCustomerInfo);
     await syncCustomerInfoToBackend(nextCustomerInfo);
   });
@@ -234,7 +235,7 @@ export function RevenueCatProvider({ children }: { children: React.ReactNode }) 
     return () => {
       cancelled = true;
     };
-  }, [isConfigured, sessionUserId]);
+  }, [applyCustomerInfo, isConfigured, sessionUserId]);
 
   const handleCustomerInfoUpdate = useEffectEvent(async (nextCustomerInfo: RevenueCatCustomerInfo) => {
     setLastError(null);

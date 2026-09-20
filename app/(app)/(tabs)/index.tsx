@@ -1,8 +1,9 @@
 import { router } from "expo-router";
-import { useIsFocused } from "@react-navigation/native";
+import { useIsFocused } from "expo-router/react-navigation";
 import * as Burnt from "burnt";
 import { createUploadTask, type UploadProgressData } from "expo-file-system/legacy";
 import React, { startTransition, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
+import { useEventCallback } from "@/hooks/use-event-callback";
 import { ActivityIndicator, AppState, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import QRCode from "react-native-qrcode-svg";
 import {
@@ -668,7 +669,7 @@ export default function TransferScreen() {
     };
   }, [activeReceiveSession?.id]);
 
-  const stopBrowserShareSession = useEffectEvent(
+  const stopBrowserShareSession = useEventCallback(
     async (
       options: {
         sessionId?: string | null;
@@ -714,7 +715,7 @@ export default function TransferScreen() {
     },
   );
 
-  const handleHttpShareSessionUpdate = useEffectEvent((nextSession: HttpShareSession) => {
+  const handleHttpShareSessionUpdate = useEventCallback((nextSession: HttpShareSession) => {
     setActiveHttpShareSession(nextSession);
 
     if (nextSession.status === "sharing") {
@@ -878,7 +879,7 @@ export default function TransferScreen() {
     })();
   }
 
-  const ensureReceiveAvailability = useEffectEvent(
+  const ensureReceiveAvailability = useEventCallback(
     async ({
       preserveNotice = true,
       showReceivingScreen = false,
@@ -991,7 +992,15 @@ export default function TransferScreen() {
       showReceivingScreen: false,
       surfaceErrors: mode === "receiving",
     });
-  }, [activeHttpShareSession, activeReceiveSession, deviceName, mode, premiumAccess.isPremium, serviceInstanceId]);
+  }, [
+    activeHttpShareSession,
+    activeReceiveSession,
+    deviceName,
+    ensureReceiveAvailability,
+    mode,
+    premiumAccess.isPremium,
+    serviceInstanceId,
+  ]);
 
   useEffect(() => {
     const sessionId = activeHttpShareSession?.id;
@@ -1013,7 +1022,7 @@ export default function TransferScreen() {
     return () => {
       subscription.remove();
     };
-  }, [activeHttpShareSession?.id]);
+  }, [activeHttpShareSession?.id, stopBrowserShareSession]);
 
   useEffect(() => {
     if (isFocused || !activeHttpShareSession) {
@@ -1024,7 +1033,7 @@ export default function TransferScreen() {
       sessionId: activeHttpShareSession.id,
       noticeMessage: "Browser sharing stopped because you left the share screen.",
     });
-  }, [activeHttpShareSession, isFocused]);
+  }, [activeHttpShareSession, isFocused, stopBrowserShareSession]);
 
   useEffect(() => {
     const sessionId = activeHttpShareSession?.id;
