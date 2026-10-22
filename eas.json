@@ -13,7 +13,7 @@
     },
     "production": {
       "autoIncrement": true,
-      "node": "24.16.0",
+      "node": "26.12.1",
       "ios": {
         "image": "macos-tahoe-26.5-xcode-26.6"
       }
