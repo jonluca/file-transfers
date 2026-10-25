@@ -1,9 +1,14 @@
 File Transfers Privacy Policy
-Last updated: March 8, 2026
+Last updated: October 25, 2026
 
 File Transfers only uses the information needed to sign you in, transfer files, host files you choose to share, and manage subscriptions.
 This can include your account details, basic profile information, file transfer metadata, hosted files, and purchase status.
 Hosted files are stored only to provide the download link you request and may be deleted when they expire or are removed.
 We do not sell your personal information.
 We may use service providers for authentication, cloud storage, and subscription management.
-If you want your account or hosted data removed, use the app controls or the support contact listed with the app.
+
+Crash and error diagnostics
+The app sends crash and unexpected-error reports to our self-hosted GlitchTip service to diagnose faults and improve reliability. Reports can include the app version, operating-system version, device model, error type, and technical stack traces. Reporting is enabled in production builds.
+These reports exclude account identifiers, file contents, filenames, transfer payloads, screenshots, session recordings, and browsing or interaction histories. We do not use crash reports for advertising or tracking, and reports are not linked to your account.
+
+If you want your account or hosted data removed, use the app controls or contact support@filetransfersapp.com. You can also contact that address with privacy questions.
