@@ -50,6 +50,7 @@
     "@expo/metro-runtime": "~57.0.16",
     "@expo/vector-icons": "15.1.1",
     "@hono/node-server": "^2.1.1",
+    "@sentry/react-native": "8.32.0",
     "@tanstack/query-core": "^5.103.1",
     "@tanstack/react-query": "^5.103.1",
     "@trpc/client": "^11.19.0",
@@ -140,6 +141,7 @@
     "onlyBuiltDependencies": [
       "@prisma/client",
       "@prisma/engines",
+      "@sentry/cli",
       "better-sqlite3",
       "esbuild",
       "prisma",

@@ -2,6 +2,12 @@ import type { ConfigContext, ExpoConfig } from "expo/config";
 import { withXcodeProject } from "expo/config-plugins";
 
 const VERSION = "0.1.1";
+const errorReportingDsn = process.env.EXPO_PUBLIC_SENTRY_DSN?.trim();
+const nativeErrorReportingEnabled =
+  Boolean(errorReportingDsn) &&
+  (process.env.EAS_BUILD_PROFILE === "production" ||
+    (process.env.EXPO_PUBLIC_ERROR_REPORTING_DEBUG === "true" &&
+      process.env.EXPO_PUBLIC_ERROR_REPORTING_ENVIRONMENT === "verification"));
 const IOS_IN_APP_PURCHASE_CAPABILITY = "com.apple.InAppPurchase";
 
 function withIosInAppPurchaseCapability(config: ExpoConfig) {
@@ -47,6 +53,18 @@ export default function getConfig({ config }: ConfigContext): ExpoConfig {
       supportsTablet: false,
       usesAppleSignIn: true,
       bundleIdentifier: "com.jonluca.filetransfers",
+      privacyManifests: {
+        ...config.ios?.privacyManifests,
+        NSPrivacyCollectedDataTypes: [
+          ...(config.ios?.privacyManifests?.NSPrivacyCollectedDataTypes ?? []),
+          {
+            NSPrivacyCollectedDataType: "NSPrivacyCollectedDataTypeCrashData",
+            NSPrivacyCollectedDataTypeLinked: false,
+            NSPrivacyCollectedDataTypeTracking: false,
+            NSPrivacyCollectedDataTypePurposes: ["NSPrivacyCollectedDataTypePurposeAppFunctionality"],
+          },
+        ],
+      },
       infoPlist: {
         ITSAppUsesNonExemptEncryption: false,
         NSCameraUsageDescription: "Scan a nearby device QR code to connect to a transfer.",
@@ -69,6 +87,40 @@ export default function getConfig({ config }: ConfigContext): ExpoConfig {
     },
     plugins: [
       ...(config.plugins ?? []),
+      [
+        "@sentry/react-native/expo",
+        {
+          url: process.env.SENTRY_URL || "https://http--watchtrader-errors--7rqh4vysrzq7.y8cdxt7gqw.code.run/",
+          organization: process.env.SENTRY_ORG || "jonluca-apps",
+          project: process.env.SENTRY_PROJECT || "file-transfers",
+          // The native SDK must start before the JS bundle to catch startup crashes.
+          useNativeInit: nativeErrorReportingEnabled,
+          disableAutoUpload: !nativeErrorReportingEnabled || process.env.SENTRY_UPLOAD_DISABLED === "true",
+          options: {
+            dsn: errorReportingDsn || "",
+            enabled: nativeErrorReportingEnabled,
+            environment: process.env.EXPO_PUBLIC_ERROR_REPORTING_ENVIRONMENT || "production",
+            sendDefaultPii: false,
+            maxBreadcrumbs: 0,
+            tracesSampleRate: 0,
+            enableAutoBreadcrumbTracking: false,
+            sendClientReports: false,
+            enableLogs: false,
+            enableAutoSessionTracking: false,
+            enableAutoPerformanceTracing: false,
+            enableAppStartTracking: false,
+            enableNativeFramesTracking: false,
+            enableStallTracking: false,
+            enableUserInteractionTracing: false,
+            enableCaptureFailedRequests: false,
+            attachScreenshot: false,
+            attachViewHierarchy: false,
+            reportAccessibilityIdentifier: false,
+            replaysSessionSampleRate: 0,
+            replaysOnErrorSampleRate: 0,
+          },
+        },
+      ],
       [
         "expo-dev-client",
         {
@@ -115,6 +167,7 @@ export default function getConfig({ config }: ConfigContext): ExpoConfig {
       reactCompiler: true,
     },
     extra: {
+      errorReportingEnabled: nativeErrorReportingEnabled,
       router: {},
       eas: {
         projectId: "1070ca5a-5d8a-48ee-a705-b039eccc579b",

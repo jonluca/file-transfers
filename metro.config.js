@@ -1,7 +1,7 @@
-const { getDefaultConfig } = require("expo/metro-config");
+const { getSentryExpoConfig } = require("@sentry/react-native/metro");
 const { withUniwindConfig } = require("uniwind/metro");
 
-const config = getDefaultConfig(__dirname);
+const config = getSentryExpoConfig(__dirname);
 for (const extension of ["mjs", "cjs"]) {
   if (!config.resolver.sourceExts.includes(extension)) {
     config.resolver.sourceExts.push(extension);

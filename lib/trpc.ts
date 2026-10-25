@@ -1,4 +1,5 @@
-import { QueryClient } from "@tanstack/react-query";
+import { captureMobileError } from "@/lib/error-reporting";
+import { MutationCache, QueryCache, QueryClient } from "@tanstack/react-query";
 import { createTRPCClient, httpLink } from "@trpc/client";
 import { createTRPCReact } from "@trpc/react-query";
 import { authClient } from "@/lib/auth-client";
@@ -13,6 +14,8 @@ let trpcClientSingleton: ReturnType<typeof createTRPCClient<AppRouter>> | null =
 
 export function createBoilerplateQueryClient() {
   return new QueryClient({
+    queryCache: new QueryCache({ onError: (error) => captureMobileError(error, "query") }),
+    mutationCache: new MutationCache({ onError: (error) => captureMobileError(error, "mutation") }),
     defaultOptions: {
       queries: {
         staleTime: 1000 * 30,

@@ -1,3 +1,5 @@
+import { captureMobileError, withMobileErrorReporting } from "@/lib/error-reporting";
+export { ErrorBoundary } from "@/lib/error-boundary";
 import "@/globals.css";
 import {
   Geist_400Regular,
@@ -56,7 +58,7 @@ function RootLayoutContent() {
   return <Slot />;
 }
 
-export default function RootLayout() {
+function RootLayout() {
   useEffect(() => {
     const subscription = AppState.addEventListener("change", onAppStateChange);
     return () => subscription.remove();
@@ -76,6 +78,7 @@ export default function RootLayout() {
     }
 
     void ensureLocalHttpServerStarted().catch((error) => {
+      captureMobileError(error, "transfer.server_start");
       if (__DEV__) {
         console.warn("[LocalHttpServer] App-start startup failed.", error);
       }
@@ -136,3 +139,5 @@ export default function RootLayout() {
     </SafeAreaProvider>
   );
 }
+
+export default withMobileErrorReporting(RootLayout);
