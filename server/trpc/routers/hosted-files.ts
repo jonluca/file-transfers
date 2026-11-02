@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, sql } from "drizzle-orm";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { createHostedShareToken } from "../../hosted-share-token";
@@ -141,13 +141,22 @@ async function markHostedFilesExpired(
     return rows;
   }
 
-  await ctx.db
-    .update(hostedFile)
-    .set({
-      status: "expired",
-      updatedAt: now,
-    })
-    .where(and(eq(hostedFile.ownerUserId, ctx.session.user.id), inArray(hostedFile.id, expiredIds)));
+  // D1 accepts at most 100 bound parameters per statement. Leave room for
+  // the owner, status and timestamp while expiring large historical lists.
+  for (let offset = 0; offset < expiredIds.length; offset += 90) {
+    await ctx.db
+      .update(hostedFile)
+      .set({
+        status: "expired",
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(hostedFile.ownerUserId, ctx.session.user.id),
+          inArray(hostedFile.id, expiredIds.slice(offset, offset + 90)),
+        ),
+      );
+  }
 
   return rows.map((row) => (expiredIds.includes(row.id) ? { ...row, status: "expired", updatedAt: now } : row));
 }
@@ -267,6 +276,13 @@ export const hostedFilesRouter = router({
         });
       }
 
+      if (getHostedFileEffectiveStatus(row) === "deleted" || getHostedFileEffectiveStatus(row) === "expired") {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "This hosted file is no longer available for upload.",
+        });
+      }
+
       const uploadedSizeBytes = await getUploadedFileSizeBytes(row.storageKey);
       if (uploadedSizeBytes === null) {
         throw new TRPCError({
@@ -291,9 +307,18 @@ export const hostedFilesRouter = router({
           status: "active",
           updatedAt: new Date(),
         })
-        .where(eq(hostedFile.id, row.id))
+        .where(
+          and(
+            eq(hostedFile.id, row.id),
+            inArray(hostedFile.status, ["pending_upload", "active"]),
+            gt(hostedFile.expiresAt, new Date()),
+          ),
+        )
         .returning();
 
+      if (!updated) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "This hosted file is no longer available for upload." });
+      }
       return mapHostedFile(updated);
     }),
   createShareLink: protectedProcedure

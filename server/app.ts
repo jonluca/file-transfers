@@ -1,28 +1,33 @@
-import "dotenv/config";
 import { and, eq, sql } from "drizzle-orm";
 import { fetchRequestHandler } from "@trpc/server/adapters/fetch";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { logger } from "hono/logger";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import privacyPolicyText from "./legal/privacy.txt?raw";
+import privacyPolicyText from "./legal/privacy.txt";
 import { LandingPage } from "./landing-page";
-import termsOfServiceText from "./legal/terms.txt?raw";
-import deletionPolicyText from "./legal/deletion.txt?raw";
+import termsOfServiceText from "./legal/terms.txt";
+import deletionPolicyText from "./legal/deletion.txt";
 import { auth } from "./auth";
 import { db } from "./db/client";
 import { hostedFile, subscriptionMembership } from "./db/schema";
 import { serverEnv } from "./env";
 import { verifyHostedShareToken } from "./hosted-share-token";
-import { createAttachmentContentDisposition } from "../lib/file-transfer/content-disposition";
 import { PREMIUM_ENTITLEMENT_ALIASES } from "@/lib/subscriptions";
-import { createDownloadLink, readLocalStoredFile, storeUploadedFile } from "./storage/hosted-storage";
+import { createDownloadLink, readDevelopmentStoredFile, storeUploadedFile } from "./storage/hosted-storage";
+import { createAttachmentContentDisposition } from "../lib/file-transfer/content-disposition";
 import { getHostedFileEffectiveStatus, verifyHostedFilePasscode } from "./trpc/routers/hosted-files";
 import { createTRPCContext } from "./trpc/context";
 import { appRouter } from "./trpc/router";
 
 const app = new Hono();
+
+function escapeHtml(value: string) {
+  return value.replace(
+    /[&<>"']/g,
+    (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]!,
+  );
+}
 
 function renderDocument(markup: string) {
   return `<!doctype html>${markup}`;
@@ -48,13 +53,16 @@ function hostedDownloadPageHtml({
   passcode?: string | null;
 }) {
   const encodedPasscode = passcode ? encodeURIComponent(passcode) : "";
+  const safeFileName = escapeHtml(fileName);
+  const safePagePath = escapeHtml(pagePath);
+  const safeDownloadPath = escapeHtml(downloadPath);
 
   return `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>${fileName}</title>
+    <title>${safeFileName}</title>
     <style>
       body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f8fafc; color: #0f172a; margin: 0; }
       .wrap { max-width: 520px; margin: 0 auto; padding: 40px 20px; }
@@ -74,7 +82,7 @@ function hostedDownloadPageHtml({
     <main class="wrap">
       <section class="card">
         <div class="eyebrow">Hosted file</div>
-        <h1>${fileName}</h1>
+        <h1>${safeFileName}</h1>
         <p>Download this file directly in the browser. No app install or account is required.</p>
         <div class="meta">
           <div class="meta-row"><span>Size</span><span>${sizeBytes.toLocaleString()} bytes</span></div>
@@ -82,15 +90,15 @@ function hostedDownloadPageHtml({
         </div>
         ${
           requiresPasscode
-            ? `<form method="get" action="${pagePath}">
+            ? `<form method="get" action="${safePagePath}">
                 <label for="passcode">Passcode</label>
                 <input id="passcode" class="input" inputmode="numeric" pattern="[0-9]*" maxlength="6" name="passcode" value="${encodedPasscode}" placeholder="Enter 6-digit passcode" />
                 <button class="button" type="submit">Unlock download</button>
               </form>`
-            : `<a class="button" href="${downloadPath}">Download file</a>`
+            : `<a class="button" href="${safeDownloadPath}">Download file</a>`
         }
-        ${requiresPasscode && passcode && !errorMessage ? `<a class="button" style="margin-top:12px;" href="${downloadPath}?passcode=${encodedPasscode}">Download file</a>` : ""}
-        ${errorMessage ? `<div class="notice">${errorMessage}</div>` : ""}
+        ${requiresPasscode && passcode && !errorMessage ? `<a class="button" style="margin-top:12px;" href="${safeDownloadPath}?passcode=${encodedPasscode}">Download file</a>` : ""}
+        ${errorMessage ? `<div class="notice">${escapeHtml(errorMessage)}</div>` : ""}
       </section>
     </main>
   </body>
@@ -163,7 +171,12 @@ async function getHostedFileByShareToken(token: string) {
   } as const;
 }
 
-app.use("*", logger());
+app.use("*", async (c, next) => {
+  c.header("X-Content-Type-Options", "nosniff");
+  c.header("Referrer-Policy", "no-referrer");
+  c.header("Cache-Control", "no-store");
+  await next();
+});
 app.use(
   "*",
   cors({
@@ -211,10 +224,22 @@ app.put("/uploads/:fileId/:uploadToken", async (c) => {
     return c.json({ error: "Upload target not found." }, 404);
   }
 
-  const payload = await c.req.arrayBuffer();
+  if (
+    getHostedFileEffectiveStatus(record) !== "pending_upload" ||
+    record.createdAt.getTime() + 10 * 60_000 <= Date.now()
+  ) {
+    return c.json({ error: "Upload target expired or already completed." }, 410);
+  }
+
+  const lengthHeader = c.req.header("content-length");
+  const body = c.req.raw.body;
+  if (!body || !lengthHeader || Number(lengthHeader) !== record.sizeBytes) {
+    return c.json({ error: "Upload size does not match the selected file." }, 400);
+  }
+
   await storeUploadedFile({
     storageKey: record.storageKey,
-    body: payload,
+    body,
     mimeType: record.mimeType,
   });
 
@@ -284,6 +309,10 @@ app.get("/h/:slug/download", async (c) => {
     return c.json({ error: "Hosted file expired." }, 410);
   }
 
+  if (getHostedFileEffectiveStatus(record) !== "active") {
+    return c.json({ error: "Hosted file not found." }, 404);
+  }
+
   const passcode = c.req.query("passcode");
   if (!verifyHostedFilePasscode(record, passcode)) {
     return c.json({ error: "Invalid passcode." }, 403);
@@ -294,6 +323,10 @@ app.get("/h/:slug/download", async (c) => {
     fileName: record.fileName,
     mimeType: record.mimeType,
   });
+  const localObject = redirectUrl ? null : await readDevelopmentStoredFile(record.storageKey);
+  if (!redirectUrl && !localObject) {
+    return c.json({ error: "Hosted file not found." }, 404);
+  }
 
   await db
     .update(hostedFile)
@@ -307,10 +340,12 @@ app.get("/h/:slug/download", async (c) => {
     return c.redirect(redirectUrl, 302);
   }
 
-  const contents = await readLocalStoredFile(record.storageKey);
   c.header("content-type", record.mimeType);
+  c.header("content-length", String(localObject!.size));
   c.header("content-disposition", createAttachmentContentDisposition(record.fileName));
-  return c.body(contents);
+  const { readable, writable } = new FixedLengthStream(localObject!.size);
+  c.executionCtx.waitUntil(localObject!.body.pipeTo(writable));
+  return c.body(readable);
 });
 
 app.get("/s/:token", async (c) => {
@@ -386,6 +421,10 @@ app.get("/s/:token/download", async (c) => {
     fileName: result.record.fileName,
     mimeType: result.record.mimeType,
   });
+  const localObject = redirectUrl ? null : await readDevelopmentStoredFile(result.record.storageKey);
+  if (!redirectUrl && !localObject) {
+    return c.json({ error: "Hosted file not found." }, 404);
+  }
 
   await db
     .update(hostedFile)
@@ -399,16 +438,18 @@ app.get("/s/:token/download", async (c) => {
     return c.redirect(redirectUrl, 302);
   }
 
-  const contents = await readLocalStoredFile(result.record.storageKey);
   c.header("content-type", result.record.mimeType);
+  c.header("content-length", String(localObject!.size));
   c.header("content-disposition", createAttachmentContentDisposition(result.record.fileName));
-  return c.body(contents);
+  const { readable, writable } = new FixedLengthStream(localObject!.size);
+  c.executionCtx.waitUntil(localObject!.body.pipeTo(writable));
+  return c.body(readable);
 });
 
 app.post("/webhooks/revenuecat", async (c) => {
   const authorization = c.req.header("authorization");
 
-  if (serverEnv.revenueCatWebhookSecret && authorization !== `Bearer ${serverEnv.revenueCatWebhookSecret}`) {
+  if (!serverEnv.revenueCatWebhookSecret || authorization !== `Bearer ${serverEnv.revenueCatWebhookSecret}`) {
     return c.json({ error: "Unauthorized." }, 401);
   }
 

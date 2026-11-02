@@ -1,0 +1,30 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "filetransfers",
+  "main": "server/worker.ts",
+  "account_id": "199eb4e86b9aa7df2da0adba3df29a6f",
+  "compatibility_date": "2026-11-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "routes": [{ "pattern": "filetransfersapp.com", "custom_domain": true }],
+  "preview_urls": false,
+  "limits": { "cpu_ms": 1000 },
+  "observability": { "enabled": false },
+  "vars": {
+    "NODE_ENV": "production",
+    "BETTER_AUTH_URL": "https://filetransfersapp.com/",
+    "HOSTED_FILES_BASE_URL": "https://filetransfersapp.com",
+    "R2_ACCOUNT_ID": "199eb4e86b9aa7df2da0adba3df29a6f",
+    "R2_BUCKET": "filetransfers",
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "filetransfers",
+      "database_id": "ec5d547f-49ff-4e66-a295-e5e31091dfb7",
+      "migrations_dir": "server/db/d1-migrations",
+    },
+  ],
+  "r2_buckets": [{ "binding": "HOSTED_FILES", "bucket_name": "filetransfers" }],
+  "rules": [{ "type": "Text", "globs": ["**/*.txt"], "fallthrough": true }],
+}

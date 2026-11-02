@@ -25,3 +25,9 @@ modules/**/android/.cxx/
 sentry.options.json
 sentry.properties
 .sentryclirc
+
+# Cloudflare local runtime and private development bindings.
+.wrangler/
+.dev.vars
+.dev.vars.*
+!.dev.vars.example

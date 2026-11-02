@@ -1,0 +1,4 @@
+NODE_ENV=development
+BETTER_AUTH_SECRET=local-development-secret-replace-with-at-least-32-characters
+BETTER_AUTH_URL=http://127.0.0.1:8787
+HOSTED_FILES_BASE_URL=http://127.0.0.1:8787

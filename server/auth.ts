@@ -1,8 +1,7 @@
-import { createPrivateKey } from "crypto";
 import { expo } from "@better-auth/expo";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { betterAuth, type BetterAuthPlugin } from "better-auth";
-import { SignJWT } from "jose";
+import { importPKCS8, SignJWT } from "jose";
 import { db } from "./db/client";
 import { authSchema } from "./db/schema";
 import { serverEnv } from "./env";
@@ -37,7 +36,7 @@ async function getAppleClientSecret() {
   }
 
   const privateKeyPem = Buffer.from(serverEnv.applePrivateKey, "base64").toString("utf-8");
-  const appleKey = createPrivateKey(privateKeyPem.replace(/\\n/g, "\n"));
+  const appleKey = await importPKCS8(privateKeyPem.replace(/\\n/g, "\n"), "ES256");
   const expirationTime = Math.ceil(Date.now() / 1000) + APPLE_CLIENT_SECRET_TTL_SECONDS;
 
   const clientSecret = await new SignJWT({})
@@ -49,6 +48,7 @@ async function getAppleClientSecret() {
     .setProtectedHeader({ alg: "ES256", kid: serverEnv.appleKeyId })
     .sign(appleKey);
 
+  appleClientSecretCache.clear();
   appleClientSecretCache.set(cacheKey, clientSecret);
   return clientSecret;
 }
@@ -93,7 +93,8 @@ export const auth = betterAuth({
   },
   socialProviders,
   database: drizzleAdapter(db, {
-    provider: "pg",
+    provider: "sqlite",
+    transaction: false,
     schema: authSchema,
     usePlural: false,
   }),

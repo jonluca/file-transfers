@@ -1,37 +1,26 @@
-import { readFile, mkdir, stat, unlink, writeFile } from "node:fs/promises";
-import path from "node:path";
-import {
-  GetObjectCommand,
-  HeadObjectCommand,
-  PutObjectCommand,
-  DeleteObjectCommand,
-  S3Client,
-} from "@aws-sdk/client-s3";
+import { env } from "cloudflare:workers";
+import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { createAttachmentContentDisposition } from "../../lib/file-transfer/content-disposition";
 import { serverEnv } from "../env";
 
-const localStorageRoot = path.resolve(process.cwd(), serverEnv.hostedFilesLocalDirectory);
 const PRESIGNED_URL_TTL_SECONDS = 60 * 10;
 
 function getR2Client() {
   if (!serverEnv.r2Bucket || !serverEnv.r2Endpoint || !serverEnv.r2AccessKeyId || !serverEnv.r2SecretAccessKey) {
-    return null;
+    throw new Error("Hosted file storage is not configured");
   }
 
   return new S3Client({
     region: "auto",
-    // R2 presigned URLs must target the S3-compatible API endpoint instead of the public custom domain.
+    // Large transfers go directly to R2, outside the Worker request-body limit.
     endpoint: serverEnv.r2Endpoint,
     credentials: {
       accessKeyId: serverEnv.r2AccessKeyId,
       secretAccessKey: serverEnv.r2SecretAccessKey,
     },
+    requestChecksumCalculation: "WHEN_REQUIRED",
   });
-}
-
-function getLocalFilePath(storageKey: string) {
-  return path.resolve(localStorageRoot, storageKey);
 }
 
 function sanitizeStorageSegment(value: string) {
@@ -52,36 +41,31 @@ export function buildHostedStorageKey({
 }
 
 export async function createUploadTarget({ storageKey, mimeType }: { storageKey: string; mimeType: string }) {
-  const r2Client = getR2Client();
-
-  if (r2Client && serverEnv.r2Bucket) {
-    const uploadUrl = await getSignedUrl(
-      r2Client,
-      new PutObjectCommand({
-        Bucket: serverEnv.r2Bucket,
-        Key: storageKey,
-        ContentType: mimeType,
-      }),
-      { expiresIn: PRESIGNED_URL_TTL_SECONDS },
-    );
-
+  // Local Wrangler uses its emulated R2 binding and needs no production credentials.
+  if (serverEnv.isDevelopment) {
     return {
       uploadMethod: "PUT" as const,
-      uploadUrl,
-      uploadHeaders: {
-        "content-type": mimeType,
-      },
-      provider: "r2" as const,
+      uploadUrl: `${serverEnv.hostedFilesBaseUrl.replace(/\/+$/, "")}/uploads`,
+      uploadHeaders: { "content-type": mimeType },
+      provider: "local" as const,
     };
   }
 
+  const uploadUrl = await getSignedUrl(
+    getR2Client(),
+    new PutObjectCommand({
+      Bucket: serverEnv.r2Bucket!,
+      Key: storageKey,
+      ContentType: mimeType,
+    }),
+    { expiresIn: PRESIGNED_URL_TTL_SECONDS },
+  );
+
   return {
     uploadMethod: "PUT" as const,
-    uploadUrl: `${serverEnv.hostedFilesBaseUrl.replace(/\/+$/, "")}/uploads`,
-    uploadHeaders: {
-      "content-type": mimeType,
-    },
-    provider: "local" as const,
+    uploadUrl,
+    uploadHeaders: { "content-type": mimeType },
+    provider: "r2" as const,
   };
 }
 
@@ -91,67 +75,19 @@ export async function storeUploadedFile({
   mimeType,
 }: {
   storageKey: string;
-  body: ArrayBuffer;
+  body: ReadableStream<Uint8Array>;
   mimeType: string;
 }) {
-  const r2Client = getR2Client();
-
-  if (r2Client && serverEnv.r2Bucket) {
-    await r2Client.send(
-      new PutObjectCommand({
-        Bucket: serverEnv.r2Bucket,
-        Key: storageKey,
-        ContentType: mimeType,
-        Body: new Uint8Array(body),
-      }),
-    );
-    return;
-  }
-
-  const absoluteFilePath = getLocalFilePath(storageKey);
-  await mkdir(path.dirname(absoluteFilePath), { recursive: true });
-  await writeFile(absoluteFilePath, new Uint8Array(body));
+  await env.HOSTED_FILES.put(storageKey, body, { httpMetadata: { contentType: mimeType } });
 }
 
 export async function getUploadedFileSizeBytes(storageKey: string) {
-  const r2Client = getR2Client();
-
-  if (r2Client && serverEnv.r2Bucket) {
-    try {
-      const result = await r2Client.send(
-        new HeadObjectCommand({
-          Bucket: serverEnv.r2Bucket,
-          Key: storageKey,
-        }),
-      );
-      return typeof result.ContentLength === "number" ? result.ContentLength : 0;
-    } catch {
-      return null;
-    }
-  }
-
-  try {
-    const fileInfo = await stat(getLocalFilePath(storageKey));
-    return fileInfo.size;
-  } catch {
-    return null;
-  }
+  const result = await env.HOSTED_FILES.head(storageKey);
+  return result?.size ?? null;
 }
 
 export async function deleteStoredFile(storageKey: string) {
-  const r2Client = getR2Client();
-
-  if (r2Client && serverEnv.r2Bucket) {
-    await r2Client.send(
-      new DeleteObjectCommand({
-        Bucket: serverEnv.r2Bucket,
-        Key: storageKey,
-      }),
-    );
-    return;
-  }
-
-  await unlink(getLocalFilePath(storageKey)).catch(() => {});
+  await env.HOSTED_FILES.delete(storageKey);
 }
 
 export async function createDownloadLink({
@@ -163,24 +99,26 @@ export async function createDownloadLink({
   fileName: string;
   mimeType: string;
 }) {
-  const r2Client = getR2Client();
-
-  if (r2Client && serverEnv.r2Bucket) {
-    return getSignedUrl(
-      r2Client,
-      new GetObjectCommand({
-        Bucket: serverEnv.r2Bucket,
-        Key: storageKey,
-        ResponseContentDisposition: createAttachmentContentDisposition(fileName),
-        ResponseContentType: mimeType,
-      }),
-      { expiresIn: PRESIGNED_URL_TTL_SECONDS },
-    );
+  if (serverEnv.isDevelopment) {
+    return null;
   }
 
-  return null;
+  return getSignedUrl(
+    getR2Client(),
+    new GetObjectCommand({
+      Bucket: serverEnv.r2Bucket!,
+      Key: storageKey,
+      ResponseContentDisposition: createAttachmentContentDisposition(fileName),
+      ResponseContentType: mimeType,
+    }),
+    { expiresIn: PRESIGNED_URL_TTL_SECONDS },
+  );
 }
 
-export async function readLocalStoredFile(storageKey: string) {
-  return readFile(getLocalFilePath(storageKey));
+export async function readDevelopmentStoredFile(storageKey: string) {
+  if (!serverEnv.isDevelopment) {
+    throw new Error("Local downloads are only available in development");
+  }
+
+  return env.HOSTED_FILES.get(storageKey);
 }

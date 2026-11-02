@@ -8,12 +8,12 @@
     "node": "24.x || ^26.12.1"
   },
   "scripts": {
-    "server:dev": "vite --config vite.server.config.ts",
-    "server:start": "node dist/server/index.mjs",
+    "server:dev": "wrangler dev",
+    "server:start": "wrangler dev",
     "server:prune-runtime-deps": "node scripts/prune-server-runtime-deps.mjs",
-    "build": "vite build --config vite.server.config.ts",
+    "build": "wrangler deploy --dry-run --outdir dist/worker",
     "heroku-build": "pnpm run build && node scripts/prune-server-runtime-deps.mjs",
-    "start": "node dist/server/index.mjs",
+    "start": "wrangler dev",
     "dev": "expo start --dev-client",
     "typecheck": "tsc --noEmit",
     "typecheck:tsc": "tsc --noEmit",
@@ -32,7 +32,10 @@
     "format": "oxfmt --write .",
     "format:check": "oxfmt --check .",
     "lint": "oxlint .",
-    "lint:fix": "oxlint --fix . && oxfmt --write ."
+    "lint:fix": "oxlint --fix . && oxfmt --write .",
+    "worker:dev": "wrangler dev",
+    "worker:deploy": "wrangler deploy",
+    "worker:check": "wrangler deploy --dry-run"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1136.0",
@@ -115,6 +118,7 @@
     "zustand": "^5.0.15"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261102.1",
     "@hono/vite-dev-server": "^0.26.1",
     "@react-native/metro-config": "0.86.3",
     "@types/babel__core": "^7.20.5",
@@ -125,7 +129,8 @@
     "eslint-plugin-react-compiler": "19.1.0-rc.2",
     "oxfmt": "^0.68.0",
     "oxlint": "^1.83.0",
-    "vite": "^8.3.0"
+    "vite": "^8.3.0",
+    "wrangler": "^4.156.1"
   },
   "expo": {
     "install": {
@@ -145,7 +150,8 @@
       "better-sqlite3",
       "esbuild",
       "prisma",
-      "react-native-nitro-http-server"
+      "react-native-nitro-http-server",
+      "workerd"
     ]
   }
 }
