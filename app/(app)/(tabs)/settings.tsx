@@ -44,6 +44,7 @@ import {
   TRANSFER_CHUNK_SIZE_STEP_BYTES,
 } from "@/lib/file-transfer/constants";
 import { mapCustomerInfoToEntitlement } from "@/lib/purchases";
+import { HOSTED_FILE_SIZE_LIMIT_LABEL } from "@/lib/file-transfer/hosted-upload-limits";
 import { FILE_TRANSFERS_PRO_NAME } from "@/lib/subscriptions";
 import { useRevenueCat } from "@/providers/revenuecat-provider";
 import {
@@ -1010,7 +1011,7 @@ export default function SettingsScreen() {
               <View className={"mt-1 gap-2.5"}>
                 <PremiumBenefit label={"Unlimited local transfer size and speed"} />
                 <PremiumBenefit label={"Hosted file links in the browser"} />
-                <PremiumBenefit label={"Up to 10 GB per file"} />
+                <PremiumBenefit label={`Up to ${HOSTED_FILE_SIZE_LIMIT_LABEL} per file`} />
               </View>
 
               <LegalLinksCard title={"Subscription Legal"} />

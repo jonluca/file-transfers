@@ -59,6 +59,7 @@ import {
   type TransferSession,
 } from "@/lib/file-transfer";
 import { noteTransferScreenRender } from "@/lib/file-transfer/transfer-perf";
+import { getHostedUploadSizeError } from "@/lib/file-transfer/hosted-upload-limits";
 import { FILE_TRANSFERS_PRO_NAME } from "@/lib/subscriptions";
 import { useAppStore, useDeviceName, useServiceInstanceId } from "@/store";
 
@@ -1362,6 +1363,12 @@ export default function TransferScreen() {
 
     if (!premiumAccess.isPremium) {
       setHostedNotice(`${FILE_TRANSFERS_PRO_NAME} is required to create hosted URLs.`);
+      return;
+    }
+
+    const sizeError = getHostedUploadSizeError(stagedFiles);
+    if (sizeError) {
+      setHostedNotice(sizeError);
       return;
     }
 

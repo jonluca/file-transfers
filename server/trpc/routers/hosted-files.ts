@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { and, desc, eq, gt, inArray, sql } from "drizzle-orm";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
+import { getHostedUploadSizeError } from "../../../lib/file-transfer/hosted-upload-limits";
 import { createHostedShareToken } from "../../hosted-share-token";
 import { hostedFile, subscriptionMembership } from "../../db/schema";
 import { serverEnv } from "../../env";
@@ -14,7 +15,6 @@ import {
 } from "../../storage/hosted-storage";
 import { protectedProcedure, router } from "../trpc";
 
-const MAX_HOSTED_FILE_SIZE_BYTES = 10 * 1024 * 1024 * 1024;
 const MAX_ACTIVE_STORAGE_BYTES = 100 * 1024 * 1024 * 1024;
 const MAX_ACTIVE_STORAGE_BYTES_BIGINT = BigInt(MAX_ACTIVE_STORAGE_BYTES);
 const DEFAULT_EXPIRY_MILLISECONDS = 30 * 24 * 60 * 60 * 1000;
@@ -179,7 +179,7 @@ export const hostedFilesRouter = router({
       z.object({
         fileName: z.string().min(1).max(255),
         mimeType: z.string().min(1).max(255),
-        sizeBytes: z.number().int().positive().max(MAX_HOSTED_FILE_SIZE_BYTES),
+        sizeBytes: z.number().int().positive(),
         passcode: z
           .string()
           .regex(/^\d{6}$/)
@@ -187,6 +187,10 @@ export const hostedFilesRouter = router({
       }),
     )
     .mutation(async ({ ctx, input }) => {
+      const sizeError = getHostedUploadSizeError([input]);
+      if (sizeError) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: sizeError });
+      }
       await requirePremium(ctx);
       assertValidPasscode(input.passcode);
 
